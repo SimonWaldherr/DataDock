@@ -1,0 +1,2096 @@
+package main
+
+import (
+	"archive/zip"
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/csv"
+	"encoding/json"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"html/template"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	dbimporter "github.com/SimonWaldherr/datadock/internal/importer"
+	dbjobs "github.com/SimonWaldherr/datadock/internal/jobs"
+	"github.com/SimonWaldherr/datadock/internal/resultutil"
+	"github.com/SimonWaldherr/datadock/internal/standards"
+	tinysql "github.com/SimonWaldherr/tinySQL"
+)
+
+// newApp constructs an App value.
+func newApp(nativeDB *tinysql.DB, sqlDB *sql.DB, tenant string, tpl *template.Template) *App {
+	defaultConn := &DBConnection{
+		ID:      defaultConnectionID,
+		Name:    "tinySQL",
+		Kind:    "tinysql",
+		Dialect: DialectProfileForName("tinysql"),
+		DB:      sqlDB,
+		Native:  nativeDB,
+	}
+	return &App{
+		nativeDB:       nativeDB,
+		sqlDB:          sqlDB,
+		tenant:         tenant,
+		tpl:            tpl,
+		dialect:        DialectProfileForName("tinysql"),
+		conns:          NewConnectionManager(defaultConn),
+		connectTimeout: 10 * time.Second,
+		queryTimeout:   60 * time.Second,
+		llmConfig:      LLMConfig{Timeout: 45 * time.Second},
+	}
+}
+
+// registerRoutes wires up all HTTP routes.
+func (a *App) registerRoutes(mux *http.ServeMux) {
+	handle := func(pattern string, handler http.HandlerFunc) {
+		mux.HandleFunc(pattern, a.withSession(handler))
+	}
+
+	handle("GET /", a.indexHandler)
+
+	// Table datasheet view.
+	handle("GET /t/{table}", a.tableViewHandler)
+	handle("GET /t/{table}/export", a.exportTableHandler)
+
+	// Record CRUD.
+	handle("GET /t/{table}/new", a.newRecordFormHandler)
+	handle("POST /t/{table}/new", a.createRecordHandler)
+	handle("GET /t/{table}/{id}/edit", a.editRecordFormHandler)
+	handle("POST /t/{table}/{id}/edit", a.updateRecordHandler)
+	handle("POST /t/{table}/{id}/delete", a.deleteRecordHandler)
+
+	// Table management.
+	handle("GET /connections", a.connectionsHandler)
+	handle("POST /connections", a.addConnectionHandler)
+	handle("POST /connections/active", a.setActiveConnectionHandler)
+	handle("GET /admin", a.adminHandler)
+	handle("POST /admin/settings", a.adminSettingsHandler)
+	handle("GET /jobs", a.jobsHandler)
+	handle("GET /migrate", a.migrationHandler)
+	handle("POST /migrate", a.runMigrationHandler)
+	handle("GET /create-table", a.createTableFormHandler)
+	handle("POST /create-table", a.createTableHandler)
+	handle("GET /import", a.importFormHandler)
+	handle("POST /import", a.importFileHandler)
+	handle("POST /demo-data", a.demoDataHandler)
+	handle("GET /guide", a.guideHandler)
+	handle("POST /drop-table/{table}", a.dropTableHandler)
+
+	// SQL query editor.
+	handle("GET /query", a.queryEditorHandler)
+	handle("POST /query", a.queryExecHandler)
+
+	// JSON API used by the query editor for async execution.
+	handle("POST /api/query", a.apiQueryHandler)
+	handle("POST /api/export", a.apiExportHandler)
+	handle("GET /api/schema", a.apiSchemaHandler)
+	handle("GET /api/admin/status", a.apiAdminStatusHandler)
+	handle("GET /api/admin/settings", a.apiAdminSettingsHandler)
+	handle("POST /api/admin/settings", a.apiAdminSettingsHandler)
+	handle("GET /api/jobs", a.apiJobsHandler)
+	handle("POST /api/jobs", a.apiJobsHandler)
+	handle("POST /api/jobs/run", a.apiRunJobHandler)
+	handle("POST /api/import", a.apiImportHandler)
+	handle("POST /api/llm", a.apiLLMHandler)
+	handle("GET /api/llm/discover", a.apiLLMDiscoverHandler)
+	handle("POST /api/llm/autoconfig", a.apiLLMAutoConfigHandler)
+	handle("GET /api/llm/health", a.apiLLMHealthHandler)
+	handle("POST /api/llm/run", a.apiLLMRunHandler)
+}
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data map[string]interface{}) {
+	objects := a.tableObjects(r.Context())
+	data["Tables"] = a.tableNames(r.Context())
+	data["TableObjects"] = objects
+	if a.conns != nil {
+		sessionID := sessionIDFromContext(r.Context())
+		data["Connections"] = a.conns.ListFor(sessionID)
+		data["ActiveConnection"] = a.activeConn(r.Context())
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := a.tpl.ExecuteTemplate(w, name, data); err != nil {
+		http.Error(w, "template error: "+err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (a *App) serverError(w http.ResponseWriter, err error) {
+	http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
+}
+
+func (a *App) renderObjectMissing(w http.ResponseWriter, r *http.Request, name string, err error) {
+	w.WriteHeader(http.StatusNotFound)
+	detail := "The table or view may have been dropped, renamed, or is not available on the active connection."
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		detail = err.Error()
+	}
+	a.render(w, r, "object_missing", map[string]interface{}{
+		"ObjectName": name,
+		"Detail":     detail,
+	})
+}
+
+func isMissingDBObjectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "no such table") ||
+		strings.Contains(msg, "doesn't exist") ||
+		strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "unknown table") ||
+		strings.Contains(msg, "invalid object name")
+}
+
+func (a *App) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", standards.MediaTypeJSON)
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (a *App) writeProblem(w http.ResponseWriter, r *http.Request, status int, title, detail string) {
+	standards.WriteProblem(w, standards.NewProblem(status, title, detail, r.URL.Path))
+}
+
+func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]string, format, filenameBase string) bool {
+	filenameBase = safeExportFilenameBase(filenameBase)
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "", "csv":
+		w.Header().Set("Content-Type", standards.MediaTypeCSV)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.csv"`, filenameBase))
+		cw := csv.NewWriter(w)
+		_ = cw.Write(columns)
+		for _, row := range rows {
+			_ = cw.Write(row)
+		}
+		cw.Flush()
+		return true
+	case "tsv":
+		w.Header().Set("Content-Type", standards.MediaTypeTSV)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.tsv"`, filenameBase))
+		cw := csv.NewWriter(w)
+		cw.Comma = '\t'
+		_ = cw.Write(columns)
+		for _, row := range rows {
+			_ = cw.Write(row)
+		}
+		cw.Flush()
+		return true
+	case "json":
+		w.Header().Set("Content-Type", standards.MediaTypeJSON)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.json"`, filenameBase))
+		records := make([]map[string]string, 0, len(rows))
+		for _, row := range rows {
+			record := make(map[string]string, len(columns))
+			for i, col := range columns {
+				if i < len(row) {
+					record[col] = row[i]
+				} else {
+					record[col] = ""
+				}
+			}
+			records = append(records, record)
+		}
+		_ = json.NewEncoder(w).Encode(records)
+		return true
+	case "xml":
+		w.Header().Set("Content-Type", standards.MediaTypeXML)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.xml"`, filenameBase))
+		_, _ = w.Write([]byte(xml.Header))
+		_ = xml.NewEncoder(w).Encode(exportXMLDocument(columns, rows))
+		return true
+	case "xlsx":
+		w.Header().Set("Content-Type", standards.MediaTypeXLSX)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.xlsx"`, filenameBase))
+		return writeXLSX(w, columns, rows) == nil
+	default:
+		return false
+	}
+}
+
+type exportXMLDoc struct {
+	XMLName xml.Name       `xml:"result"`
+	Columns []string       `xml:"columns>column"`
+	Rows    []exportXMLRow `xml:"rows>row"`
+}
+
+type exportXMLRow struct {
+	Cells []exportXMLCell `xml:"cell"`
+}
+
+type exportXMLCell struct {
+	Name  string `xml:"name,attr"`
+	Value string `xml:",chardata"`
+}
+
+func exportXMLDocument(columns []string, rows [][]string) exportXMLDoc {
+	doc := exportXMLDoc{Columns: columns, Rows: make([]exportXMLRow, 0, len(rows))}
+	for _, row := range rows {
+		out := exportXMLRow{Cells: make([]exportXMLCell, 0, len(columns))}
+		for i, col := range columns {
+			cell := exportXMLCell{Name: col}
+			if i < len(row) {
+				cell.Value = row[i]
+			}
+			out.Cells = append(out.Cells, cell)
+		}
+		doc.Rows = append(doc.Rows, out)
+	}
+	return doc
+}
+
+func writeXLSX(w http.ResponseWriter, columns []string, rows [][]string) error {
+	zw := zip.NewWriter(w)
+	files := map[string]string{
+		"[Content_Types].xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+			`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
+			`<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
+			`<Default Extension="xml" ContentType="application/xml"/>` +
+			`<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>` +
+			`<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>` +
+			`<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>` +
+			`</Types>`,
+		"_rels/.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+			`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+			`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>` +
+			`</Relationships>`,
+		"xl/_rels/workbook.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+			`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+			`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>` +
+			`<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>` +
+			`</Relationships>`,
+		"xl/workbook.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+			`<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
+			`<sheets><sheet name="Result" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+		"xl/styles.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+			`<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>`,
+		"xl/worksheets/sheet1.xml": xlsxSheetXML(columns, rows),
+	}
+	order := []string{
+		"[Content_Types].xml",
+		"_rels/.rels",
+		"xl/workbook.xml",
+		"xl/_rels/workbook.xml.rels",
+		"xl/styles.xml",
+		"xl/worksheets/sheet1.xml",
+	}
+	for _, name := range order {
+		fw, err := zw.Create(name)
+		if err != nil {
+			_ = zw.Close()
+			return err
+		}
+		if _, err := fw.Write([]byte(files[name])); err != nil {
+			_ = zw.Close()
+			return err
+		}
+	}
+	return zw.Close()
+}
+
+func xlsxSheetXML(columns []string, rows [][]string) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`)
+	b.WriteString(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>`)
+	writeXLSXRow(&b, 1, columns)
+	for i, row := range rows {
+		writeXLSXRow(&b, i+2, row)
+	}
+	b.WriteString(`</sheetData></worksheet>`)
+	return b.String()
+}
+
+func writeXLSXRow(b *strings.Builder, rowNum int, values []string) {
+	b.WriteString(`<row r="`)
+	b.WriteString(strconv.Itoa(rowNum))
+	b.WriteString(`">`)
+	for i, value := range values {
+		b.WriteString(`<c r="`)
+		b.WriteString(xlsxCellRef(i+1, rowNum))
+		b.WriteString(`" t="inlineStr"><is><t>`)
+		b.WriteString(xmlText(value))
+		b.WriteString(`</t></is></c>`)
+	}
+	b.WriteString(`</row>`)
+}
+
+func xlsxCellRef(col, row int) string {
+	var letters []byte
+	for col > 0 {
+		col--
+		letters = append([]byte{byte('A' + col%26)}, letters...)
+		col /= 26
+	}
+	return string(letters) + strconv.Itoa(row)
+}
+
+func xmlText(s string) string {
+	var b bytes.Buffer
+	_ = xml.EscapeText(&b, []byte(s))
+	return b.String()
+}
+
+func safeExportFilenameBase(name string) string {
+	name = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		case r == '_', r == '-', r == '.':
+			return r
+		default:
+			return '_'
+		}
+	}, strings.TrimSpace(name))
+	if name == "" {
+		return "export"
+	}
+	return name
+}
+
+func connectionErrorMessage(err error, timeout time.Duration) string {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return fmt.Sprintf("Could not connect within %s. Check host, port, firewall/VPN, DNS, TLS settings, and database credentials.", timeout)
+	}
+	return "Could not connect: " + err.Error()
+}
+
+// ─── route handlers ───────────────────────────────────────────────────────────
+
+// indexHandler redirects to the first table or the query editor.
+func (a *App) indexHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	names := a.tableNames(r.Context())
+	if len(names) > 0 {
+		http.Redirect(w, r, "/t/"+url.PathEscape(names[0]), http.StatusSeeOther)
+		return
+	}
+	a.render(w, r, "index", map[string]interface{}{})
+}
+
+// tableViewHandler renders the datasheet for a table.
+func (a *App) tableViewHandler(w http.ResponseWriter, r *http.Request) {
+	tableName := r.PathValue("table")
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	sort := r.URL.Query().Get("sort")
+	sortDir := r.URL.Query().Get("dir")
+	if sortDir != "asc" && sortDir != "desc" {
+		sortDir = "asc"
+	}
+
+	meta, err := a.tableMeta(r.Context(), tableName)
+	if err != nil {
+		if isMissingDBObjectError(err) {
+			a.renderObjectMissing(w, r, tableName, err)
+			return
+		}
+		a.serverError(w, err)
+		return
+	}
+
+	// Build a sorted query if requested. Pass meta so the function can use the
+	// DB-sourced table name and validated column list.
+	cols, rows, err := a.tableRowsSorted(r, page, sort, sortDir, meta)
+	if err != nil {
+		if isMissingDBObjectError(err) {
+			a.renderObjectMissing(w, r, tableName, err)
+			return
+		}
+		a.serverError(w, err)
+		return
+	}
+
+	totalPages := 1
+	if meta.RowCount > pageSize {
+		totalPages = (meta.RowCount + pageSize - 1) / pageSize
+	}
+
+	a.render(w, r, "table_view", map[string]interface{}{
+		"Table":      meta.Name, // DB-sourced canonical name
+		"Meta":       meta,
+		"Cols":       cols,
+		"Rows":       rows,
+		"Page":       page,
+		"TotalPages": totalPages,
+		"Sort":       sort,
+		"SortDir":    sortDir,
+	})
+}
+
+// exportTableHandler streams a full table export as CSV or JSON.
+func (a *App) exportTableHandler(w http.ResponseWriter, r *http.Request) {
+	tableName := r.PathValue("table")
+	meta, err := a.tableMeta(r.Context(), tableName)
+	if err != nil {
+		a.renderObjectMissing(w, r, tableName, err)
+		return
+	}
+
+	conn := a.activeConn(r.Context())
+	cols, rows, err := a.queryRows(r.Context(), "SELECT * FROM "+conn.QuoteIdent(meta.Name))
+	if err != nil {
+		if isMissingDBObjectError(err) {
+			a.renderObjectMissing(w, r, tableName, err)
+			return
+		}
+		a.serverError(w, err)
+		return
+	}
+	if ok := a.writeExport(w, cols, rows, r.URL.Query().Get("format"), meta.Name); !ok {
+		http.Error(w, "unsupported export format", http.StatusBadRequest)
+	}
+}
+
+func (a *App) connectionsHandler(w http.ResponseWriter, r *http.Request) {
+	a.render(w, r, "connections", map[string]interface{}{})
+}
+
+func (a *App) importFormHandler(w http.ResponseWriter, r *http.Request) {
+	a.render(w, r, "import", map[string]interface{}{})
+}
+
+func (a *App) guideHandler(w http.ResponseWriter, r *http.Request) {
+	a.render(w, r, "guide", map[string]interface{}{})
+}
+
+func (a *App) adminHandler(w http.ResponseWriter, r *http.Request) {
+	a.render(w, r, "admin", map[string]interface{}{
+		"Status":   a.adminStatus(r.Context()),
+		"Settings": a.runtimeSettingsView(),
+	})
+}
+
+func (a *App) adminSettingsHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	settings, err := runtimeSettingsFromForm(r)
+	if err == nil && strings.TrimSpace(r.Form.Get("llm_api_key")) == "" {
+		settings.LLMAPIKey = a.currentLLMAPIKey()
+	}
+	if err == nil {
+		err = a.applyRuntimeSettings(settings)
+	}
+	if err == nil {
+		err = a.saveRuntimeSettings(r.Context())
+	}
+	data := map[string]interface{}{
+		"Status":   a.adminStatus(r.Context()),
+		"Settings": a.runtimeSettingsView(),
+	}
+	if err != nil {
+		data["Error"] = err.Error()
+		a.render(w, r, "admin", data)
+		return
+	}
+	data["Success"] = "Settings updated."
+	a.render(w, r, "admin", data)
+}
+
+func (a *App) jobsHandler(w http.ResponseWriter, r *http.Request) {
+	a.render(w, r, "jobs", map[string]interface{}{
+		"Jobs":    a.nativeDB.Catalog().ListJobs(),
+		"History": a.nativeDB.Catalog().ListJobHistory(),
+	})
+}
+
+func (a *App) addConnectionHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id := r.Form.Get("id")
+	name := r.Form.Get("name")
+	kind := r.Form.Get("kind")
+	dsn := r.Form.Get("dsn")
+	saveConnection := r.Form.Get("save") != ""
+	setDefault := r.Form.Get("set_default") != ""
+	ctx, cancel := a.withConnectTimeout(r.Context())
+	defer cancel()
+	conn, err := OpenManagedConnection(ctx, id, name, kind, dsn)
+	if err != nil {
+		a.render(w, r, "connections", map[string]interface{}{"Error": connectionErrorMessage(err, a.currentConnectTimeout())})
+		return
+	}
+	if err := a.conns.Add(conn); err != nil {
+		_ = conn.DB.Close()
+		a.render(w, r, "connections", map[string]interface{}{"Error": err.Error()})
+		return
+	}
+	if setDefault {
+		if err := a.conns.SetDefault(conn.ID); err != nil {
+			a.render(w, r, "connections", map[string]interface{}{"Error": err.Error()})
+			return
+		}
+	}
+	_ = a.conns.SetActiveFor(sessionIDFromContext(r.Context()), conn.ID)
+	if saveConnection || setDefault {
+		if err := a.saveManagedConnections(r.Context()); err != nil {
+			a.render(w, r, "connections", map[string]interface{}{"Error": "Connection added but could not be saved: " + err.Error()})
+			return
+		}
+	}
+	http.Redirect(w, r, "/connections", http.StatusSeeOther)
+}
+
+func (a *App) setActiveConnectionHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := a.conns.SetActiveFor(sessionIDFromContext(r.Context()), r.Form.Get("id")); err != nil {
+		a.render(w, r, "connections", map[string]interface{}{"Error": err.Error()})
+		return
+	}
+	if r.Form.Get("set_default") != "" {
+		if err := a.conns.SetDefault(r.Form.Get("id")); err != nil {
+			a.render(w, r, "connections", map[string]interface{}{"Error": err.Error()})
+			return
+		}
+		if err := a.saveManagedConnections(r.Context()); err != nil {
+			a.render(w, r, "connections", map[string]interface{}{"Error": "Default changed but could not be saved: " + err.Error()})
+			return
+		}
+	}
+	http.Redirect(w, r, "/connections", http.StatusSeeOther)
+}
+
+func (a *App) migrationHandler(w http.ResponseWriter, r *http.Request) {
+	data := a.migrationPageData(r)
+	a.render(w, r, "migrate", data)
+}
+
+func (a *App) runMigrationHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	sourceID := r.Form.Get("source_id")
+	targetID := r.Form.Get("target_id")
+	sourceTable := r.Form.Get("source_table")
+	targetTable := r.Form.Get("target_table")
+	createTarget := r.Form.Get("create_target") == "on"
+
+	summary, err := a.migrateTable(r.Context(), sourceID, targetID, sourceTable, targetTable, createTarget)
+	data := a.migrationPageData(r)
+	data["SelectedSourceID"] = sourceID
+	data["SelectedTargetID"] = targetID
+	data["SourceTable"] = sourceTable
+	data["TargetTable"] = targetTable
+	data["CreateTarget"] = createTarget
+	if source := a.conns.Get(sourceID); source != nil {
+		data["SourceTables"] = a.tableNames(contextWithActiveConnection(r.Context(), source))
+	}
+	if err != nil {
+		data["Error"] = err.Error()
+		a.render(w, r, "migrate", data)
+		return
+	}
+	data["Summary"] = summary
+	data["Success"] = fmt.Sprintf("Migrated %d rows from %s to %s.", summary.Rows, summary.SourceTable, summary.TargetTable)
+	a.render(w, r, "migrate", data)
+}
+
+func (a *App) migrationPageData(r *http.Request) map[string]interface{} {
+	sessionID := sessionIDFromContext(r.Context())
+	active := a.activeConn(r.Context())
+	sourceID := strings.TrimSpace(r.URL.Query().Get("source"))
+	if sourceID == "" && active != nil {
+		sourceID = active.ID
+	}
+	targetID := strings.TrimSpace(r.URL.Query().Get("target"))
+	if targetID == "" {
+		targetID = defaultConnectionID
+	}
+
+	data := map[string]interface{}{
+		"Connections":        a.conns.ListFor(sessionID),
+		"SelectedSourceID":   sourceID,
+		"SelectedTargetID":   targetID,
+		"CreateTarget":       true,
+		"TargetTable":        strings.TrimSpace(r.URL.Query().Get("target_table")),
+		"MigrationMaxTables": maxRAGTables,
+	}
+	if source := a.conns.Get(sourceID); source != nil {
+		ctx := contextWithActiveConnection(r.Context(), source)
+		data["SourceTables"] = a.tableNames(ctx)
+	}
+	return data
+}
+
+// tableRowsSorted fetches a page of rows, optionally sorted by a known column.
+// meta must already be validated (obtained from a.tableMeta). The SQL query is
+// built entirely from DB-sourced values (meta.Name, validated column names).
+func (a *App) tableRowsSorted(r *http.Request, page int, sortCol, dir string, meta TableMeta) ([]Column, [][]string, error) {
+	if page < 1 {
+		page = 1
+	}
+	offset := (page - 1) * pageSize
+
+	conn := a.activeConn(r.Context())
+	// Resolve the sort column to its DB-sourced name to avoid using raw user
+	// input in the SQL query. An unrecognised sort parameter is silently ignored.
+	orderClause := ""
+	if sortCol != "" {
+		var canonical string
+		for _, col := range meta.Columns {
+			if col.Name == sortCol {
+				canonical = col.Name // value from the DB schema, not from user
+				break
+			}
+		}
+		if canonical != "" {
+			orderClause = canonical
+		}
+	}
+
+	query := conn.selectPageSQL(meta.Name, orderClause, dir, pageSize, offset)
+
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	rows, err := conn.DB.QueryContext(ctx, query)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, nil, err
+	}
+	cols := make([]Column, len(colTypes))
+	for i, ct := range colTypes {
+		cols[i] = Column{Name: ct.Name(), TypeName: ct.DatabaseTypeName()}
+	}
+
+	var result [][]string
+	for rows.Next() {
+		vals := make([]interface{}, len(cols))
+		ptrs := make([]interface{}, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, nil, err
+		}
+		row := make([]string, len(cols))
+		for i, v := range vals {
+			row[i] = anyToString(v)
+		}
+		result = append(result, row)
+	}
+	return cols, result, rows.Err()
+}
+
+// newRecordFormHandler renders a blank form for creating a record.
+func (a *App) newRecordFormHandler(w http.ResponseWriter, r *http.Request) {
+	tableName := r.PathValue("table")
+	meta, err := a.tableMeta(r.Context(), tableName)
+	if err != nil {
+		if isMissingDBObjectError(err) {
+			a.renderObjectMissing(w, r, tableName, err)
+			return
+		}
+		a.serverError(w, err)
+		return
+	}
+	a.render(w, r, "record_form", map[string]interface{}{
+		"Table":  meta.Name, // canonical name from DB
+		"Meta":   meta,
+		"Values": map[string]string{},
+		"IsNew":  true,
+	})
+}
+
+// createRecordHandler stores a new record.
+func (a *App) createRecordHandler(w http.ResponseWriter, r *http.Request) {
+	tableName := r.PathValue("table")
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	meta, err := a.tableMeta(r.Context(), tableName)
+	if err != nil {
+		if isMissingDBObjectError(err) {
+			a.renderObjectMissing(w, r, tableName, err)
+			return
+		}
+		a.serverError(w, err)
+		return
+	}
+
+	values := make(map[string]string, len(meta.Columns))
+	for _, col := range meta.Columns {
+		if !strings.EqualFold(col.Name, "id") {
+			values[col.Name] = r.Form.Get(col.Name)
+		}
+	}
+
+	if err := a.insertRecord(r.Context(), meta.Name, values, meta.Columns); err != nil {
+		a.render(w, r, "record_form", map[string]interface{}{
+			"Table":  meta.Name,
+			"Meta":   meta,
+			"Values": values,
+			"IsNew":  true,
+			"Error":  err.Error(),
+		})
+		return
+	}
+	http.Redirect(w, r, "/t/"+url.PathEscape(meta.Name), http.StatusSeeOther)
+}
+
+// editRecordFormHandler renders a pre-populated edit form.
+func (a *App) editRecordFormHandler(w http.ResponseWriter, r *http.Request) {
+	tableName := r.PathValue("table")
+	id := r.PathValue("id")
+
+	meta, err := a.tableMeta(r.Context(), tableName)
+	if err != nil {
+		if isMissingDBObjectError(err) {
+			a.renderObjectMissing(w, r, tableName, err)
+			return
+		}
+		a.serverError(w, err)
+		return
+	}
+	if !meta.HasID {
+		http.Error(w, "table has no id column", http.StatusBadRequest)
+		return
+	}
+
+	cols, row, err := a.getRecord(r.Context(), meta.Name, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		if isMissingDBObjectError(err) {
+			a.renderObjectMissing(w, r, tableName, err)
+			return
+		}
+		a.serverError(w, err)
+		return
+	}
+
+	values := make(map[string]string, len(cols))
+	for i, col := range cols {
+		values[col.Name] = row[i]
+	}
+
+	a.render(w, r, "record_form", map[string]interface{}{
+		"Table":  meta.Name,
+		"Meta":   meta,
+		"Values": values,
+		"ID":     id,
+		"IsNew":  false,
+	})
+}
+
+// updateRecordHandler saves changes to an existing record.
+func (a *App) updateRecordHandler(w http.ResponseWriter, r *http.Request) {
+	tableName := r.PathValue("table")
+	id := r.PathValue("id")
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	meta, err := a.tableMeta(r.Context(), tableName)
+	if err != nil {
+		if isMissingDBObjectError(err) {
+			a.renderObjectMissing(w, r, tableName, err)
+			return
+		}
+		a.serverError(w, err)
+		return
+	}
+
+	values := make(map[string]string, len(meta.Columns))
+	for _, col := range meta.Columns {
+		if !strings.EqualFold(col.Name, "id") {
+			values[col.Name] = r.Form.Get(col.Name)
+		}
+	}
+
+	if err := a.updateRecord(r.Context(), meta.Name, id, values, meta.Columns); err != nil {
+		a.render(w, r, "record_form", map[string]interface{}{
+			"Table":  meta.Name,
+			"Meta":   meta,
+			"Values": values,
+			"ID":     id,
+			"IsNew":  false,
+			"Error":  err.Error(),
+		})
+		return
+	}
+	http.Redirect(w, r, "/t/"+url.PathEscape(meta.Name), http.StatusSeeOther)
+}
+
+// deleteRecordHandler deletes a record by id.
+func (a *App) deleteRecordHandler(w http.ResponseWriter, r *http.Request) {
+	tableName := r.PathValue("table")
+	meta, err := a.tableMeta(r.Context(), tableName)
+	if err != nil {
+		if isMissingDBObjectError(err) {
+			a.renderObjectMissing(w, r, tableName, err)
+			return
+		}
+		a.serverError(w, err)
+		return
+	}
+	if err := a.deleteRecord(r.Context(), meta.Name, r.PathValue("id")); err != nil {
+		a.serverError(w, err)
+		return
+	}
+	http.Redirect(w, r, "/t/"+url.PathEscape(meta.Name), http.StatusSeeOther)
+}
+
+// createTableFormHandler renders the table-design wizard.
+func (a *App) createTableFormHandler(w http.ResponseWriter, r *http.Request) {
+	a.render(w, r, "create_table", map[string]interface{}{})
+}
+
+// createTableHandler executes the CREATE TABLE DDL.
+func (a *App) createTableHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	tableName := strings.TrimSpace(r.Form.Get("table_name"))
+	if tableName == "" {
+		a.render(w, r, "create_table", map[string]interface{}{"Error": "Table name is required."})
+		return
+	}
+	if !isValidIdentifier(tableName) {
+		a.render(w, r, "create_table", map[string]interface{}{
+			"Error": "Table name may only contain letters, digits, and underscores.",
+		})
+		return
+	}
+	// Re-derive table name from validated characters only to break the taint
+	// path: at this point every character in tableName is [a-zA-Z0-9_], so
+	// the result is identical to tableName, but the data no longer carries
+	// a taint from the raw user input as far as static analysis is concerned.
+	safeTableName := sanitizeIdentifier(tableName)
+
+	colNames := r.Form["col_name"]
+	colTypes := r.Form["col_type"]
+	if len(colNames) == 0 {
+		a.render(w, r, "create_table", map[string]interface{}{"Error": "At least one column is required."})
+		return
+	}
+
+	// Build the column list; always prepend `id INT` as the primary key.
+	defs := []string{"id INT"}
+	for i, name := range colNames {
+		name = strings.TrimSpace(name)
+		if name == "" || strings.EqualFold(name, "id") {
+			continue
+		}
+		if !isValidIdentifier(name) {
+			a.render(w, r, "create_table", map[string]interface{}{
+				"Error": fmt.Sprintf("Column name %q may only contain letters, digits, and underscores.", name),
+			})
+			return
+		}
+		// Re-derive column name via the same sanitization path.
+		safeName := sanitizeIdentifier(name)
+		t := "TEXT"
+		if i < len(colTypes) {
+			switch strings.ToUpper(colTypes[i]) {
+			case "INT", "INTEGER":
+				t = "INT"
+			case "REAL", "FLOAT", "DOUBLE":
+				t = "FLOAT"
+			case "BOOL", "BOOLEAN":
+				t = "BOOL"
+			default:
+				t = "TEXT"
+			}
+		}
+		defs = append(defs, a.activeConn(r.Context()).QuoteIdent(safeName)+" "+t)
+	}
+
+	conn := a.activeConn(r.Context())
+	ddl := fmt.Sprintf("CREATE TABLE %s (%s)", conn.QuoteIdent(safeTableName), strings.Join(defs, ", "))
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	if _, err := conn.DB.ExecContext(ctx, ddl); err != nil {
+		a.render(w, r, "create_table", map[string]interface{}{
+			"Error":     "Could not create table: " + err.Error(),
+			"TableName": safeTableName,
+		})
+		return
+	}
+	http.Redirect(w, r, "/t/"+url.PathEscape(safeTableName), http.StatusSeeOther)
+}
+
+func (a *App) importFileHandler(w http.ResponseWriter, r *http.Request) {
+	if conn := a.activeConn(r.Context()); conn != nil && !conn.IsTinySQL() {
+		a.render(w, r, "import", map[string]interface{}{"Error": "File import currently targets the local tinySQL DB only."})
+		return
+	}
+	if err := r.ParseMultipartForm(16 << 20); err != nil {
+		a.render(w, r, "import", map[string]interface{}{"Error": "Could not read upload: " + err.Error()})
+		return
+	}
+	table := strings.TrimSpace(r.Form.Get("table"))
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		a.render(w, r, "import", map[string]interface{}{"Error": "Choose a file to import."})
+		return
+	}
+	defer file.Close()
+
+	if table == "" {
+		table = tableNameFromFilename(header.Filename)
+	}
+	if !isValidIdentifier(table) {
+		a.render(w, r, "import", map[string]interface{}{"Error": "Table name may only contain letters, digits, and underscores."})
+		return
+	}
+	table = sanitizeIdentifier(table)
+
+	content, err := io.ReadAll(io.LimitReader(file, 16<<20))
+	if err != nil {
+		a.render(w, r, "import", map[string]interface{}{"Error": "Could not read upload: " + err.Error()})
+		return
+	}
+	format := importFormatFromName(header.Filename, r.Form.Get("format"))
+	if format == "xlsx" {
+		content, err = xlsxToCSV(content)
+		if err != nil {
+			a.render(w, r, "import", map[string]interface{}{"Error": "Could not read XLSX file: " + err.Error()})
+			return
+		}
+		format = "csv"
+	}
+	opts := &dbimporter.ImportOptions{
+		CreateTable:         true,
+		HeaderMode:          strings.TrimSpace(r.Form.Get("header_mode")),
+		TypeInference:       true,
+		DelimiterCandidates: nil,
+	}
+	if opts.HeaderMode == "" {
+		opts.HeaderMode = "auto"
+	}
+	if format == "tsv" {
+		opts.DelimiterCandidates = []rune{'\t'}
+		format = "csv"
+	}
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	res, err := importContent(ctx, a.nativeDB, a.tenant, table, format, bytes.NewReader(content), opts)
+	if err != nil {
+		a.render(w, r, "import", map[string]interface{}{"Error": "Import failed: " + err.Error(), "TableName": table})
+		return
+	}
+	a.render(w, r, "import", map[string]interface{}{
+		"Success": fmt.Sprintf("Imported %d rows into %s.", res.RowsInserted, table),
+		"Table":   table,
+		"Result":  res,
+	})
+}
+
+func (a *App) demoDataHandler(w http.ResponseWriter, r *http.Request) {
+	if conn := a.activeConn(r.Context()); conn != nil && !conn.IsTinySQL() {
+		a.render(w, r, "index", map[string]interface{}{"Error": "Demo data can only be imported into the local tinySQL database."})
+		return
+	}
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	for _, stmt := range demoDataStatements() {
+		result := a.executeTinySQL(ctx, stmt)
+		if result.Err != "" && !strings.HasPrefix(stmt, "DROP TABLE ") {
+			a.render(w, r, "index", map[string]interface{}{"Error": "Could not import demo data: " + result.Err})
+			return
+		}
+	}
+	http.Redirect(w, r, "/t/datadock_demo_people", http.StatusSeeOther)
+}
+
+func demoDataStatements() []string {
+	type department struct {
+		id     int
+		name   string
+		region string
+		budget int
+	}
+	type person struct {
+		id           int
+		name         string
+		role         string
+		departmentID int
+		city         string
+		hiredOn      string
+	}
+	type project struct {
+		id           int
+		name         string
+		status       string
+		ownerID      int
+		departmentID int
+		startDate    string
+		dueDate      string
+		budget       int
+	}
+	type event struct {
+		id        int
+		projectID int
+		kind      string
+		date      string
+		amount    int
+		severity  string
+	}
+	type invoice struct {
+		id        int
+		projectID int
+		customer  string
+		date      string
+		status    string
+		amount    int
+	}
+	type ticket struct {
+		id        int
+		projectID int
+		openedBy  int
+		priority  string
+		status    string
+		openedOn  string
+		closedOn  string
+	}
+
+	departments := []department{
+		{1, "Platform", "EMEA", 640000},
+		{2, "Analytics", "Americas", 520000},
+		{3, "Operations", "EMEA", 410000},
+		{4, "Customer Success", "APAC", 360000},
+		{5, "Finance", "Americas", 300000},
+	}
+	people := []person{
+		{1, "Ada Lovelace", "Data Analyst", 2, "London", "2021-03-15"},
+		{2, "Grace Hopper", "Principal Engineer", 1, "New York", "2020-07-01"},
+		{3, "Katherine Johnson", "Operations Scientist", 3, "Hampton", "2022-01-10"},
+		{4, "Hedy Lamarr", "Product Strategist", 4, "Vienna", "2021-09-20"},
+		{5, "Dorothy Vaughan", "Team Lead", 2, "Washington", "2019-11-05"},
+		{6, "Mary Jackson", "Systems Engineer", 1, "Hampton", "2022-06-13"},
+		{7, "Margaret Hamilton", "Reliability Engineer", 1, "Boston", "2020-02-24"},
+		{8, "Radia Perlman", "Network Architect", 3, "Seattle", "2023-04-03"},
+		{9, "Evelyn Boyd Granville", "Finance Analyst", 5, "Los Angeles", "2022-10-17"},
+		{10, "Annie Easley", "Support Engineer", 4, "Cleveland", "2023-08-28"},
+	}
+	projects := []project{
+		{1, "Migration Pilot", "active", 2, 1, "2026-01-08", "2026-08-30", 180000},
+		{2, "Revenue Model", "planned", 1, 5, "2026-04-01", "2026-10-15", 95000},
+		{3, "Ops Dashboard", "active", 3, 3, "2026-02-14", "2026-07-31", 125000},
+		{4, "Retention Signals", "active", 4, 4, "2026-03-05", "2026-09-10", 110000},
+		{5, "Data Quality Sweep", "blocked", 5, 2, "2026-01-22", "2026-06-28", 70000},
+		{6, "Edge Sync", "active", 8, 1, "2026-05-12", "2026-12-18", 210000},
+		{7, "Forecast Review", "done", 9, 5, "2025-11-01", "2026-03-15", 80000},
+		{8, "Support Triage AI", "planned", 10, 4, "2026-07-01", "2026-11-30", 99000},
+	}
+	events := []event{
+		{1, 1, "imported_rows", "2026-01-12", 1280, "info"},
+		{2, 1, "warnings", "2026-01-12", 4, "low"},
+		{3, 1, "transformed_rows", "2026-02-03", 1175, "info"},
+		{4, 2, "forecast", "2026-04-12", 42000, "info"},
+		{5, 2, "variance", "2026-04-18", 6100, "medium"},
+		{6, 3, "queries", "2026-02-20", 87, "info"},
+		{7, 3, "alerts", "2026-03-01", 6, "medium"},
+		{8, 3, "resolved_alerts", "2026-03-09", 5, "low"},
+		{9, 4, "survey_responses", "2026-03-20", 340, "info"},
+		{10, 4, "churn_risk_accounts", "2026-04-02", 18, "high"},
+		{11, 5, "duplicate_records", "2026-02-14", 211, "high"},
+		{12, 5, "fixed_records", "2026-03-18", 164, "medium"},
+		{13, 6, "sync_jobs", "2026-05-20", 48, "info"},
+		{14, 6, "failed_jobs", "2026-05-21", 3, "high"},
+		{15, 6, "retries", "2026-05-22", 9, "medium"},
+		{16, 7, "forecast", "2025-12-11", 78000, "info"},
+		{17, 7, "approved_amount", "2026-03-12", 74200, "info"},
+		{18, 8, "classified_tickets", "2026-07-02", 120, "info"},
+		{19, 8, "escalations", "2026-07-03", 7, "medium"},
+		{20, 8, "false_positives", "2026-07-04", 11, "low"},
+	}
+	invoices := []invoice{
+		{1, 1, "Northwind Labs", "2026-02-01", "paid", 44000},
+		{2, 1, "Northwind Labs", "2026-04-01", "sent", 38000},
+		{3, 2, "Contoso Finance", "2026-05-05", "draft", 25000},
+		{4, 3, "Fabrikam Ops", "2026-03-10", "paid", 31500},
+		{5, 3, "Fabrikam Ops", "2026-06-10", "overdue", 22000},
+		{6, 4, "Tailspin Support", "2026-04-15", "sent", 27000},
+		{7, 5, "Adventure Works", "2026-03-20", "disputed", 14500},
+		{8, 6, "Wide World Importers", "2026-06-01", "sent", 56000},
+		{9, 6, "Wide World Importers", "2026-07-01", "draft", 47000},
+		{10, 7, "Contoso Finance", "2026-02-28", "paid", 74200},
+		{11, 8, "Tailspin Support", "2026-07-05", "draft", 18000},
+	}
+	tickets := []ticket{
+		{1, 1, 6, "high", "closed", "2026-01-15", "2026-01-17"},
+		{2, 1, 7, "medium", "closed", "2026-02-07", "2026-02-09"},
+		{3, 2, 9, "low", "open", "2026-04-20", ""},
+		{4, 3, 3, "medium", "closed", "2026-03-02", "2026-03-05"},
+		{5, 3, 8, "high", "open", "2026-06-18", ""},
+		{6, 4, 4, "medium", "in_progress", "2026-04-03", ""},
+		{7, 5, 5, "critical", "blocked", "2026-02-18", ""},
+		{8, 5, 1, "high", "closed", "2026-03-19", "2026-03-25"},
+		{9, 6, 8, "critical", "in_progress", "2026-05-21", ""},
+		{10, 6, 2, "medium", "open", "2026-06-02", ""},
+		{11, 7, 9, "low", "closed", "2026-01-08", "2026-01-12"},
+		{12, 8, 10, "high", "open", "2026-07-03", ""},
+		{13, 8, 4, "medium", "open", "2026-07-04", ""},
+	}
+
+	statements := []string{
+		"DROP TABLE datadock_demo_tickets",
+		"DROP TABLE datadock_demo_invoices",
+		"DROP TABLE datadock_demo_events",
+		"DROP TABLE datadock_demo_projects",
+		"DROP TABLE datadock_demo_people",
+		"DROP TABLE datadock_demo_departments",
+		"CREATE TABLE datadock_demo_departments (id INT, name TEXT, region TEXT, annual_budget INT)",
+		"CREATE TABLE datadock_demo_people (id INT, name TEXT, role TEXT, department_id INT, city TEXT, hired_on TEXT)",
+		"CREATE TABLE datadock_demo_projects (id INT, name TEXT, status TEXT, owner_id INT, department_id INT, start_date TEXT, due_date TEXT, budget INT)",
+		"CREATE TABLE datadock_demo_events (id INT, project_id INT, event_type TEXT, event_date TEXT, amount INT, severity TEXT)",
+		"CREATE TABLE datadock_demo_invoices (id INT, project_id INT, customer TEXT, invoice_date TEXT, status TEXT, amount INT)",
+		"CREATE TABLE datadock_demo_tickets (id INT, project_id INT, opened_by INT, priority TEXT, status TEXT, opened_on TEXT, closed_on TEXT)",
+	}
+	for _, row := range departments {
+		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_departments (id, name, region, annual_budget) VALUES (%d, %s, %s, %d)", row.id, demoSQLString(row.name), demoSQLString(row.region), row.budget))
+	}
+	for _, row := range people {
+		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_people (id, name, role, department_id, city, hired_on) VALUES (%d, %s, %s, %d, %s, %s)", row.id, demoSQLString(row.name), demoSQLString(row.role), row.departmentID, demoSQLString(row.city), demoSQLString(row.hiredOn)))
+	}
+	for _, row := range projects {
+		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_projects (id, name, status, owner_id, department_id, start_date, due_date, budget) VALUES (%d, %s, %s, %d, %d, %s, %s, %d)", row.id, demoSQLString(row.name), demoSQLString(row.status), row.ownerID, row.departmentID, demoSQLString(row.startDate), demoSQLString(row.dueDate), row.budget))
+	}
+	for _, row := range events {
+		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_events (id, project_id, event_type, event_date, amount, severity) VALUES (%d, %d, %s, %s, %d, %s)", row.id, row.projectID, demoSQLString(row.kind), demoSQLString(row.date), row.amount, demoSQLString(row.severity)))
+	}
+	for _, row := range invoices {
+		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_invoices (id, project_id, customer, invoice_date, status, amount) VALUES (%d, %d, %s, %s, %s, %d)", row.id, row.projectID, demoSQLString(row.customer), demoSQLString(row.date), demoSQLString(row.status), row.amount))
+	}
+	for _, row := range tickets {
+		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_tickets (id, project_id, opened_by, priority, status, opened_on, closed_on) VALUES (%d, %d, %d, %s, %s, %s, %s)", row.id, row.projectID, row.openedBy, demoSQLString(row.priority), demoSQLString(row.status), demoSQLString(row.openedOn), demoSQLString(row.closedOn)))
+	}
+	return statements
+}
+
+func demoSQLString(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+// dropTableHandler drops a table after confirmation.
+func (a *App) dropTableHandler(w http.ResponseWriter, r *http.Request) {
+	tableName := r.PathValue("table")
+	// Resolve to the canonical DB name before building any SQL.
+	meta, err := a.tableMeta(r.Context(), tableName)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	conn := a.activeConn(r.Context())
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	if _, err := conn.DB.ExecContext(ctx, "DROP TABLE "+conn.QuoteIdent(meta.Name)); err != nil {
+		a.serverError(w, err)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// queryEditorHandler renders the SQL query editor page.
+func (a *App) queryEditorHandler(w http.ResponseWriter, r *http.Request) {
+	a.render(w, r, "query", map[string]interface{}{})
+}
+
+// queryExecHandler handles form-POST execution of SQL (fallback without JS).
+func (a *App) queryExecHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	query := strings.TrimSpace(r.Form.Get("sql"))
+	result := a.executeSQL(r.Context(), query)
+	a.render(w, r, "query", map[string]interface{}{
+		"SQL":    query,
+		"Result": result,
+	})
+}
+
+// apiQueryHandler handles JSON-based SQL execution from the editor's JS.
+func (a *App) apiQueryHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		SQL string `json:"sql"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+		return
+	}
+	result := a.executeSQL(r.Context(), strings.TrimSpace(body.SQL))
+
+	type apiResult struct {
+		Columns   []string   `json:"columns,omitempty"`
+		Rows      [][]string `json:"rows,omitempty"`
+		Affected  int64      `json:"affected,omitempty"`
+		ElapsedMs int64      `json:"elapsed_ms"`
+		Error     string     `json:"error,omitempty"`
+	}
+	out := apiResult{
+		Columns:   result.Columns,
+		Rows:      result.Rows,
+		Affected:  result.Affected,
+		ElapsedMs: result.Elapsed.Milliseconds(),
+		Error:     result.Err,
+	}
+	a.writeJSON(w, http.StatusOK, out)
+}
+
+// apiExportHandler streams the result of a read-only SQL query as CSV or JSON.
+func (a *App) apiExportHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		SQL    string `json:"sql"`
+		Format string `json:"format"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+		return
+	}
+
+	query := strings.TrimSpace(body.SQL)
+	if query == "" {
+		a.writeProblem(w, r, http.StatusBadRequest, "Empty SQL", "sql is required.")
+		return
+	}
+	if !isResultQuerySQL(query) {
+		a.writeProblem(w, r, http.StatusBadRequest, "Unsupported SQL", "export requires SELECT, WITH, SHOW, or EXPLAIN")
+		return
+	}
+
+	cols, rows, err := a.queryRows(r.Context(), query)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusInternalServerError, "Query failed", err.Error())
+		return
+	}
+	if ok := a.writeExport(w, cols, rows, body.Format, "query"); !ok {
+		a.writeProblem(w, r, http.StatusBadRequest, "Unsupported export format", "unsupported export format")
+	}
+}
+
+func (a *App) apiSchemaHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", standards.MediaTypeJSON)
+	_, _ = w.Write([]byte(a.schemaSnapshot(r.Context())))
+}
+
+func (a *App) apiAdminStatusHandler(w http.ResponseWriter, r *http.Request) {
+	a.writeJSON(w, http.StatusOK, a.adminStatus(r.Context()))
+}
+
+func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		a.writeJSON(w, http.StatusOK, a.runtimeSettingsView())
+	case http.MethodPost:
+		var body struct {
+			Dialect        string `json:"dialect"`
+			ConnectTimeout string `json:"connect_timeout"`
+			QueryTimeout   string `json:"query_timeout"`
+			LLMBaseURL     string `json:"llm_base_url"`
+			LLMAPIKey      string `json:"llm_api_key"`
+			LLMModel       string `json:"llm_model"`
+			LLMTimeout     string `json:"llm_timeout"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+			return
+		}
+		settings, err := runtimeSettingsFromValues(body.Dialect, body.ConnectTimeout, body.QueryTimeout, body.LLMBaseURL, body.LLMAPIKey, body.LLMModel, body.LLMTimeout)
+		if err == nil {
+			err = a.applyRuntimeSettings(settings)
+		}
+		if err == nil {
+			err = a.saveRuntimeSettings(r.Context())
+		}
+		if err != nil {
+			a.writeProblem(w, r, http.StatusBadRequest, "Invalid settings", err.Error())
+			return
+		}
+		a.writeJSON(w, http.StatusOK, a.runtimeSettingsView())
+	default:
+		a.writeProblem(w, r, http.StatusMethodNotAllowed, "Method not allowed", "method not allowed")
+	}
+}
+
+func (a *App) apiLLMDiscoverHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3500*time.Millisecond)
+	defer cancel()
+	result := discoverLLMServers(ctx, nil, r.URL.Query().Get("host"), r.URL.Query().Get("port"))
+	a.writeJSON(w, http.StatusOK, result)
+}
+
+func (a *App) apiLLMAutoConfigHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Host    string `json:"host"`
+		Port    string `json:"port"`
+		BaseURL string `json:"base_url"`
+		Model   string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+		return
+	}
+
+	baseURL := strings.TrimSpace(body.BaseURL)
+	model := strings.TrimSpace(body.Model)
+	if baseURL == "" || model == "" {
+		ctx, cancel := context.WithTimeout(r.Context(), 3500*time.Millisecond)
+		defer cancel()
+		result := discoverLLMServers(ctx, nil, body.Host, body.Port)
+		if result.Recommended == nil || len(result.Recommended.Models) == 0 {
+			a.writeProblem(w, r, http.StatusNotFound, "No LLM server found", "No Ollama, LM Studio, llmster, or OpenAI-compatible local server responded with models.")
+			return
+		}
+		if baseURL == "" {
+			baseURL = result.Recommended.BaseURL
+		}
+		if model == "" {
+			model = result.Recommended.Models[0]
+		}
+	}
+
+	settings := a.currentRuntimeSettings()
+	settings.LLMBaseURL = baseURL
+	settings.LLMModel = model
+	if err := a.applyRuntimeSettings(settings); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid settings", err.Error())
+		return
+	}
+	if err := a.saveRuntimeSettings(r.Context()); err != nil {
+		a.writeProblem(w, r, http.StatusInternalServerError, "Save failed", err.Error())
+		return
+	}
+	a.writeJSON(w, http.StatusOK, a.runtimeSettingsView())
+}
+
+func (a *App) adminStatus(ctx context.Context) map[string]any {
+	health := tinysql.HealthCheck(a.nativeDB)
+	stats := health.BackendStats
+	settings := a.runtimeSettingsView()
+	status := map[string]any{
+		"ok":                    health.OK,
+		"tenant":                a.tenant,
+		"storage_mode":          health.ModeName,
+		"path":                  health.Path,
+		"read_only":             health.ReadOnly,
+		"closed":                health.Closed,
+		"closing":               health.Closing,
+		"scheduler_running":     health.SchedulerRunning,
+		"wal_active":            health.WALActive,
+		"advanced_wal_active":   health.AdvancedWALActive,
+		"tenants":               health.Tenants,
+		"tables":                health.Tables,
+		"audit_log_enabled":     a.auditLog,
+		"managed_connections":   0,
+		"active_connection":     nil,
+		"last_sync_at":          formatTimePtr(health.LastSyncAt),
+		"last_close_at":         formatTimePtr(health.LastCloseAt),
+		"error":                 health.Error,
+		"backend_tables_memory": stats.TablesInMemory,
+		"backend_tables_disk":   stats.TablesOnDisk,
+		"memory_used_bytes":     stats.MemoryUsedBytes,
+		"memory_limit_bytes":    stats.MemoryLimitBytes,
+		"disk_used_bytes":       stats.DiskUsedBytes,
+		"cache_hit_rate":        stats.CacheHitRate,
+		"sync_count":            stats.SyncCount,
+		"load_count":            stats.LoadCount,
+		"eviction_count":        stats.EvictionCount,
+		"settings":              settings,
+	}
+	if a.conns != nil {
+		conns := a.conns.ListFor(sessionIDFromContext(ctx))
+		status["managed_connections"] = len(conns)
+		if conn := a.activeConn(ctx); conn != nil {
+			status["active_connection"] = map[string]string{
+				"id":      conn.ID,
+				"name":    conn.Name,
+				"kind":    conn.Kind,
+				"dialect": conn.Dialect.Name,
+			}
+		}
+	}
+	if !health.Recovery.RecoveredAt.IsZero() || health.Recovery.Path != "" {
+		status["recovery"] = map[string]any{
+			"mode":                   health.Recovery.Mode.String(),
+			"path":                   health.Recovery.Path,
+			"checkpoint_loaded":      health.Recovery.CheckpointLoaded,
+			"recovered_transactions": health.Recovery.RecoveredTransactions,
+			"recovered_operations":   health.Recovery.RecoveredOperations,
+			"truncated":              health.Recovery.Truncated,
+			"recovered_at":           formatTimePtr(health.Recovery.RecoveredAt),
+		}
+	}
+	return status
+}
+
+func (a *App) apiJobsHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		a.writeJSON(w, http.StatusOK, map[string]any{
+			"jobs":    a.nativeDB.Catalog().ListJobs(),
+			"history": a.nativeDB.Catalog().ListJobHistory(),
+		})
+	case http.MethodPost:
+		var body struct {
+			Name         string `json:"name"`
+			SQL          string `json:"sql"`
+			ScheduleType string `json:"schedule_type"`
+			CronExpr     string `json:"cron_expr"`
+			IntervalMs   int64  `json:"interval_ms"`
+			RunAt        string `json:"run_at"`
+			Timezone     string `json:"timezone"`
+			Enabled      *bool  `json:"enabled"`
+			CatchUp      bool   `json:"catch_up"`
+			NoOverlap    bool   `json:"no_overlap"`
+			MaxRuntimeMs int64  `json:"max_runtime_ms"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+			return
+		}
+		var runAt *time.Time
+		if strings.TrimSpace(body.RunAt) != "" {
+			parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(body.RunAt))
+			if err != nil {
+				a.writeProblem(w, r, http.StatusBadRequest, "Invalid timestamp", "run_at must be RFC3339 for ONCE jobs")
+				return
+			}
+			runAt = &parsed
+		}
+		job, err := dbjobs.Build(dbjobs.Config{
+			Name:         body.Name,
+			SQL:          body.SQL,
+			ScheduleType: body.ScheduleType,
+			CronExpr:     body.CronExpr,
+			IntervalMs:   body.IntervalMs,
+			RunAt:        runAt,
+			Timezone:     body.Timezone,
+			Enabled:      body.Enabled,
+			CatchUp:      body.CatchUp,
+			NoOverlap:    body.NoOverlap,
+			MaxRuntimeMs: body.MaxRuntimeMs,
+		})
+		if err != nil {
+			a.writeProblem(w, r, http.StatusBadRequest, "Invalid job", err.Error())
+			return
+		}
+		if err := a.nativeDB.RegisterJob(job); err != nil {
+			a.writeProblem(w, r, http.StatusBadRequest, "Invalid job", err.Error())
+			return
+		}
+		a.writeJSON(w, http.StatusOK, map[string]any{"job": job})
+	default:
+		a.writeProblem(w, r, http.StatusMethodNotAllowed, "Method not allowed", "method not allowed")
+	}
+}
+
+func (a *App) apiRunJobHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name      string `json:"name"`
+		TimeoutMS int64  `json:"timeout_ms"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+		return
+	}
+	job, err := a.nativeDB.Catalog().GetJob(strings.TrimSpace(body.Name))
+	if err != nil {
+		a.writeProblem(w, r, http.StatusNotFound, "Job not found", err.Error())
+		return
+	}
+	timeout := a.currentQueryTimeout()
+	if body.TimeoutMS > 0 {
+		timeout = time.Duration(body.TimeoutMS) * time.Millisecond
+	}
+	ctx := r.Context()
+	cancel := func() {}
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+
+	started := time.Now()
+	result := a.executeTinySQL(ctx, job.SQLText)
+	finished := time.Now()
+	status := "SUCCEEDED"
+	errMsg := ""
+	if result.Err != "" {
+		status = "FAILED"
+		errMsg = result.Err
+	}
+	_ = a.nativeDB.Catalog().AddJobHistory(&tinysql.CatalogJobHistory{
+		JobName:      job.Name,
+		StartedAt:    started,
+		FinishedAt:   finished,
+		DurationMs:   finished.Sub(started).Milliseconds(),
+		Status:       status,
+		ErrorMessage: errMsg,
+	})
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"job":        job.Name,
+		"status":     status,
+		"columns":    result.Columns,
+		"rows":       result.Rows,
+		"affected":   result.Affected,
+		"elapsed_ms": result.Elapsed.Milliseconds(),
+		"error":      result.Err,
+	})
+}
+
+func (a *App) apiImportHandler(w http.ResponseWriter, r *http.Request) {
+	if conn := a.activeConn(r.Context()); conn != nil && !conn.IsTinySQL() {
+		a.writeProblem(w, r, http.StatusBadRequest, "Unsupported connection", "imports are currently supported for the local tinySQL/datadock metadata database only")
+		return
+	}
+	var body struct {
+		Table         string `json:"table"`
+		Format        string `json:"format"`
+		Content       string `json:"content"`
+		HeaderMode    string `json:"header_mode"`
+		CreateTable   *bool  `json:"create_table"`
+		Truncate      bool   `json:"truncate"`
+		TypeInference *bool  `json:"type_inference"`
+		Fuzzy         bool   `json:"fuzzy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+		return
+	}
+	table := strings.TrimSpace(body.Table)
+	if table == "" {
+		a.writeProblem(w, r, http.StatusBadRequest, "Missing table", "table is required")
+		return
+	}
+	if strings.TrimSpace(body.Content) == "" {
+		a.writeProblem(w, r, http.StatusBadRequest, "Missing content", "content is required")
+		return
+	}
+	opts := &dbimporter.ImportOptions{
+		CreateTable:   boolDefault(body.CreateTable, true),
+		Truncate:      body.Truncate,
+		HeaderMode:    strings.TrimSpace(body.HeaderMode),
+		TypeInference: boolDefault(body.TypeInference, true),
+	}
+	if opts.HeaderMode == "" {
+		opts.HeaderMode = "auto"
+	}
+	format := strings.ToLower(strings.TrimSpace(body.Format))
+	if format == "" {
+		format = "csv"
+	}
+	if format == "tsv" {
+		opts.DelimiterCandidates = []rune{'\t'}
+		format = "csv"
+	}
+	src := strings.NewReader(body.Content)
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+
+	var res *dbimporter.ImportResult
+	var err error
+	if body.Fuzzy {
+		fuzzyOpts := &dbimporter.FuzzyImportOptions{ImportOptions: opts}
+		switch format {
+		case "csv":
+			res, err = dbimporter.FuzzyImportCSV(ctx, a.nativeDB, a.tenant, table, src, fuzzyOpts)
+		case "json", "ndjson":
+			res, err = dbimporter.FuzzyImportJSON(ctx, a.nativeDB, a.tenant, table, src, fuzzyOpts)
+		default:
+			err = fmt.Errorf("fuzzy import supports csv/tsv and json only")
+		}
+	} else {
+		res, err = importContent(ctx, a.nativeDB, a.tenant, table, format, src, opts)
+	}
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Import failed", err.Error())
+		return
+	}
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"table":         table,
+		"rows_inserted": res.RowsInserted,
+		"rows_skipped":  res.RowsSkipped,
+		"delimiter":     string(res.Delimiter),
+		"had_header":    res.HadHeader,
+		"encoding":      res.Encoding,
+		"line_ending":   res.LineEnding,
+		"columns":       res.ColumnNames,
+		"errors":        res.Errors,
+	})
+}
+
+func (a *App) executeTinySQL(ctx context.Context, sqlText string) QueryResult {
+	start := time.Now()
+	result := QueryResult{}
+	stmt, err := tinysql.ParseSQL(sqlText)
+	if err != nil {
+		result.Err = err.Error()
+		result.Elapsed = time.Since(start)
+		return result
+	}
+	rs, err := tinysql.Execute(ctx, a.nativeDB, a.tenant, stmt)
+	if err != nil {
+		result.Err = err.Error()
+		result.Elapsed = time.Since(start)
+		return result
+	}
+	if rs != nil {
+		result.Columns, result.Rows = resultutil.ResultSetToStringMatrix(rs)
+	}
+	result.Elapsed = time.Since(start)
+	return result
+}
+
+func importContent(ctx context.Context, db *tinysql.DB, tenant, table, format string, src io.Reader, opts *dbimporter.ImportOptions) (*dbimporter.ImportResult, error) {
+	switch format {
+	case "csv":
+		return dbimporter.ImportCSV(ctx, db, tenant, table, src, opts)
+	case "json", "ndjson":
+		return dbimporter.ImportJSON(ctx, db, tenant, table, src, opts)
+	case "yaml", "yml":
+		return dbimporter.ImportYAML(ctx, db, tenant, table, src, opts)
+	case "xml":
+		return dbimporter.ImportXML(ctx, db, tenant, table, src, opts)
+	case "geojson":
+		return dbimporter.ImportGeoJSON(ctx, db, tenant, table, src, opts)
+	case "kml":
+		return dbimporter.ImportKML(ctx, db, tenant, table, src, opts)
+	default:
+		return nil, fmt.Errorf("unsupported import format %q", format)
+	}
+}
+
+func tableNameFromFilename(name string) string {
+	base := strings.TrimSpace(name)
+	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
+		base = base[i+1:]
+	}
+	if i := strings.LastIndex(base, "."); i > 0 {
+		base = base[:i]
+	}
+	base = strings.ToLower(base)
+	var b strings.Builder
+	for _, r := range base {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" || out[0] >= '0' && out[0] <= '9' {
+		return "imported_table"
+	}
+	return out
+}
+
+func importFormatFromName(filename, selected string) string {
+	selected = strings.ToLower(strings.TrimSpace(selected))
+	if selected != "" && selected != "auto" {
+		return selected
+	}
+	name := strings.ToLower(strings.TrimSpace(filename))
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		switch name[i+1:] {
+		case "csv", "tsv", "json", "ndjson", "xlsx", "xml", "yaml", "yml":
+			return name[i+1:]
+		}
+	}
+	return "csv"
+}
+
+type xlsxSharedStrings struct {
+	Items []xlsxSharedString `xml:"si"`
+}
+
+type xlsxSharedString struct {
+	TextParts []string `xml:"t"`
+}
+
+type xlsxWorksheet struct {
+	Rows []xlsxRow `xml:"sheetData>row"`
+}
+
+type xlsxRow struct {
+	Cells []xlsxCell `xml:"c"`
+}
+
+type xlsxCell struct {
+	Ref         string `xml:"r,attr"`
+	Type        string `xml:"t,attr"`
+	Value       string `xml:"v"`
+	InlineValue string `xml:"is>t"`
+}
+
+func xlsxToCSV(data []byte) ([]byte, error) {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+	files := make(map[string]*zip.File, len(zr.File))
+	for _, f := range zr.File {
+		files[f.Name] = f
+	}
+	shared, err := readXLSXSharedStrings(files["xl/sharedStrings.xml"])
+	if err != nil {
+		return nil, err
+	}
+	sheet := files["xl/worksheets/sheet1.xml"]
+	if sheet == nil {
+		return nil, fmt.Errorf("xl/worksheets/sheet1.xml not found")
+	}
+	rc, err := sheet.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	var ws xlsxWorksheet
+	if err := xml.NewDecoder(rc).Decode(&ws); err != nil {
+		return nil, err
+	}
+	var rows [][]string
+	maxCols := 0
+	for _, row := range ws.Rows {
+		out := make([]string, 0, len(row.Cells))
+		for _, cell := range row.Cells {
+			colIdx := xlsxColumnIndex(cell.Ref)
+			for len(out) < colIdx {
+				out = append(out, "")
+			}
+			out = append(out, xlsxCellValue(cell, shared))
+		}
+		if len(out) > maxCols {
+			maxCols = len(out)
+		}
+		rows = append(rows, out)
+	}
+	var buf bytes.Buffer
+	w := csv.NewWriter(&buf)
+	for _, row := range rows {
+		for len(row) < maxCols {
+			row = append(row, "")
+		}
+		if err := w.Write(row); err != nil {
+			return nil, err
+		}
+	}
+	w.Flush()
+	return buf.Bytes(), w.Error()
+}
+
+func readXLSXSharedStrings(f *zip.File) ([]string, error) {
+	if f == nil {
+		return nil, nil
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	var ss xlsxSharedStrings
+	if err := xml.NewDecoder(rc).Decode(&ss); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(ss.Items))
+	for _, item := range ss.Items {
+		out = append(out, strings.Join(item.TextParts, ""))
+	}
+	return out, nil
+}
+
+func xlsxCellValue(cell xlsxCell, shared []string) string {
+	switch cell.Type {
+	case "s":
+		i, err := strconv.Atoi(strings.TrimSpace(cell.Value))
+		if err == nil && i >= 0 && i < len(shared) {
+			return shared[i]
+		}
+		return ""
+	case "inlineStr":
+		return cell.InlineValue
+	default:
+		return cell.Value
+	}
+}
+
+func xlsxColumnIndex(ref string) int {
+	if ref == "" {
+		return 0
+	}
+	idx := 0
+	for _, r := range ref {
+		if r >= 'A' && r <= 'Z' {
+			idx = idx*26 + int(r-'A'+1)
+		} else if r >= 'a' && r <= 'z' {
+			idx = idx*26 + int(r-'a'+1)
+		} else {
+			break
+		}
+	}
+	if idx <= 0 {
+		return 0
+	}
+	return idx - 1
+}
+
+func boolDefault(v *bool, fallback bool) bool {
+	if v == nil {
+		return fallback
+	}
+	return *v
+}
+
+func runtimeSettingsFromForm(r *http.Request) (RuntimeSettings, error) {
+	return runtimeSettingsFromValues(
+		r.Form.Get("dialect"),
+		r.Form.Get("connect_timeout"),
+		r.Form.Get("query_timeout"),
+		r.Form.Get("llm_base_url"),
+		r.Form.Get("llm_api_key"),
+		r.Form.Get("llm_model"),
+		r.Form.Get("llm_timeout"),
+	)
+}
+
+func runtimeSettingsFromValues(dialect, connectTimeout, queryTimeout, llmBaseURL, llmAPIKey, llmModel, llmTimeout string) (RuntimeSettings, error) {
+	connect, err := parseOptionalDuration(connectTimeout, 10*time.Second, "connect_timeout")
+	if err != nil {
+		return RuntimeSettings{}, err
+	}
+	query, err := parseOptionalDuration(queryTimeout, 60*time.Second, "query_timeout")
+	if err != nil {
+		return RuntimeSettings{}, err
+	}
+	llm, err := parseOptionalDuration(llmTimeout, 45*time.Second, "llm_timeout")
+	if err != nil {
+		return RuntimeSettings{}, err
+	}
+	return RuntimeSettings{
+		Dialect:        dialect,
+		ConnectTimeout: connect,
+		QueryTimeout:   query,
+		LLMBaseURL:     llmBaseURL,
+		LLMAPIKey:      llmAPIKey,
+		LLMModel:       llmModel,
+		LLMTimeout:     llm,
+	}, nil
+}
+
+func parseOptionalDuration(value string, fallback time.Duration, name string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a Go duration such as 5s, 1m, or 250ms", name)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%s must not be negative", name)
+	}
+	return d, nil
+}
+
+func formatTimePtr(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Format(time.RFC3339)
+}
+
+// apiLLMHandler handles OpenAI-compatible natural-language SQL assistance.
+func (a *App) apiLLMHandler(w http.ResponseWriter, r *http.Request) {
+	llm := a.llmClient()
+	if llm == nil {
+		a.writeProblem(w, r, http.StatusServiceUnavailable, "LLM is not configured", "LLM is not configured")
+		return
+	}
+
+	var body struct {
+		Action  string     `json:"action"`
+		Prompt  string     `json:"prompt"`
+		SQL     string     `json:"sql"`
+		Error   string     `json:"error"`
+		Columns []string   `json:"columns"`
+		Rows    [][]string `json:"rows"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+		return
+	}
+
+	action := strings.TrimSpace(body.Action)
+	switch action {
+	case llmActionGenerateSQL, llmActionExplainResults, llmActionExplainError, llmActionAskRun:
+	default:
+		a.writeProblem(w, r, http.StatusBadRequest, "Unsupported LLM action", "unsupported LLM action")
+		return
+	}
+
+	prompt := strings.TrimSpace(body.Prompt)
+	sqlText := strings.TrimSpace(body.SQL)
+	errorText := strings.TrimSpace(body.Error)
+	if prompt == "" && sqlText == "" && errorText == "" && len(body.Rows) == 0 {
+		a.writeProblem(w, r, http.StatusBadRequest, "Missing LLM input", "prompt, sql, error, or rows are required")
+		return
+	}
+
+	var resultCtx *LLMResultContext
+	if len(body.Columns) > 0 || len(body.Rows) > 0 {
+		resultCtx = summarizeLLMResult(body.Columns, body.Rows)
+	}
+
+	out, err := llm.Complete(r.Context(), LLMRequest{
+		Action: action,
+		Prompt: prompt,
+		Schema: a.llmSchemaContext(r.Context(), action, prompt, sqlText, errorText),
+		SQL:    sqlText,
+		Error:  errorText,
+		Result: resultCtx,
+	})
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadGateway, "LLM request failed", err.Error())
+		return
+	}
+	if action == llmActionGenerateSQL {
+		parsed := parseLLMSQLResponse(out)
+		a.writeJSON(w, http.StatusOK, map[string]string{
+			"action":      parsed.Action,
+			"text":        parsed.SQL,
+			"sql":         parsed.SQL,
+			"explanation": parsed.Explanation,
+			"follow_up":   parsed.FollowUp,
+		})
+		return
+	}
+
+	a.writeJSON(w, http.StatusOK, map[string]string{"text": out})
+}
+
+// apiLLMHealthHandler performs a tiny server-side completion request so admins
+// can verify remote OpenAI-compatible providers such as LM Studio.
+func (a *App) apiLLMHealthHandler(w http.ResponseWriter, r *http.Request) {
+	llm := a.llmClient()
+	if llm == nil {
+		a.writeProblem(w, r, http.StatusServiceUnavailable, "LLM is not configured", "LLM is not configured")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	out, err := llm.Complete(ctx, LLMRequest{
+		Action: "health_check",
+		Prompt: "Reply with OK.",
+		Schema: `{"dialect":{"name":"health-check"},"skill":{"name":"health_check","purpose":"Verify provider connectivity.","instructions":["Reply with OK."],"output_contract":"Return plain text."},"retrieval":{"truncated":false},"tables":[]}`,
+	})
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadGateway, "LLM request failed", err.Error())
+		return
+	}
+	a.writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "response": trimForLLM(out, 200)})
+}
+
+// apiLLMRunHandler turns a natural-language prompt into a read-only SQL query,
+// executes it, and asks the LLM for a short result/error explanation.
+func (a *App) apiLLMRunHandler(w http.ResponseWriter, r *http.Request) {
+	if a.llmClient() == nil {
+		a.writeProblem(w, r, http.StatusServiceUnavailable, "LLM is not configured", "LLM is not configured")
+		return
+	}
+
+	var body struct {
+		Prompt string `json:"prompt"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+		return
+	}
+	prompt := strings.TrimSpace(body.Prompt)
+	if prompt == "" {
+		a.writeProblem(w, r, http.StatusBadRequest, "Missing prompt", "prompt is required")
+		return
+	}
+
+	generated, err := a.generateSQLFromPrompt(r.Context(), prompt)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadGateway, "LLM request failed", err.Error())
+		return
+	}
+	if generated.Action == "clarify" {
+		a.writeJSON(w, http.StatusOK, map[string]any{
+			"action":      "clarify",
+			"explanation": generated.Explanation,
+			"follow_up":   generated.FollowUp,
+		})
+		return
+	}
+
+	sqlText := strings.TrimSpace(generated.SQL)
+	if err := a.validateAutoRunnableSQL(r.Context(), sqlText); err != nil {
+		a.writeJSON(w, http.StatusOK, map[string]any{
+			"action":      "blocked",
+			"sql":         sqlText,
+			"explanation": generated.Explanation,
+			"error":       err.Error(),
+		})
+		return
+	}
+
+	result := a.executeSQL(r.Context(), sqlText)
+	if result.Err != "" {
+		explanation, explainErr := a.explainLLMError(r.Context(), prompt, sqlText, result.Err)
+		if explainErr != nil {
+			explanation = explainErr.Error()
+		}
+		a.writeJSON(w, http.StatusOK, map[string]any{
+			"action":      "error",
+			"sql":         sqlText,
+			"error":       result.Err,
+			"explanation": explanation,
+		})
+		return
+	}
+
+	explanation := generated.Explanation
+	if aiText, err := a.explainLLMResults(r.Context(), prompt, sqlText, result); err == nil && strings.TrimSpace(aiText) != "" {
+		explanation = aiText
+	}
+
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"action":      "sql",
+		"sql":         sqlText,
+		"explanation": explanation,
+		"columns":     result.Columns,
+		"rows":        result.Rows,
+		"affected":    result.Affected,
+		"elapsed_ms":  result.Elapsed.Milliseconds(),
+	})
+}

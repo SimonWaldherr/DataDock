@@ -1,0 +1,772 @@
+{{define "query"}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection)}}
+
+<div class="page-hdr">
+  <h1><i class="bi bi-terminal text-primary"></i>SQL Editor</h1>
+</div>
+
+{{template "alert" .}}
+
+<div class="card">
+  <div class="card-body py-2">
+    <div class="d-flex flex-column gap-2">
+      <textarea id="llmPrompt" class="form-control form-control-sm" rows="2"
+                placeholder="Ask in natural language, e.g. show the top customers by revenue"></textarea>
+      <div class="toolbar">
+        <button id="llmSqlBtn" class="btn btn-outline-primary btn-sm" onclick="askLLM('generate_sql')">
+          <i class="bi bi-stars me-1"></i>Generate SQL
+        </button>
+        <button id="llmRunBtn" class="btn btn-primary btn-sm" onclick="askAndRunLLM()">
+          <i class="bi bi-lightning-charge-fill me-1"></i>Ask & Run
+        </button>
+        <button id="llmResultsBtn" class="btn btn-outline-secondary btn-sm" onclick="askLLM('explain_results')">
+          <i class="bi bi-card-text me-1"></i>Explain Result
+        </button>
+        <button id="llmErrorBtn" class="btn btn-outline-secondary btn-sm" onclick="askLLM('explain_error')">
+          <i class="bi bi-bug me-1"></i>Explain Error
+        </button>
+        <button id="llmHealthBtn" class="btn btn-outline-secondary btn-sm" onclick="testLLMHealth()">
+          <i class="bi bi-wifi me-1"></i>Test LLM
+        </button>
+        <span id="llmStatus" class="small text-muted ms-1"></span>
+      </div>
+      <div id="llmAnswer" class="small"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body pb-2">
+    <textarea id="sqlInput" class="sql-editor" rows="6"
+              placeholder="SELECT * FROM your_table LIMIT 100"
+              spellcheck="false">{{.SQL}}</textarea>
+    <div id="monacoEditor" class="d-none" style="height:220px;border-radius:.4rem;overflow:hidden;border:1px solid #444"></div>
+    <div class="toolbar mt-2 mb-1">
+      <button id="runBtn" class="btn btn-primary btn-sm" onclick="runQuery()">
+        <i class="bi bi-play-fill me-1"></i>Run <kbd class="ms-1 opacity-75" style="font-size:.65rem">Ctrl+Enter</kbd>
+      </button>
+      <button class="btn btn-outline-secondary btn-sm" onclick="clearEditor()">
+        <i class="bi bi-x-lg me-1"></i>Clear
+      </button>
+      <button class="btn btn-outline-secondary btn-sm" onclick="shareQuery()">
+        <i class="bi bi-link-45deg me-1"></i>Share
+      </button>
+      <button class="btn btn-outline-secondary btn-sm" onclick="toggleSchemaPreview()">
+        <i class="bi bi-diagram-3 me-1"></i>Schema
+      </button>
+      <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('csv')">
+        <i class="bi bi-filetype-csv me-1"></i>CSV
+      </button>
+      <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('tsv')">
+        <i class="bi bi-table me-1"></i>TSV
+      </button>
+      <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('json')">
+        <i class="bi bi-filetype-json me-1"></i>JSON
+      </button>
+      <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('xml')">
+        <i class="bi bi-filetype-xml me-1"></i>XML
+      </button>
+      <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('xlsx')">
+        <i class="bi bi-file-earmark-spreadsheet me-1"></i>XLSX
+      </button>
+      <span id="statusMsg" class="small text-muted ms-2"></span>
+    </div>
+  </div>
+</div>
+
+<div id="schemaPreview" class="card d-none">
+  <div class="card-body py-2">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <h2 class="h6 mb-0"><i class="bi bi-diagram-3 text-primary"></i> LLM Schema Context</h2>
+      <button class="btn btn-outline-secondary btn-sm" onclick="copySchemaPreview()">Copy</button>
+    </div>
+    <pre id="schemaText" class="small mb-0" style="max-height:340px;overflow:auto;white-space:pre-wrap"></pre>
+  </div>
+</div>
+
+<div class="row g-2 align-items-stretch">
+  <div class="col-lg-8">
+    <div id="chartArea"></div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card h-100">
+      <div class="card-body py-2">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <h2 class="h6 mb-0"><i class="bi bi-clock-history text-primary"></i> Local History</h2>
+          <button class="btn btn-outline-secondary btn-sm" onclick="clearLocalQueryHistory()">Clear</button>
+        </div>
+        <div id="queryHistory" class="small"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="resultArea"></div>
+
+<!-- No-JS fallback (hidden when JS is active) -->
+<noscript>
+  <div class="card mt-2">
+    <div class="card-body">
+      <form method="post" action="/query">
+        <textarea name="sql" class="sql-editor" rows="6"
+                  placeholder="SELECT * FROM your_table">{{.SQL}}</textarea>
+        <button type="submit" class="btn btn-primary btn-sm mt-2">Run</button>
+      </form>
+      {{with .Result}}
+      {{if .Err}}
+      <div class="alert alert-danger mt-3">{{.Err}}</div>
+      {{else if .Columns}}
+      <div class="table-responsive mt-3">
+        <table class="table table-sm result-table">
+          <thead><tr>{{range .Columns}}<th>{{.}}</th>{{end}}</tr></thead>
+          <tbody>
+            {{range .Rows}}<tr>{{range .}}<td>{{.}}</td>{{end}}</tr>{{end}}
+          </tbody>
+        </table>
+      </div>
+      {{else}}
+      <div class="alert alert-success mt-3">
+        Rows affected: {{.Affected}} ({{.Elapsed}})
+      </div>
+      {{end}}
+      {{end}}
+    </div>
+  </div>
+</noscript>
+
+<script>
+var lastResultData = null;
+var lastErrorMessage = '';
+var queryHistoryKey = 'datadock.queryHistory.v1';
+var maxLocalQueryHistory = 20;
+var sqlEditor = null;
+var monacoBaseURL = 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.40.0/min';
+
+// Hide the noscript form when JS is available.
+document.addEventListener('DOMContentLoaded', function () {
+  var el = document.querySelector('noscript');
+  // noscript is not rendered in DOM so nothing to hide.
+
+  var ta = document.getElementById('sqlInput');
+  restoreQueryFromHash();
+  ta.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      runQuery();
+    }
+    if (e.key === 'F5') {
+      e.preventDefault();
+      runQuery();
+    }
+  });
+  loadMonacoEditor();
+  renderLocalQueryHistory();
+});
+
+function askLLM(action) {
+  var prompt = document.getElementById('llmPrompt').value.trim();
+  var sql = getEditorValue().trim();
+  var llmStatus = document.getElementById('llmStatus');
+  var llmAnswer = document.getElementById('llmAnswer');
+  llmStatus.textContent = 'Thinking...';
+  llmAnswer.innerHTML = '';
+  setLLMButtons(true);
+
+  var payload = {action: action, prompt: prompt, sql: sql};
+  if (action === 'explain_error') {
+    payload.error = lastErrorMessage;
+  }
+  if (action === 'explain_results' && lastResultData) {
+    payload.columns = lastResultData.columns || [];
+    payload.rows = lastResultData.rows || [];
+  }
+
+  fetch('/api/llm', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  })
+  .then(function(r){ return r.json().then(function(data){ return {ok: r.ok, data: data}; }); })
+  .then(function(resp) {
+    setLLMButtons(false);
+    llmStatus.textContent = '';
+    if (!resp.ok || resp.data.error) {
+      llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">' + escHtml(resp.data.error || 'LLM request failed') + '</div>';
+      return;
+    }
+    if (action === 'generate_sql') {
+      var generatedSQL = (resp.data.sql || '').trim();
+      if (!generatedSQL) {
+        llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">The LLM response did not contain executable SQL.</div>';
+        return;
+      }
+      setEditorValue(generatedSQL);
+      focusEditor();
+      llmAnswer.innerHTML = renderLLMSQLMetadata(resp.data);
+      return;
+    }
+    var text = resp.data.text || '';
+    llmAnswer.innerHTML = '<div class="alert alert-info py-2 mb-0" style="white-space:pre-wrap">' + escHtml(text) + '</div>';
+  })
+  .catch(function(err) {
+    setLLMButtons(false);
+    llmStatus.textContent = '';
+    llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">' + escHtml(err.message || err.toString()) + '</div>';
+  });
+}
+
+function renderLLMSQLMetadata(data) {
+  var parts = ['<div class="alert alert-info py-2 mb-0">SQL generated in the editor. Review it before running.'];
+  if (data.explanation) {
+    parts.push('<div class="mt-2" style="white-space:pre-wrap">' + escHtml(data.explanation) + '</div>');
+  }
+  if (data.follow_up) {
+    parts.push('<div class="mt-2"><span class="fw-semibold">Follow-up:</span> ' + escHtml(data.follow_up) + '</div>');
+  }
+  if (data.action && data.action !== 'sql') {
+    parts.push('<div class="mt-2 text-muted">Action: ' + escHtml(data.action) + '</div>');
+  }
+  parts.push('</div>');
+  return parts.join('');
+}
+
+function askAndRunLLM() {
+  var prompt = document.getElementById('llmPrompt').value.trim();
+  var llmStatus = document.getElementById('llmStatus');
+  var llmAnswer = document.getElementById('llmAnswer');
+  if (!prompt) {
+    document.getElementById('llmPrompt').focus();
+    return;
+  }
+
+  llmStatus.textContent = 'Generating and running...';
+  llmAnswer.innerHTML = '';
+  setLLMButtons(true);
+
+  fetch('/api/llm/run', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({prompt: prompt})
+  })
+  .then(function(r){ return r.json().then(function(data){ return {ok: r.ok, data: data}; }); })
+  .then(function(resp) {
+    setLLMButtons(false);
+    llmStatus.textContent = '';
+    if (!resp.ok || resp.data.error && resp.data.action !== 'error' && resp.data.action !== 'blocked') {
+      llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">' + escHtml(resp.data.error || 'LLM request failed') + '</div>';
+      return;
+    }
+    if (resp.data.action === 'clarify') {
+      if (resp.data.follow_up) {
+        document.getElementById('llmPrompt').value = resp.data.follow_up;
+      }
+      llmAnswer.innerHTML = '<div class="alert alert-info py-2 mb-0" style="white-space:pre-wrap">' +
+        escHtml(resp.data.explanation || resp.data.follow_up || 'Clarification needed.') + '</div>';
+      return;
+    }
+    if (resp.data.sql) {
+      setEditorValue(resp.data.sql);
+    }
+    if (resp.data.action === 'blocked' || resp.data.action === 'error') {
+      renderError(resp.data.error || 'LLM-generated SQL could not be executed.');
+      llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0" style="white-space:pre-wrap">' +
+        escHtml(resp.data.explanation || resp.data.error || '') + '</div>';
+      return;
+    }
+    renderResult(resp.data);
+    if (resp.data.explanation) {
+      llmAnswer.innerHTML = '<div class="alert alert-info py-2 mb-0" style="white-space:pre-wrap">' + escHtml(resp.data.explanation) + '</div>';
+    }
+  })
+  .catch(function(err) {
+    setLLMButtons(false);
+    llmStatus.textContent = '';
+    llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">' + escHtml(err.message || err.toString()) + '</div>';
+  });
+}
+
+function setLLMButtons(disabled) {
+  ['llmSqlBtn', 'llmRunBtn', 'llmResultsBtn', 'llmErrorBtn', 'llmHealthBtn'].forEach(function(id) {
+    document.getElementById(id).disabled = disabled;
+  });
+}
+
+function testLLMHealth() {
+  var llmStatus = document.getElementById('llmStatus');
+  var llmAnswer = document.getElementById('llmAnswer');
+  llmStatus.textContent = 'Testing LLM...';
+  llmAnswer.innerHTML = '';
+  setLLMButtons(true);
+  fetch('/api/llm/health')
+    .then(function(r){ return r.json().then(function(data){ return {ok: r.ok, data: data}; }); })
+    .then(function(resp) {
+      setLLMButtons(false);
+      llmStatus.textContent = '';
+      if (!resp.ok || resp.data.error) {
+        llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">' + escHtml(resp.data.error || 'LLM health check failed') + '</div>';
+        return;
+      }
+      llmAnswer.innerHTML = '<div class="alert alert-success py-2 mb-0">LLM reachable: ' + escHtml(resp.data.response || 'OK') + '</div>';
+    })
+    .catch(function(err) {
+      setLLMButtons(false);
+      llmStatus.textContent = '';
+      llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">' + escHtml(err.message || err.toString()) + '</div>';
+    });
+}
+
+function runQuery() {
+  var sql = currentSQL().trim();
+  if (!sql) return;
+  var btn = document.getElementById('runBtn');
+  var status = document.getElementById('statusMsg');
+  btn.disabled = true;
+  status.textContent = 'Running…';
+
+  fetch('/api/query', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sql: sql})
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(data) {
+    btn.disabled = false;
+    renderResult(data);
+  })
+  .catch(function(err) {
+    btn.disabled = false;
+    status.textContent = '';
+    renderError(err.toString());
+  });
+}
+
+function clearEditor() {
+  setEditorValue('');
+  document.getElementById('resultArea').innerHTML = '';
+  document.getElementById('chartArea').innerHTML = '';
+  document.getElementById('statusMsg').textContent = '';
+  focusEditor();
+}
+
+function exportQuery(format) {
+  var sql = currentSQL().trim();
+  if (!sql) return;
+  var status = document.getElementById('statusMsg');
+  status.textContent = 'Exporting…';
+
+  fetch('/api/export', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sql: sql, format: format})
+  })
+  .then(function(r) {
+    if (!r.ok) {
+      return r.text().then(function(text) { throw new Error(text || r.statusText); });
+    }
+    return r.blob();
+  })
+  .then(function(blob) {
+    status.textContent = '';
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'query.' + format;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  })
+  .catch(function(err) {
+    status.textContent = '';
+    renderError(err.message || err.toString());
+  });
+}
+
+function currentSQL() {
+  if (sqlEditor) {
+    var selection = sqlEditor.getSelection();
+    var selectedText = selection ? sqlEditor.getModel().getValueInRange(selection) : '';
+    return selectedText || sqlEditor.getValue();
+  }
+  var ta = document.getElementById('sqlInput');
+  var selected = '';
+  if (typeof ta.selectionStart === 'number' && ta.selectionEnd > ta.selectionStart) {
+    selected = ta.value.slice(ta.selectionStart, ta.selectionEnd);
+  }
+  return selected || ta.value;
+}
+
+function shareQuery() {
+  var sql = getEditorValue();
+  if (!sql.trim()) return;
+  var encoded = utf8ToB64(sql);
+  var url = window.location.origin + window.location.pathname + '#q=' + encodeURIComponent(encoded);
+  window.location.hash = 'q=' + encodeURIComponent(encoded);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).catch(function(){});
+  }
+  document.getElementById('statusMsg').textContent = 'Share link copied';
+}
+
+function restoreQueryFromHash() {
+  var hash = window.location.hash || '';
+  if (hash.indexOf('#q=') !== 0) return;
+  try {
+    var encoded = decodeURIComponent(hash.slice(3));
+    var sql = b64ToUtf8(encoded);
+    if (sql.trim()) {
+      setEditorValue(sql);
+    }
+  } catch (e) {}
+}
+
+function getEditorValue() {
+  return sqlEditor ? sqlEditor.getValue() : document.getElementById('sqlInput').value;
+}
+
+function setEditorValue(value) {
+  if (sqlEditor) {
+    sqlEditor.setValue(value || '');
+    return;
+  }
+  document.getElementById('sqlInput').value = value || '';
+}
+
+function focusEditor() {
+  if (sqlEditor) {
+    sqlEditor.focus();
+    return;
+  }
+  document.getElementById('sqlInput').focus();
+}
+
+function loadMonacoEditor() {
+  if (window.require) {
+    initMonacoEditor();
+    return;
+  }
+  var script = document.createElement('script');
+  script.src = monacoBaseURL + '/vs/loader.min.js';
+  script.async = true;
+  script.onload = initMonacoEditor;
+  script.onerror = function() { sqlEditor = null; };
+  document.head.appendChild(script);
+}
+
+function initMonacoEditor() {
+  if (!window.require || !document.getElementById('monacoEditor')) return;
+  try {
+    window.MonacoEnvironment = {
+      getWorkerUrl: function() {
+        var code = "self.MonacoEnvironment={baseUrl:'" + monacoBaseURL + "/'};importScripts('" + monacoBaseURL + "/vs/base/worker/workerMain.js');";
+        return 'data:text/javascript;charset=utf-8,' + encodeURIComponent(code);
+      }
+    };
+    require.config({paths: {'vs': monacoBaseURL + '/vs'}});
+    require(['vs/editor/editor.main'], function() {
+      var textarea = document.getElementById('sqlInput');
+      var container = document.getElementById('monacoEditor');
+      sqlEditor = monaco.editor.create(container, {
+        value: textarea.value,
+        language: 'sql',
+        theme: 'vs-dark',
+        automaticLayout: true,
+        minimap: {enabled: false},
+        scrollBeyondLastLine: false,
+        fontSize: 13,
+        wordWrap: 'on'
+      });
+      textarea.classList.add('d-none');
+      container.classList.remove('d-none');
+      sqlEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runQuery);
+      sqlEditor.addCommand(monaco.KeyCode.F5, runQuery);
+    });
+  } catch (e) {
+    sqlEditor = null;
+  }
+}
+
+function utf8ToB64(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+
+function b64ToUtf8(str) {
+  return decodeURIComponent(escape(atob(str)));
+}
+
+function toggleSchemaPreview() {
+  var box = document.getElementById('schemaPreview');
+  var text = document.getElementById('schemaText');
+  if (!box.classList.contains('d-none')) {
+    box.classList.add('d-none');
+    return;
+  }
+  box.classList.remove('d-none');
+  text.textContent = 'Loading schema context...';
+  fetch('/api/schema')
+    .then(function(r) { return r.text(); })
+    .then(function(body) {
+      try {
+        text.textContent = JSON.stringify(JSON.parse(body), null, 2);
+      } catch (e) {
+        text.textContent = body;
+      }
+    })
+    .catch(function(err) {
+      text.textContent = err.message || String(err);
+    });
+}
+
+function copySchemaPreview() {
+  var value = document.getElementById('schemaText').textContent || '';
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(value).catch(function(){});
+  }
+}
+
+function renderError(msg) {
+  var sql = currentSQL().trim();
+  if (sql) saveLocalQueryHistory(sql, 0, 0, msg);
+  lastResultData = null;
+  lastErrorMessage = msg;
+  document.getElementById('statusMsg').textContent = '';
+  document.getElementById('chartArea').innerHTML = '';
+  document.getElementById('resultArea').innerHTML =
+    '<div class="alert alert-danger mt-1 py-2"><i class="bi bi-exclamation-triangle-fill me-2"></i>' +
+    escHtml(msg) + '</div>';
+}
+
+function renderResult(data) {
+  var status = document.getElementById('statusMsg');
+  var area = document.getElementById('resultArea');
+
+  if (data.error) {
+    lastResultData = null;
+    lastErrorMessage = data.error;
+    status.textContent = '';
+    document.getElementById('chartArea').innerHTML = '';
+    area.innerHTML = '<div class="alert alert-danger mt-1 py-2"><i class="bi bi-exclamation-triangle-fill me-2"></i>' +
+      escHtml(data.error) + '</div>';
+    return;
+  }
+
+  var ms = data.elapsed_ms || 0;
+  if (data.columns && data.columns.length > 0) {
+    lastResultData = data;
+    lastErrorMessage = '';
+    var rows = data.rows || [];
+    saveLocalQueryHistory(currentSQL().trim(), rows.length, ms, '');
+    status.textContent = rows.length + ' row(s) · ' + ms + ' ms';
+    var html = '<div class="card mt-1"><div class="table-responsive">' +
+      '<table class="table table-sm table-hover result-table mb-0"><thead><tr>';
+    data.columns.forEach(function(c){ html += '<th>' + escHtml(c) + '</th>'; });
+    html += '</tr></thead><tbody>';
+    rows.forEach(function(row){
+      html += '<tr>';
+      row.forEach(function(cell){
+        html += '<td>' + (cell === '' ? '<span class="null-cell">null</span>' : escHtml(cell)) + '</td>';
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table></div></div>';
+    area.innerHTML = html;
+    renderQuickChart(data);
+  } else {
+    lastResultData = null;
+    lastErrorMessage = '';
+    saveLocalQueryHistory(currentSQL().trim(), data.affected || 0, ms, '');
+    document.getElementById('chartArea').innerHTML = '';
+    var affected = data.affected || 0;
+    status.textContent = '';
+    area.innerHTML = '<div class="alert alert-success mt-1 py-2"><i class="bi bi-check-circle-fill me-2"></i>' +
+      'OK — ' + affected + ' row(s) affected · ' + ms + ' ms</div>';
+  }
+}
+
+function saveLocalQueryHistory(sql, rowCount, elapsedMs, errorText) {
+  if (!sql) return;
+  var items = loadLocalQueryHistory().filter(function(item) { return item.sql !== sql; });
+  items.unshift({
+    sql: sql,
+    rowCount: rowCount || 0,
+    elapsedMs: elapsedMs || 0,
+    error: errorText || '',
+    at: new Date().toISOString()
+  });
+  if (items.length > maxLocalQueryHistory) {
+    items = items.slice(0, maxLocalQueryHistory);
+  }
+  try {
+    localStorage.setItem(queryHistoryKey, JSON.stringify(items));
+  } catch (e) {
+    return;
+  }
+  renderLocalQueryHistory();
+}
+
+function loadLocalQueryHistory() {
+  try {
+    var raw = localStorage.getItem(queryHistoryKey);
+    return raw ? JSON.parse(raw) || [] : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function renderLocalQueryHistory() {
+  var target = document.getElementById('queryHistory');
+  if (!target) return;
+  var items = loadLocalQueryHistory();
+  if (items.length === 0) {
+    target.innerHTML = '<div class="text-muted">No local queries yet.</div>';
+    return;
+  }
+  var html = '<div class="list-group list-group-flush">';
+  items.forEach(function(item, idx) {
+    var label = item.sql.replace(/\s+/g, ' ').trim();
+    if (label.length > 92) label = label.slice(0, 92) + '...';
+    html += '<button type="button" class="list-group-item list-group-item-action px-0 py-2" onclick="restoreLocalQueryHistory(' + idx + ')">' +
+      '<span class="d-block text-truncate">' + escHtml(label) + '</span>' +
+      '<span class="text-muted">' + escHtml(formatHistoryTime(item.at)) + ' · ' + escHtml(item.rowCount || 0) + ' row(s) · ' + escHtml(item.elapsedMs || 0) + ' ms</span>' +
+      '</button>';
+  });
+  html += '</div>';
+  target.innerHTML = html;
+}
+
+function restoreLocalQueryHistory(idx) {
+  var item = loadLocalQueryHistory()[idx];
+  if (!item) return;
+  setEditorValue(item.sql);
+  focusEditor();
+}
+
+function clearLocalQueryHistory() {
+  try { localStorage.removeItem(queryHistoryKey); } catch (e) {}
+  renderLocalQueryHistory();
+}
+
+function formatHistoryTime(value) {
+  var d = new Date(value);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleString();
+}
+
+function renderQuickChart(data) {
+  var area = document.getElementById('chartArea');
+  area.innerHTML = '';
+  if (!window.d3 || !data || !data.columns || data.columns.length < 2 || !data.rows || data.rows.length === 0) {
+    return;
+  }
+  var numericIdx = -1;
+  var timeIdx = -1;
+  data.columns.forEach(function(col, idx) {
+    if (timeIdx < 0 && /date|time|year|month|tag|datum/i.test(col || '')) {
+      var parseable = 0;
+      data.rows.forEach(function(row) {
+        if (parseChartDate(row[idx])) parseable++;
+      });
+      if (parseable >= Math.min(2, data.rows.length)) timeIdx = idx;
+    }
+  });
+  for (var c = 1; c < data.columns.length; c++) {
+    if (c === timeIdx) continue;
+    var numericCount = 0;
+    data.rows.forEach(function(row) {
+      if (row[c] !== '' && !isNaN(Number(row[c]))) numericCount++;
+    });
+    if (numericCount > 0 && numericCount >= Math.ceil(data.rows.length * 0.6)) {
+      numericIdx = c;
+      break;
+    }
+  }
+  if (numericIdx < 0) return;
+  var points = data.rows.slice(0, 30).map(function(row) {
+    return {
+      label: String(row[timeIdx >= 0 ? timeIdx : 0] || ''),
+      value: Number(row[numericIdx] || 0),
+      date: timeIdx >= 0 ? parseChartDate(row[timeIdx]) : null
+    };
+  }).filter(function(d) { return !isNaN(d.value); });
+  if (points.length === 0) return;
+  area.innerHTML = '<div class="card h-100"><div class="card-body py-2">' +
+    '<div class="d-flex justify-content-between align-items-center mb-2">' +
+    '<h2 class="h6 mb-0"><i class="bi bi-bar-chart text-primary"></i> Quick Chart</h2>' +
+    '<span class="small text-muted">' + escHtml(data.columns[timeIdx >= 0 ? timeIdx : 0]) + ' / ' + escHtml(data.columns[numericIdx]) + '</span>' +
+    '</div><div id="quickChart"></div></div></div>';
+  var width = Math.max(320, area.querySelector('.card-body').clientWidth - 12);
+  var height = 220;
+  var margin = {top: 8, right: 12, bottom: 54, left: 54};
+  var svg = d3.select('#quickChart').append('svg')
+    .attr('viewBox', '0 0 ' + width + ' ' + height)
+    .attr('role', 'img');
+  var maxY = d3.max(points, function(d) { return d.value; }) || 0;
+  var y = d3.scaleLinear()
+    .domain([0, maxY]).nice()
+    .range([height - margin.bottom, margin.top]);
+  svg.append('g')
+    .attr('transform', 'translate(' + margin.left + ',0)')
+    .call(d3.axisLeft(y).ticks(5));
+  if (timeIdx >= 0 && points.filter(function(d) { return d.date; }).length >= 2) {
+    points = points.filter(function(d) { return d.date; }).sort(function(a, b) { return a.date - b.date; });
+    var xTime = d3.scaleTime()
+      .domain(d3.extent(points, function(d) { return d.date; }))
+      .range([margin.left, width - margin.right]);
+    svg.append('g')
+      .attr('transform', 'translate(0,' + (height - margin.bottom) + ')')
+      .call(d3.axisBottom(xTime).ticks(5));
+    svg.append('path')
+      .datum(points)
+      .attr('fill', 'none')
+      .attr('stroke', '#1565c0')
+      .attr('stroke-width', 2)
+      .attr('d', d3.line().x(function(d) { return xTime(d.date); }).y(function(d) { return y(d.value); }));
+    svg.append('g')
+      .selectAll('circle')
+      .data(points)
+      .join('circle')
+      .attr('cx', function(d) { return xTime(d.date); })
+      .attr('cy', function(d) { return y(d.value); })
+      .attr('r', 3)
+      .attr('fill', '#1565c0');
+  } else {
+    var x = d3.scaleBand()
+      .domain(points.map(function(d) { return d.label; }))
+      .range([margin.left, width - margin.right])
+      .padding(0.18);
+    svg.append('g')
+      .attr('transform', 'translate(0,' + (height - margin.bottom) + ')')
+      .call(d3.axisBottom(x).tickFormat(function(d) { return String(d).slice(0, 12); }))
+      .selectAll('text')
+      .attr('transform', 'rotate(-35)')
+      .style('text-anchor', 'end');
+    svg.append('g')
+      .selectAll('rect')
+      .data(points)
+      .join('rect')
+      .attr('x', function(d) { return x(d.label); })
+      .attr('y', function(d) { return y(Math.max(0, d.value)); })
+      .attr('width', x.bandwidth())
+      .attr('height', function(d) { return Math.max(0, y(0) - y(Math.max(0, d.value))); })
+      .attr('fill', '#1565c0');
+  }
+}
+
+function parseChartDate(value) {
+  if (value === null || value === undefined || value === '') return null;
+  var s = String(value);
+  if (/^\d{4}$/.test(s)) return new Date(Number(s), 0, 1);
+  if (/^\d{4}-\d{2}$/.test(s)) return new Date(Number(s.slice(0, 4)), Number(s.slice(5, 7)) - 1, 1);
+  var d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+</script>
+
+{{template "base_end" .}}
+{{end}}

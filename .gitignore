@@ -1,0 +1,5 @@
+/dbweb
+/*.db
+/*.gob
+.gocache
+ROADMAP.md

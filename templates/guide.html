@@ -1,0 +1,74 @@
+{{define "guide"}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection)}}
+
+<div class="page-hdr">
+  <h1><i class="bi bi-journal-text text-primary"></i>Guide</h1>
+  <a href="/query" class="btn btn-sm btn-outline-secondary">
+    <i class="bi bi-terminal me-1"></i>SQL Editor
+  </a>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6">Getting Started</h2>
+    <div class="row g-3">
+      <div class="col-md-4">
+        <div class="metric">
+          <div class="fw-semibold"><i class="bi bi-plus-lg text-primary me-1"></i>Create</div>
+          <div class="small text-muted">Create a local table when you want to model data directly in DataDock.</div>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="metric">
+          <div class="fw-semibold"><i class="bi bi-upload text-primary me-1"></i>Import</div>
+          <div class="small text-muted">Upload CSV, TSV, JSON, or an XLSX first sheet into a new tinySQL table.</div>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="metric">
+          <div class="fw-semibold"><i class="bi bi-terminal text-primary me-1"></i>Query</div>
+          <div class="small text-muted">Use the SQL editor for exploration, exports, charts, and LLM-assisted SQL.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="import" class="card">
+  <div class="card-body">
+    <h2 class="h6">Import Notes</h2>
+    <table class="table table-sm mb-0">
+      <thead><tr><th>Format</th><th>Behavior</th></tr></thead>
+      <tbody>
+        <tr><td>CSV / TSV</td><td>Header row can be auto-detected, forced present, or forced absent.</td></tr>
+        <tr><td>JSON / NDJSON</td><td>Imports an array of objects into columns derived from object keys.</td></tr>
+        <tr><td>XLSX</td><td>Reads the first worksheet and imports it through the CSV path.</td></tr>
+        <tr><td>Demo Data</td><td>Creates related departments, people, projects, events, invoices, and support tickets.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6">Useful Starter Queries</h2>
+    <pre class="mb-0">SELECT * FROM datadock_demo_people;
+SELECT d.name AS department, COUNT(p.id) AS people
+FROM datadock_demo_departments d
+JOIN datadock_demo_people p ON p.department_id = d.id
+GROUP BY d.name;
+SELECT p.name, pr.name AS project, pr.status, pr.budget
+FROM datadock_demo_people p
+JOIN datadock_demo_projects pr ON pr.owner_id = p.id;
+SELECT project_id, SUM(amount) AS event_total
+FROM datadock_demo_events
+GROUP BY project_id;
+SELECT pr.name, SUM(i.amount) AS invoiced
+FROM datadock_demo_projects pr
+JOIN datadock_demo_invoices i ON i.project_id = pr.id
+GROUP BY pr.name;</pre>
+  </div>
+</div>
+
+{{template "base_end" .}}
+{{end}}

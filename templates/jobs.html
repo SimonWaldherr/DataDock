@@ -1,0 +1,93 @@
+{{define "jobs"}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection)}}
+
+<div class="page-hdr">
+  <h1><i class="bi bi-calendar2-check text-primary"></i>Jobs</h1>
+</div>
+
+{{template "alert" .}}
+
+<div class="card">
+  <div class="card-body">
+    <form id="jobForm" class="row g-2" onsubmit="createJob(event)">
+      <div class="col-md-3">
+        <input class="form-control form-control-sm" name="name" placeholder="job_name" required>
+      </div>
+      <div class="col-md-2">
+        <select class="form-select form-select-sm" name="schedule_type">
+          <option value="INTERVAL">Interval</option>
+          <option value="CRON">Cron</option>
+          <option value="ONCE">Once</option>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <input class="form-control form-control-sm" name="interval_ms" placeholder="interval ms" value="3600000">
+      </div>
+      <div class="col-md-3">
+        <input class="form-control form-control-sm" name="cron_expr" placeholder="cron expr">
+      </div>
+      <div class="col-md-2">
+        <button class="btn btn-primary btn-sm w-100" type="submit">Save</button>
+      </div>
+      <div class="col-12">
+        <textarea class="form-control form-control-sm" name="sql" rows="3" placeholder="SELECT COUNT(*) AS total FROM table_name" required></textarea>
+      </div>
+    </form>
+    <div id="jobStatus" class="small mt-2"></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6">Registered Jobs</h2>
+    <div class="table-responsive">
+      <table class="table table-sm datasheet">
+        <thead><tr><th>Name</th><th>Schedule</th><th>Enabled</th><th>Last</th><th>Next</th><th></th></tr></thead>
+        <tbody>
+          {{range .Jobs}}
+          <tr>
+            <td>{{.Name}}</td>
+            <td>{{.ScheduleType}}</td>
+            <td>{{.Enabled}}</td>
+            <td>{{with .LastRunAt}}{{.}}{{end}}</td>
+            <td>{{with .NextRunAt}}{{.}}{{end}}</td>
+            <td><button class="btn btn-outline-primary btn-sm" onclick="runJob('{{.Name}}')">Run</button></td>
+          </tr>
+          {{else}}
+          <tr><td colspan="6" class="text-muted">No jobs registered.</td></tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+function createJob(e) {
+  e.preventDefault();
+  var f = e.target;
+  var payload = {
+    name: f.elements['name'].value,
+    sql: f.elements['sql'].value,
+    schedule_type: f.elements['schedule_type'].value,
+    interval_ms: parseInt(f.elements['interval_ms'].value || '0', 10),
+    cron_expr: f.elements['cron_expr'].value,
+    enabled: true,
+    no_overlap: true
+  };
+  fetch('/api/jobs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)})
+    .then(function(r){ return r.json().then(function(data){ return {ok:r.ok,data:data}; }); })
+    .then(function(resp){
+      document.getElementById('jobStatus').innerHTML = resp.ok ? 'Saved.' : (resp.data.error || 'Error');
+      if (resp.ok) location.reload();
+    });
+}
+function runJob(name) {
+  fetch('/api/jobs/run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name:name})})
+    .then(function(r){ return r.json(); })
+    .then(function(data){ document.getElementById('jobStatus').innerHTML = data.error || ('Run finished: ' + data.status); });
+}
+</script>
+
+{{template "base_end" .}}
+{{end}}

@@ -1,0 +1,224 @@
+{{define "admin"}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection)}}
+
+<div class="page-hdr">
+  <h1><i class="bi bi-speedometer2 text-primary"></i>Admin</h1>
+</div>
+
+{{template "alert" .}}
+
+<div class="card">
+  <div class="card-body">
+    <form method="post" action="/admin/settings" class="row g-3">
+      <div class="col-md-3">
+        <label class="form-label small text-muted">Dialect</label>
+        <input class="form-control form-control-sm" name="dialect" value="{{.Settings.Dialect}}" placeholder="tinysql">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small text-muted">Connect Timeout</label>
+        <input class="form-control form-control-sm" name="connect_timeout" value="{{.Settings.ConnectTimeout}}" placeholder="10s">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small text-muted">Query Timeout</label>
+        <input class="form-control form-control-sm" name="query_timeout" value="{{.Settings.QueryTimeout}}" placeholder="60s">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small text-muted">LLM Timeout</label>
+        <input class="form-control form-control-sm" name="llm_timeout" value="{{.Settings.LLMTimeout}}" placeholder="45s">
+      </div>
+      <div class="col-md-5">
+        <label class="form-label small text-muted">OpenAI-compatible Base URL</label>
+        <input class="form-control form-control-sm" name="llm_base_url" value="{{.Settings.LLMBaseURL}}" placeholder="http://127.0.0.1:1234/v1">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small text-muted">Model</label>
+        <input class="form-control form-control-sm" name="llm_model" value="{{.Settings.LLMModel}}" placeholder="local-model">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small text-muted">API Key</label>
+        <input class="form-control form-control-sm" name="llm_api_key" type="password" placeholder="{{if .Settings.LLMAPIKeySet}}{{.Settings.LLMAPIKeyDisplay}}{{else}}optional{{end}}">
+      </div>
+      <div class="col-md-1 d-flex align-items-end">
+        <button class="btn btn-primary btn-sm w-100" type="submit">Save</button>
+      </div>
+      <div class="col-12 small text-muted">
+        LLM is {{if .Settings.LLMConfigured}}configured{{else}}disabled{{end}}. Leave Base URL or Model empty to run without any LLM server.
+      </div>
+      <div class="col-12">
+        <div class="border rounded p-3">
+          <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+            <div class="fw-semibold"><i class="bi bi-magic text-primary me-1"></i>LLM Auto Config</div>
+            <span id="llmAutoStatus" class="small text-muted"></span>
+          </div>
+          <div class="row g-2 align-items-end">
+            <div class="col-md-3">
+              <label class="form-label small text-muted">Host / IP</label>
+              <input id="llmAutoHost" class="form-control form-control-sm" placeholder="localhost">
+            </div>
+            <div class="col-md-2">
+              <label class="form-label small text-muted">Port</label>
+              <input id="llmAutoPort" class="form-control form-control-sm" placeholder="1234">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small text-muted">Detected Server</label>
+              <select id="llmAutoServer" class="form-select form-select-sm"></select>
+            </div>
+            <div class="col-md-2">
+              <label class="form-label small text-muted">Model</label>
+              <select id="llmAutoModel" class="form-select form-select-sm"></select>
+            </div>
+            <div class="col-md-2 d-flex gap-2">
+              <button class="btn btn-outline-secondary btn-sm flex-fill" type="button" onclick="detectLLMServers()">
+                <i class="bi bi-search me-1"></i>Detect
+              </button>
+              <button class="btn btn-primary btn-sm flex-fill" type="button" onclick="applyLLMAutoConfig()">
+                <i class="bi bi-check2 me-1"></i>Apply
+              </button>
+            </div>
+          </div>
+          <div class="small text-muted mt-2">
+            Detects LM Studio / llmster on port 1234 by default and Ollama on 11434. Host and port can be overridden.
+          </div>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-3">
+        <div class="metric">
+          <div class="small text-muted">Health</div>
+          <div class="fs-5 fw-semibold">{{if index .Status "ok"}}OK{{else}}Error{{end}}</div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="metric">
+          <div class="small text-muted">Storage</div>
+          <div class="fs-5 fw-semibold">{{index .Status "storage_mode"}}</div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="metric">
+          <div class="small text-muted">Tables</div>
+          <div class="fs-5 fw-semibold">{{index .Status "tables"}}</div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="metric">
+          <div class="small text-muted">Scheduler</div>
+          <div class="fs-5 fw-semibold">{{if index .Status "scheduler_running"}}Running{{else}}Stopped{{end}}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <h2 class="h6 mb-0">Status JSON</h2>
+      <button class="btn btn-outline-secondary btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('adminStatus').innerText)">Copy</button>
+    </div>
+    <pre id="adminStatus" class="small mb-0" style="max-height:520px;overflow:auto">{{printf "%#v" .Status}}</pre>
+  </div>
+</div>
+
+<script>
+var llmDetectedServers = [];
+
+function setLLMAutoStatus(text, kind) {
+  var el = document.getElementById('llmAutoStatus');
+  if (!el) return;
+  el.className = 'small ' + (kind === 'error' ? 'text-danger' : kind === 'ok' ? 'text-success' : 'text-muted');
+  el.textContent = text || '';
+}
+
+function refreshLLMAutoModels() {
+  var serverSelect = document.getElementById('llmAutoServer');
+  var modelSelect = document.getElementById('llmAutoModel');
+  if (!serverSelect || !modelSelect) return;
+  var server = llmDetectedServers[Number(serverSelect.value || 0)];
+  modelSelect.innerHTML = '';
+  if (!server || !server.models || !server.models.length) {
+    modelSelect.add(new Option('No models', ''));
+    return;
+  }
+  server.models.forEach(function(model) {
+    modelSelect.add(new Option(model, model));
+  });
+}
+
+function renderLLMDetection(data) {
+  llmDetectedServers = data.servers || [];
+  var serverSelect = document.getElementById('llmAutoServer');
+  if (!serverSelect) return;
+  serverSelect.innerHTML = '';
+  if (!llmDetectedServers.length) {
+    serverSelect.add(new Option('No server found', ''));
+    refreshLLMAutoModels();
+    setLLMAutoStatus('No local LLM server found', 'error');
+    return;
+  }
+  llmDetectedServers.forEach(function(server, idx) {
+    var label = server.name + ' · ' + server.base_url + ' · ' + (server.models || []).length + ' models';
+    serverSelect.add(new Option(label, String(idx)));
+  });
+  serverSelect.onchange = refreshLLMAutoModels;
+  refreshLLMAutoModels();
+  setLLMAutoStatus('Detected ' + llmDetectedServers.length + ' server(s)', 'ok');
+}
+
+function detectLLMServers() {
+  var host = document.getElementById('llmAutoHost').value.trim();
+  var port = document.getElementById('llmAutoPort').value.trim();
+  var params = new URLSearchParams();
+  if (host) params.set('host', host);
+  if (port) params.set('port', port);
+  setLLMAutoStatus('Detecting...', '');
+  fetch('/api/llm/discover?' + params.toString())
+    .then(function(resp) { return resp.json().then(function(data) { return { ok: resp.ok, data: data }; }); })
+    .then(function(resp) {
+      if (!resp.ok) throw new Error(resp.data.error || 'Discovery failed');
+      renderLLMDetection(resp.data);
+    })
+    .catch(function(err) {
+      llmDetectedServers = [];
+      renderLLMDetection({ servers: [] });
+      setLLMAutoStatus(err.message || err.toString(), 'error');
+    });
+}
+
+function applyLLMAutoConfig() {
+  var serverSelect = document.getElementById('llmAutoServer');
+  var modelSelect = document.getElementById('llmAutoModel');
+  var server = llmDetectedServers[Number((serverSelect && serverSelect.value) || 0)];
+  var payload = {
+    host: document.getElementById('llmAutoHost').value.trim(),
+    port: document.getElementById('llmAutoPort').value.trim(),
+    base_url: server ? server.base_url : '',
+    model: modelSelect ? modelSelect.value : ''
+  };
+  setLLMAutoStatus('Applying...', '');
+  fetch('/api/llm/autoconfig', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+    .then(function(resp) { return resp.json().then(function(data) { return { ok: resp.ok, data: data }; }); })
+    .then(function(resp) {
+      if (!resp.ok) throw new Error(resp.data.error || 'Auto config failed');
+      document.querySelector('[name="llm_base_url"]').value = resp.data.llm_base_url || '';
+      document.querySelector('[name="llm_model"]').value = resp.data.llm_model || '';
+      document.querySelector('[name="llm_timeout"]').value = resp.data.llm_timeout || '45s';
+      setLLMAutoStatus('LLM settings applied', 'ok');
+    })
+    .catch(function(err) {
+      setLLMAutoStatus(err.message || err.toString(), 'error');
+    });
+}
+</script>
+{{template "base_end" .}}
+{{end}}

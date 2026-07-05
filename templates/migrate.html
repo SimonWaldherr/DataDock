@@ -1,0 +1,82 @@
+{{define "migrate"}}
+{{template "base_start" .}}
+
+<div class="page-hdr">
+  <h1><i class="bi bi-arrow-left-right text-primary"></i>Migration</h1>
+</div>
+
+{{template "alert" .}}
+
+<div class="card">
+  <div class="card-body">
+    <form method="get" action="/migrate" class="row g-2 align-items-end">
+      <div class="col-md-4">
+        <label class="form-label small">Source</label>
+        <select class="form-select form-select-sm" name="source">
+          {{range .Connections}}
+          <option value="{{.ID}}" {{if eq $.SelectedSourceID .ID}}selected{{end}}>{{.Name}} ({{.Kind}})</option>
+          {{end}}
+        </select>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label small">Target</label>
+        <select class="form-select form-select-sm" name="target">
+          {{range .Connections}}
+          <option value="{{.ID}}" {{if eq $.SelectedTargetID .ID}}selected{{end}}>{{.Name}} ({{.Kind}})</option>
+          {{end}}
+        </select>
+      </div>
+      <div class="col-md-2">
+        <button class="btn btn-outline-primary btn-sm w-100">Load Tables</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <form method="post" action="/migrate" class="row g-3">
+      <input type="hidden" name="source_id" value="{{.SelectedSourceID}}">
+      <input type="hidden" name="target_id" value="{{.SelectedTargetID}}">
+      <div class="col-md-4">
+        <label class="form-label small">Source Table</label>
+        <select class="form-select form-select-sm" name="source_table" required>
+          {{range .SourceTables}}
+          <option value="{{.}}" {{if eq $.SourceTable .}}selected{{end}}>{{.}}</option>
+          {{else}}
+          <option value="">No tables available</option>
+          {{end}}
+        </select>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label small">Target Table</label>
+        <input class="form-control form-control-sm" name="target_table" value="{{.TargetTable}}" placeholder="leave empty to reuse source name">
+      </div>
+      <div class="col-md-2 d-flex align-items-end">
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" name="create_target" id="createTarget" {{if .CreateTarget}}checked{{end}}>
+          <label class="form-check-label small" for="createTarget">Create target</label>
+        </div>
+      </div>
+      <div class="col-md-2 d-flex align-items-end">
+        <button class="btn btn-primary btn-sm w-100"><i class="bi bi-arrow-left-right"></i> Run</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{{with .Summary}}
+<div class="card">
+  <div class="card-body">
+    <div class="row g-3 small">
+      <div class="col-md-3"><span class="text-muted d-block">Source</span><strong>{{.SourceID}}</strong></div>
+      <div class="col-md-3"><span class="text-muted d-block">Target</span><strong>{{.TargetID}}</strong></div>
+      <div class="col-md-3"><span class="text-muted d-block">Table</span><strong>{{.SourceTable}} -> {{.TargetTable}}</strong></div>
+      <div class="col-md-3"><span class="text-muted d-block">Rows</span><strong>{{.Rows}}</strong></div>
+    </div>
+  </div>
+</div>
+{{end}}
+
+{{template "base_end" .}}
+{{end}}

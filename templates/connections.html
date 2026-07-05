@@ -1,0 +1,136 @@
+{{define "connections"}}
+{{template "base_start" .}}
+
+<div class="page-hdr">
+  <h1><i class="bi bi-hdd-network text-primary"></i>Connections</h1>
+  <a href="/guide" class="btn btn-sm btn-outline-secondary"><i class="bi bi-journal-text me-1"></i>Guide</a>
+</div>
+
+{{template "alert" .}}
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Kind</th>
+          <th>Dialect</th>
+          <th>DSN</th>
+          <th class="text-end">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Connections}}
+        <tr>
+          <td>
+            <div class="fw-semibold">{{.Name}}</div>
+            <span class="text-muted small">{{.ID}}</span>
+          </td>
+          <td>{{.Kind}}</td>
+          <td>{{.Dialect}}</td>
+          <td><span class="text-muted small">{{if .DSNDisplay}}{{.DSNDisplay}}{{else}}embedded{{end}}</span></td>
+          <td class="text-end">
+            {{if .Active}}
+            <span class="badge text-bg-success">Active</span>
+            {{else}}
+            <form method="post" action="/connections/active" class="d-inline">
+              <input type="hidden" name="id" value="{{.ID}}">
+              <button class="btn btn-sm btn-outline-primary">Use</button>
+            </form>
+            {{end}}
+            {{if .Default}}
+            <span class="badge bg-light text-secondary border ms-1">Default</span>
+            {{else if ne .ID "default"}}
+            <form method="post" action="/connections/active" class="d-inline">
+              <input type="hidden" name="id" value="{{.ID}}">
+              <input type="hidden" name="set_default" value="1">
+              <button class="btn btn-sm btn-outline-secondary">Default</button>
+            </form>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6 mb-3">Add Managed Connection</h2>
+    <form method="post" action="/connections" class="row g-2">
+      <div class="col-md-2">
+        <label class="form-label small">ID</label>
+        <input class="form-control form-control-sm" name="id" placeholder="prod-pg" required>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small">Name</label>
+        <input class="form-control form-control-sm" name="name" placeholder="Production PG">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small">Type</label>
+        <select class="form-select form-select-sm" name="kind" id="connectionKind">
+          <option value="auto" selected>Auto detect</option>
+          <option value="postgres">PostgreSQL</option>
+          <option value="mysql">MariaDB/MySQL</option>
+          <option value="mssql">Microsoft SQL Server</option>
+          <option value="sqlite">SQLite</option>
+        </select>
+      </div>
+      <div class="col-md-5">
+        <label class="form-label small">DSN</label>
+        <input class="form-control form-control-sm" name="dsn" id="connectionDSN" placeholder="postgres://user:pass@host/db?sslmode=disable" required>
+      </div>
+      <div class="col-md-1 d-flex align-items-end">
+        <button class="btn btn-primary btn-sm w-100">Add</button>
+      </div>
+      <div class="col-12 d-flex gap-3 flex-wrap small">
+        <label class="form-check">
+          <input class="form-check-input" type="checkbox" name="save" value="1" checked>
+          <span class="form-check-label">Store connection</span>
+        </label>
+        <label class="form-check">
+          <input class="form-check-input" type="checkbox" name="set_default" value="1">
+          <span class="form-check-label">Use as default connection</span>
+        </label>
+        <span class="text-muted">Auto-detect recognizes PostgreSQL URLs, MySQL tcp DSNs, SQL Server URLs, and SQLite paths.</span>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6 mb-2">Auto-Detect Sources</h2>
+    <div class="small text-muted">
+      DataDock also checks <code>DATABASE_URL</code>, <code>POSTGRES_URL</code>, <code>MYSQL_URL</code>, <code>MARIADB_URL</code>, <code>MSSQL_URL</code>, <code>SQLITE_PATH</code>, and <code>DATADOCK_CONNECTIONS</code> at startup. <code>DATADOCK_CONNECTIONS</code> accepts a JSON array with id, name, kind, dsn, and default.
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var dsn = document.getElementById('connectionDSN');
+  var kind = document.getElementById('connectionKind');
+  if (!dsn || !kind) return;
+  function detectKind(value) {
+    value = (value || '').trim().toLowerCase();
+    if (value.indexOf('postgres://') === 0 || value.indexOf('postgresql://') === 0) return 'postgres';
+    if (value.indexOf('mysql://') === 0 || value.indexOf('@tcp(') >= 0) return 'mysql';
+    if (value.indexOf('mssql://') === 0 || value.indexOf('sqlserver://') === 0) return 'mssql';
+    if (value.indexOf('sqlite://') === 0 || /\.(db|sqlite|sqlite3)$/.test(value) || value === ':memory:') return 'sqlite';
+    return 'auto';
+  }
+  dsn.addEventListener('input', function () {
+    if (kind.value === 'auto') {
+      var detected = detectKind(dsn.value);
+      dsn.dataset.detectedKind = detected;
+      dsn.title = detected === 'auto' ? 'Type will be detected on submit' : 'Detected: ' + detected;
+    }
+  });
+})();
+</script>
+
+{{template "base_end" .}}
+{{end}}

@@ -1,0 +1,25 @@
+{{define "object_missing"}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection)}}
+
+<div class="empty-state">
+  <i class="bi bi-exclamation-circle"></i>
+  <p class="fw-semibold fs-5 mb-1">Table or view not found</p>
+  <p class="text-muted mb-3 small">
+    {{with .ObjectName}}<strong>{{.}}</strong> is not available on the active connection.{{else}}The requested object is not available.{{end}}
+  </p>
+  {{with .Detail}}<p class="text-muted small mb-3">{{.}}</p>{{end}}
+  <div class="toolbar justify-content-center">
+    <a href="/" class="btn btn-primary btn-sm">
+      <i class="bi bi-grid-3x3-gap me-1"></i>Browse Available
+    </a>
+    <a href="/query" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-terminal me-1"></i>SQL Editor
+    </a>
+    <a href="/import" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-upload me-1"></i>Import File
+    </a>
+  </div>
+</div>
+
+{{template "base_end" .}}
+{{end}}

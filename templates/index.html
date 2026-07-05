@@ -1,0 +1,35 @@
+{{define "index"}}
+{{template "base_start" .}}
+
+<div class="empty-state">
+  <i class="bi bi-grid-3x3-gap"></i>
+  <p class="fw-semibold fs-5 mb-1">No tables yet</p>
+  <p class="text-muted mb-3 small">Create a local table, connect an external database, or run SQL directly.</p>
+  <div class="toolbar justify-content-center">
+    <a href="/create-table" class="btn btn-primary btn-sm">
+      <i class="bi bi-plus-lg me-1"></i>Create Table
+    </a>
+    <a href="/connections" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-hdd-network me-1"></i>Connect DB
+    </a>
+    <a href="/query" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-terminal me-1"></i>SQL Editor
+    </a>
+  </div>
+  <div class="toolbar justify-content-center mt-2">
+    <a href="/import" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-upload me-1"></i>Import File
+    </a>
+    <form method="post" action="/demo-data" class="d-inline">
+      <button class="btn btn-outline-secondary btn-sm" type="submit">
+        <i class="bi bi-database-add me-1"></i>Import Demo Data
+      </button>
+    </form>
+    <a href="/guide" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-journal-text me-1"></i>Guide
+    </a>
+  </div>
+</div>
+
+{{template "base_end" .}}
+{{end}}

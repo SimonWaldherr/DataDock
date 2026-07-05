@@ -1,0 +1,251 @@
+package main
+
+import (
+	"sort"
+	"strings"
+	"unicode"
+
+	tinysql "github.com/SimonWaldherr/tinySQL"
+)
+
+type LLMSkillProfile struct {
+	Name           string   `json:"name"`
+	Purpose        string   `json:"purpose"`
+	Instructions   []string `json:"instructions"`
+	OutputContract string   `json:"output_contract"`
+}
+
+type ragContextDoc struct {
+	Dialect       DialectProfile       `json:"dialect"`
+	Skill         LLMSkillProfile      `json:"skill"`
+	Retrieval     ragRetrievalDoc      `json:"retrieval"`
+	Tables        []ragTableDoc        `json:"tables"`
+	Relationships []ragRelationshipDoc `json:"relationships,omitempty"`
+}
+
+type ragRetrievalDoc struct {
+	Method         string   `json:"method"`
+	QueryTerms     []string `json:"query_terms,omitempty"`
+	SelectedTables []string `json:"selected_tables,omitempty"`
+	TotalTables    int      `json:"total_tables,omitempty"`
+	MaxTables      int      `json:"max_tables,omitempty"`
+	Truncated      bool     `json:"truncated"`
+}
+
+type ragColumnDoc struct {
+	Name       string   `json:"name"`
+	Type       string   `json:"type"`
+	Constraint string   `json:"constraint,omitempty"`
+	References string   `json:"references,omitempty"`
+	Samples    []string `json:"samples,omitempty"`
+}
+
+type ragTableDoc struct {
+	Name    string         `json:"name"`
+	Kind    string         `json:"kind,omitempty"`
+	Rows    int            `json:"rows"`
+	Columns []ragColumnDoc `json:"columns"`
+}
+
+type ragRelationshipDoc struct {
+	From     string `json:"from"`
+	To       string `json:"to"`
+	OnDelete string `json:"on_delete,omitempty"`
+	OnUpdate string `json:"on_update,omitempty"`
+}
+
+func llmSkillForAction(action string) LLMSkillProfile {
+	switch action {
+	case llmActionGenerateSQL, llmActionAskRun:
+		return LLMSkillProfile{
+			Name:    "text_to_sql",
+			Purpose: "Turn a natural-language request into one useful SQL query for the active database.",
+			Instructions: []string{
+				"Use only tables and columns present in the retrieved schema context.",
+				"If the request is ambiguous or required tables are missing, return action=clarify with one concrete follow-up question.",
+				"Prefer read-only result queries.",
+				"Use explicit JOIN syntax and qualify ambiguous columns.",
+				"Match the active dialect profile exactly.",
+			},
+			OutputContract: `Return JSON only: {"action":"sql","sql":"SELECT ...","explanation":"..."} or {"action":"clarify","follow_up":"...","explanation":"..."}.`,
+		}
+	case llmActionExplainResults:
+		return LLMSkillProfile{
+			Name:    "result_explainer",
+			Purpose: "Explain SQL result rows in natural language.",
+			Instructions: []string{
+				"Explain what the result shows, not how SQL generally works.",
+				"Refer to column names and notable values from the result sample.",
+				"Keep the answer concise and practical.",
+				"Mention limitations when only a sample of rows is available.",
+			},
+			OutputContract: "Return concise plain text.",
+		}
+	case llmActionExplainError:
+		return LLMSkillProfile{
+			Name:    "sql_error_explainer",
+			Purpose: "Explain a SQL/database error and suggest a correction.",
+			Instructions: []string{
+				"Explain the likely cause of the error in plain language.",
+				"Use the active dialect and retrieved schema context.",
+				"If useful, suggest a corrected query.",
+				"Do not invent tables or columns that are absent from context.",
+			},
+			OutputContract: "Return concise plain text.",
+		}
+	default:
+		return LLMSkillProfile{
+			Name:    "sql_assistant",
+			Purpose: "Assist with SQL using retrieved schema and dialect context.",
+			Instructions: []string{
+				"Use retrieved context only.",
+				"Ask for clarification when context is insufficient.",
+			},
+			OutputContract: "Return the requested answer in the format required by the action.",
+		}
+	}
+}
+
+type tableScore struct {
+	name  string
+	score int
+}
+
+func selectRAGTables(tables []*tinysql.Table, query string) (map[string]bool, ragRetrievalDoc) {
+	terms := tokenizeRAGQuery(query)
+	selected := make(map[string]bool)
+	retrieval := ragRetrievalDoc{
+		Method:      "lexical-table-column-rag",
+		QueryTerms:  terms,
+		TotalTables: len(tables),
+		MaxTables:   maxRAGTables,
+	}
+
+	if len(tables) <= maxRAGTables || len(terms) == 0 {
+		for _, t := range tables {
+			if t != nil {
+				selected[strings.ToLower(t.Name)] = true
+				retrieval.SelectedTables = append(retrieval.SelectedTables, t.Name)
+			}
+		}
+		sort.Strings(retrieval.SelectedTables)
+		return selected, retrieval
+	}
+
+	var scores []tableScore
+	for _, t := range tables {
+		if t == nil {
+			continue
+		}
+		score := scoreTableForTerms(t, terms)
+		scores = append(scores, tableScore{name: t.Name, score: score})
+	}
+	sort.Slice(scores, func(i, j int) bool {
+		if scores[i].score == scores[j].score {
+			return strings.ToLower(scores[i].name) < strings.ToLower(scores[j].name)
+		}
+		return scores[i].score > scores[j].score
+	})
+
+	limit := maxRAGTables
+	if len(scores) < limit {
+		limit = len(scores)
+	}
+	for i := 0; i < limit; i++ {
+		selected[strings.ToLower(scores[i].name)] = true
+		retrieval.SelectedTables = append(retrieval.SelectedTables, scores[i].name)
+	}
+	retrieval.Truncated = len(scores) > limit
+	return selected, retrieval
+}
+
+func selectRAGTableNames(names []string, query string) []string {
+	terms := tokenizeRAGQuery(query)
+	if len(names) <= maxRAGTables || len(terms) == 0 {
+		out := append([]string(nil), names...)
+		sort.Strings(out)
+		if len(out) > maxRAGTables {
+			return out[:maxRAGTables]
+		}
+		return out
+	}
+	scores := make([]tableScore, 0, len(names))
+	for _, name := range names {
+		score := 0
+		lowerName := strings.ToLower(name)
+		for _, term := range terms {
+			if term == lowerName {
+				score += 8
+			} else if strings.Contains(lowerName, term) || strings.Contains(term, lowerName) {
+				score += 4
+			}
+		}
+		scores = append(scores, tableScore{name: name, score: score})
+	}
+	sort.Slice(scores, func(i, j int) bool {
+		if scores[i].score == scores[j].score {
+			return strings.ToLower(scores[i].name) < strings.ToLower(scores[j].name)
+		}
+		return scores[i].score > scores[j].score
+	})
+	limit := maxRAGTables
+	if len(scores) < limit {
+		limit = len(scores)
+	}
+	out := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		out = append(out, scores[i].name)
+	}
+	return out
+}
+
+func scoreTableForTerms(t *tinysql.Table, terms []string) int {
+	tableName := strings.ToLower(t.Name)
+	score := 0
+	for _, term := range terms {
+		if term == tableName {
+			score += 8
+		} else if strings.Contains(tableName, term) || strings.Contains(term, tableName) {
+			score += 4
+		}
+		for _, col := range t.Cols {
+			colName := strings.ToLower(col.Name)
+			if term == colName {
+				score += 5
+			} else if strings.Contains(colName, term) || strings.Contains(term, colName) {
+				score += 2
+			}
+			if col.ForeignKey != nil {
+				ref := strings.ToLower(col.ForeignKey.Table + " " + col.ForeignKey.Column)
+				if strings.Contains(ref, term) {
+					score++
+				}
+			}
+		}
+	}
+	return score
+}
+
+func tokenizeRAGQuery(query string) []string {
+	seen := make(map[string]bool)
+	var terms []string
+	for _, raw := range strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_')
+	}) {
+		raw = strings.Trim(raw, "_")
+		if len(raw) < 2 || ragStopWords[raw] || seen[raw] {
+			continue
+		}
+		seen[raw] = true
+		terms = append(terms, raw)
+	}
+	sort.Strings(terms)
+	return terms
+}
+
+var ragStopWords = map[string]bool{
+	"and": true, "are": true, "asc": true, "bei": true, "das": true, "der": true, "die": true,
+	"for": true, "from": true, "how": true, "ich": true, "mit": true, "not": true, "oder": true,
+	"select": true, "show": true, "sql": true, "the": true, "und": true, "was": true, "wer": true,
+	"where": true, "with": true, "wie": true, "von": true,
+}
