@@ -7,6 +7,7 @@ import (
 
 const (
 	MediaTypeJSON        = "application/json; charset=utf-8"
+	MediaTypeGeoJSON     = "application/geo+json; charset=utf-8"
 	MediaTypeProblemJSON = "application/problem+json; charset=utf-8"
 	MediaTypeCSV         = "text/csv; charset=utf-8"
 	MediaTypeTSV         = "text/tab-separated-values; charset=utf-8"

@@ -858,6 +858,38 @@
       font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
       padding: .12rem 0;
     }
+    .query-map-canvas {
+      height: min(58vh, 520px);
+      min-height: 340px;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      overflow: hidden;
+      background: var(--surface-strong);
+    }
+    .query-map-svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    .query-map-point {
+      fill: #dc2626;
+      stroke: #ffffff;
+      stroke-width: 2;
+    }
+    .query-map-line {
+      fill: none;
+      stroke: var(--brand-dark);
+      stroke-width: 3;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .query-map-polygon {
+      fill: rgba(37, 99, 235, .18);
+      stroke: var(--brand-dark);
+      stroke-width: 2;
+      stroke-linejoin: round;
+    }
     .notebook-view {
       display: flex;
       flex-direction: column;

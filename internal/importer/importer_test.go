@@ -39,3 +39,35 @@ func TestImportCSVInfersColumnTypes(t *testing.T) {
 		}
 	}
 }
+
+func TestImportGeoJSONCreatesGeometryAndPropertyColumns(t *testing.T) {
+	db := tinysql.NewDB()
+	body := strings.NewReader(`{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[11.5761,48.1372]},"properties":{"name":"Munich","population":1500000}}]}`)
+	res, err := ImportGeoJSON(context.Background(), db, "default", "geo_import", body, &ImportOptions{
+		CreateTable:   true,
+		TypeInference: true,
+	})
+	if err != nil {
+		t.Fatalf("ImportGeoJSON: %v", err)
+	}
+	if res.RowsInserted != 1 {
+		t.Fatalf("RowsInserted = %d, want 1", res.RowsInserted)
+	}
+	for _, want := range []string{"geometry", "geometry_type", "name", "population"} {
+		if !containsColumn(res.ColumnNames, want) {
+			t.Fatalf("expected column %q in %#v", want, res.ColumnNames)
+		}
+	}
+	if res.ColumnTypes[len(res.ColumnTypes)-1] != tinysql.IntType {
+		t.Fatalf("population type = %v, want %v", res.ColumnTypes[len(res.ColumnTypes)-1], tinysql.IntType)
+	}
+}
+
+func containsColumn(columns []string, want string) bool {
+	for _, col := range columns {
+		if col == want {
+			return true
+		}
+	}
+	return false
+}

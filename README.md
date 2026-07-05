@@ -18,20 +18,21 @@ administrator-managed shared connections or per-user credentials.
 | **Datasheet View** | View, sort, and page through table rows |
 | **Record CRUD** | Add, edit, and delete records from any table with an `id INT` column |
 | **Table Design** | Create new tables with a visual column designer (INT, FLOAT, TEXT, BOOL) |
-| **Export** | Download whole tables/views or SQL query results as CSV, TSV, XLSX, JSON, or XML |
+| **Export** | Download whole tables/views or SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, XML, or GeoJSON |
 | **Drop Table** | Delete any table with a one-click confirmation |
 | **SQL Editor** | Monaco-enhanced SQL editor with SQL syntax highlighting and textarea fallback; selected text can be executed with Run, export, Ctrl+Enter, or F5 |
 | **Example Queries & Prompts** | One-click sample SQL queries and natural-language prompts against the demo dataset, so the editor and LLM assistant can be tried immediately with zero setup; picking an example query auto-imports the demo dataset first if it isn't loaded yet |
 | **Local Query History** | Browser-local history for recently executed queries |
 | **Shareable Queries** | Copy a browser URL that restores the editor SQL from a compact hash |
 | **Quick Charts** | D3-powered first chart preview for numeric query results |
+| **Geo Views** | Map query results from GeoJSON geometry columns or latitude/longitude columns |
 | **Connection Manager** | Register managed database connections and switch the active connection from the GUI |
 | **Session-scoped Active Connection** | Each browser session can use a different active connection |
 | **Table Migration** | Copy a table from one registered connection into another, with optional target table creation |
 | **LLM Assistant** | Optional OpenAI-compatible assistant for SQL generation, schema context preview, and natural-language explanations |
 | **Runtime Admin Settings** | Dialect, timeouts, LLM provider, page size, and default theme/density can be changed from the Admin UI or API without YAML/JSON config files |
 | **Maintenance Mode** | Admin toggle that blocks writes (record edits, DDL, imports, migrations, DML) server-wide while keeping read-only SQL available |
-| **Demo Dataset** | One-click demo data (departments/people/projects plus a small sales funnel and a 30-day metrics time series) with a sample scheduled job, and a one-click removal |
+| **Demo Dataset** | One-click demo data (departments/people/projects, sales funnel, metrics time series, GeoJSON/Map locations, JSON/XML payloads) with a sample scheduled job, and a one-click removal |
 | **File Persistence** | Optionally read/write a `.gob` file on disk |
 
 ## Current Scope
@@ -138,7 +139,9 @@ In addition to dialect/timeouts/LLM provider settings, Admin also controls:
 
 The Admin page also has a **Demo Data** section to load or remove the built-in
 demo dataset (`POST /demo-data`, `POST /demo-data/remove`) without needing an
-empty database.
+empty database. The dataset includes demo tables for maps (`datadock_demo_locations`),
+JSON/XML tree views and Excel-safe exports (`datadock_demo_payloads`), charts,
+pivots, profiles, and scheduled jobs.
 
 Example API update:
 
@@ -169,7 +172,9 @@ datadock uses stable web and data interchange standards for external integration
 - JSON uses RFC 8259 (`application/json; charset=utf-8`).
 - Timestamps use RFC 3339.
 - CSV/TSV exports use RFC 4180-style CSV handling.
-- XLSX exports use Office Open XML spreadsheet packages.
+- Excel-safe CSV is an explicit export mode that rewrites ambiguous text and ISO date/time values for Excel import while leaving standard CSV unchanged.
+- XLSX exports use Office Open XML spreadsheet packages with typed numeric, boolean, date, time, and datetime cells.
+- GeoJSON exports use RFC 7946 FeatureCollection output where geometry or lat/lon columns are present.
 - tinySQL-facing error classes can use ISO/IEC 9075 SQLSTATE helpers exposed by
   the public tinySQL API.
 
@@ -329,7 +334,7 @@ cmd/datadock/
 |---|---|---|
 | `GET` | `/` | Redirect to first table, or empty-state |
 | `GET` | `/t/{table}` | Datasheet view (query params: `page`, `sort`, `dir`) |
-| `GET` | `/t/{table}/export?format=csv\|tsv\|xlsx\|json\|xml` | Download a full table/view export |
+| `GET` | `/t/{table}/export?format=csv\|csv-excel\|tsv\|xlsx\|json\|xml\|geojson` | Download a full table/view export |
 | `GET` | `/t/{table}/new` | New record form |
 | `POST` | `/t/{table}/new` | Create record |
 | `GET` | `/t/{table}/{id}/edit` | Edit record form |
@@ -338,7 +343,7 @@ cmd/datadock/
 | `POST` | `/drop-table/{table}` | Drop table |
 | `GET` | `/query` | SQL editor page |
 | `POST` | `/api/query` | Execute SQL (JSON API) |
-| `POST` | `/api/export` | Download SQL query results as CSV, TSV, XLSX, JSON, or XML |
+| `POST` | `/api/export` | Download SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, XML, or GeoJSON |
 | `GET` | `/api/schema` | Return the compact active-connection schema snapshot used for LLM context |
 | `GET` | `/api/llm/health` | Test server-side connectivity to the configured LLM provider |
 | `GET` | `/connections` | Connection manager |
@@ -404,7 +409,7 @@ Request:
 { "sql": "SELECT * FROM my_table", "format": "xlsx" }
 ```
 
-The endpoint accepts result-producing SQL (`SELECT`, `WITH`, `SHOW`, `EXPLAIN`) and returns an attachment in `csv`, `tsv`, `xlsx`, `json`, or `xml` format.
+The endpoint accepts result-producing SQL (`SELECT`, `WITH`, `SHOW`, `EXPLAIN`) and returns an attachment in `csv`, `csv-excel`, `tsv`, `xlsx`, `json`, `xml`, or `geojson` format.
 
 **GET /api/schema**
 

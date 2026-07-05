@@ -119,10 +119,6 @@ func ImportXML(context.Context, *tinysql.DB, string, string, io.Reader, *ImportO
 	return nil, fmt.Errorf("xml import is not supported in standalone datadock yet")
 }
 
-func ImportGeoJSON(context.Context, *tinysql.DB, string, string, io.Reader, *ImportOptions) (*ImportResult, error) {
-	return nil, fmt.Errorf("geojson import is not supported in standalone datadock yet")
-}
-
 func ImportKML(context.Context, *tinysql.DB, string, string, io.Reader, *ImportOptions) (*ImportResult, error) {
 	return nil, fmt.Errorf("kml import is not supported in standalone datadock yet")
 }

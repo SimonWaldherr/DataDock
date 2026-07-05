@@ -195,6 +195,8 @@ func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]stri
 		}
 		cw.Flush()
 		return true
+	case "csv-excel", "excel-csv":
+		return writeExcelCSV(w, columns, rows, kinds, filenameBase) == nil
 	case "json":
 		w.Header().Set("Content-Type", standards.MediaTypeJSON)
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.json"`, filenameBase))
@@ -218,6 +220,8 @@ func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]stri
 		_, _ = w.Write([]byte(xml.Header))
 		_ = xml.NewEncoder(w).Encode(exportXMLDocument(columns, rows, kinds))
 		return true
+	case "geojson":
+		return writeGeoJSONExport(w, columns, rows, kinds, filenameBase) == nil
 	case "xlsx":
 		w.Header().Set("Content-Type", standards.MediaTypeXLSX)
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.xlsx"`, filenameBase))
@@ -1190,6 +1194,8 @@ func demoDataDropStatements() []string {
 		"DROP TABLE datadock_demo_orders",
 		"DROP TABLE datadock_demo_products",
 		"DROP TABLE datadock_demo_customers",
+		"DROP TABLE datadock_demo_payloads",
+		"DROP TABLE datadock_demo_locations",
 		"DROP TABLE datadock_demo_metrics",
 		"DROP TABLE datadock_demo_tickets",
 		"DROP TABLE datadock_demo_invoices",
@@ -1365,6 +1371,22 @@ func demoDataStatements() []string {
 		metric string
 		value  int
 	}
+	type location struct {
+		id       int
+		name     string
+		category string
+		lat      float64
+		lon      float64
+		geometry string
+	}
+	type payloadRow struct {
+		id          int
+		source      string
+		externalID  string
+		importedAt  string
+		payloadJSON string
+		payloadXML  string
+	}
 
 	customers := []customer{
 		{1, "Northwind Labs", "Enterprise", "DE", "2024-01-12"},
@@ -1469,6 +1491,19 @@ func demoDataStatements() []string {
 		metrics = append(metrics, metricPoint{metricID, dateStr, "daily_revenue", revenue})
 		metricID++
 	}
+	locations := []location{
+		{1, "Munich HQ", "office", 48.1372, 11.5761, `{"type":"Point","coordinates":[11.5761,48.1372]}`},
+		{2, "Berlin Lab", "office", 52.52, 13.405, `{"type":"Point","coordinates":[13.405,52.52]}`},
+		{3, "Hamburg Port Sensor", "sensor", 53.5511, 9.9937, `{"type":"Point","coordinates":[9.9937,53.5511]}`},
+		{4, "Cologne Edge Node", "edge", 50.9375, 6.9603, `{"type":"Point","coordinates":[6.9603,50.9375]}`},
+		{5, "Vienna Partner", "partner", 48.2082, 16.3738, `{"type":"Point","coordinates":[16.3738,48.2082]}`},
+		{6, "Zurich Backup", "backup", 47.3769, 8.5417, `{"type":"Point","coordinates":[8.5417,47.3769]}`},
+	}
+	payloads := []payloadRow{
+		{1, "webhook", "000123", "2026-07-05T08:15:30Z", `{"event":"order.created","amount":1299.5,"tags":["new","priority"],"customer":{"segment":"Enterprise","country":"DE"}}`, `<event type="order.created"><amount currency="EUR">1299.50</amount><customer segment="Enterprise" country="DE"/></event>`},
+		{2, "sensor", "000124", "2026-07-05T09:22:10Z", `{"event":"temperature.reading","value":21.7,"unit":"celsius","device":{"id":"sensor-17","site":"Munich HQ"}}`, `<reading unit="celsius"><value>21.7</value><device id="sensor-17" site="Munich HQ"/></reading>`},
+		{3, "import", "000125", "2026-07-05T10:05:00Z", `{"event":"file.imported","rows":420,"format":"geojson","warnings":[]}`, `<import format="geojson"><rows>420</rows><warnings>0</warnings></import>`},
+	}
 
 	statements := append([]string{}, demoDataDropStatements()...)
 	statements = append(statements,
@@ -1483,6 +1518,8 @@ func demoDataStatements() []string {
 		"CREATE TABLE datadock_demo_orders (id INT, customer_id INT, order_date TEXT, channel TEXT, status TEXT, total_amount INT)",
 		"CREATE TABLE datadock_demo_order_items (id INT, order_id INT, product_id INT, quantity INT, unit_price INT)",
 		"CREATE TABLE datadock_demo_metrics (id INT, metric_date TEXT, metric TEXT, value INT)",
+		"CREATE TABLE datadock_demo_locations (id INT, name TEXT, category TEXT, lat FLOAT, lon FLOAT, geometry TEXT)",
+		"CREATE TABLE datadock_demo_payloads (id INT, source TEXT, external_id TEXT, imported_at TEXT, payload_json TEXT, payload_xml TEXT)",
 	)
 	for _, row := range departments {
 		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_departments (id, name, region, annual_budget) VALUES (%d, %s, %s, %d)", row.id, demoSQLString(row.name), demoSQLString(row.region), row.budget))
@@ -1516,6 +1553,12 @@ func demoDataStatements() []string {
 	}
 	for _, row := range metrics {
 		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_metrics (id, metric_date, metric, value) VALUES (%d, %s, %s, %d)", row.id, demoSQLString(row.date), demoSQLString(row.metric), row.value))
+	}
+	for _, row := range locations {
+		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_locations (id, name, category, lat, lon, geometry) VALUES (%d, %s, %s, %g, %g, %s)", row.id, demoSQLString(row.name), demoSQLString(row.category), row.lat, row.lon, demoSQLString(row.geometry)))
+	}
+	for _, row := range payloads {
+		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_payloads (id, source, external_id, imported_at, payload_json, payload_xml) VALUES (%d, %s, %s, %s, %s, %s)", row.id, demoSQLString(row.source), demoSQLString(row.externalID), demoSQLString(row.importedAt), demoSQLString(row.payloadJSON), demoSQLString(row.payloadXML)))
 	}
 	return statements
 }

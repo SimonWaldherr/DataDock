@@ -89,6 +89,7 @@
         <option value="cards">Cards</option>
         <option value="json">JSON</option>
         <option value="xml">XML</option>
+        <option value="map">Map</option>
         <option value="pivot">Pivot</option>
         <option value="profile">Profile</option>
         <option value="schema">Schema</option>
@@ -99,6 +100,9 @@
       <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('csv')">
         <i class="bi bi-filetype-csv me-1"></i>CSV
       </button>
+      <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('csv-excel')">
+        <i class="bi bi-file-earmark-excel me-1"></i>Excel CSV
+      </button>
       <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('tsv')">
         <i class="bi bi-table me-1"></i>TSV
       </button>
@@ -107,6 +111,9 @@
       </button>
       <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('xml')">
         <i class="bi bi-filetype-xml me-1"></i>XML
+      </button>
+      <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('geojson')">
+        <i class="bi bi-geo-alt me-1"></i>GeoJSON
       </button>
       <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('xlsx')">
         <i class="bi bi-file-earmark-spreadsheet me-1"></i>XLSX
@@ -192,6 +199,7 @@ var queryTabRuntime = {};
 var queryRequestSeq = 0;
 var queryLiveTimers = {};
 var defaultLiveIntervalMs = 5000;
+var activeResultMap = null;
 
 // Ready-to-run examples against the built-in demo dataset, so the editor and
 // the LLM assistant can be tried out immediately without inventing a query or
@@ -221,7 +229,17 @@ var sampleQueries = [
   { label: 'Department budgets', sql:
     'SELECT name, region, annual_budget\nFROM datadock_demo_departments\nORDER BY annual_budget DESC' },
   { label: 'Project status overview', sql:
-    'SELECT status, COUNT(*) AS projects, SUM(budget) AS total_budget\nFROM datadock_demo_projects\nGROUP BY status' }
+    'SELECT status, COUNT(*) AS projects, SUM(budget) AS total_budget\nFROM datadock_demo_projects\nGROUP BY status' },
+  { label: 'Locations for Map view', viewMode: 'map', sql:
+    'SELECT name, category, lon, lat\nFROM datadock_demo_locations\nORDER BY name' },
+  { label: 'GeoJSON geometry export sample', viewMode: 'map', sql:
+    'SELECT name, category, geometry\nFROM datadock_demo_locations\nORDER BY name' },
+  { label: 'JSON/XML payload tree', viewMode: 'json', sql:
+    'SELECT source, external_id, imported_at, payload_json, payload_xml\nFROM datadock_demo_payloads\nORDER BY imported_at' },
+  { label: 'XML payload tree', viewMode: 'xml', sql:
+    'SELECT source, payload_xml\nFROM datadock_demo_payloads\nORDER BY imported_at' },
+  { label: 'Excel CSV edge cases', sql:
+    'SELECT external_id, imported_at, source\nFROM datadock_demo_payloads\nORDER BY external_id' }
 ];
 
 var samplePrompts = [
@@ -230,7 +248,10 @@ var samplePrompts = [
   'What are the best-selling products?',
   'List all open support tickets sorted by priority',
   'Which projects are blocked or over budget?',
-  'Summarize orders by sales channel'
+  'Summarize orders by sales channel',
+  'Show demo locations on a map',
+  'Inspect the JSON payloads as a tree',
+  'Prepare an Excel-safe export for external IDs and timestamps'
 ];
 
 // Hide the noscript form when JS is available.
@@ -316,7 +337,7 @@ function loadQueryTabs() {
 }
 
 function normalizeViewMode(value) {
-  var allowed = ['table', 'log', 'cards', 'json', 'xml', 'pivot', 'profile', 'schema', 'notebook'];
+  var allowed = ['table', 'log', 'cards', 'json', 'xml', 'map', 'pivot', 'profile', 'schema', 'notebook'];
   value = String(value || 'table');
   return allowed.indexOf(value) >= 0 ? value : 'table';
 }
@@ -535,6 +556,10 @@ function newQueryTab(sql, title) {
     title: title || ('Query ' + count),
     sql: sql || '',
     manualTitle: !!title,
+    liveEnabled: false,
+    liveIntervalMs: defaultLiveIntervalMs,
+    viewMode: 'table',
+    logFilter: '',
     createdAt: now,
     updatedAt: now
   };
@@ -671,6 +696,12 @@ function runSampleQuery(idx) {
   var item = sampleQueries[idx];
   if (!item) return;
   setEditorValue(item.sql);
+  var tab = getActiveQueryTab();
+  if (tab && item.viewMode) {
+    tab.viewMode = normalizeViewMode(item.viewMode);
+    persistQueryTabs();
+    syncActiveTabControls();
+  }
   focusEditor();
   runQueryWithDemoDataFallback(activeQueryTabID, item.sql);
 }
@@ -971,6 +1002,7 @@ function renderActiveTabOutput() {
   if (runtime.running) {
     lastResultData = null;
     lastErrorMessage = '';
+    disposeActiveResultMap();
     document.getElementById('statusMsg').textContent = runtime.statusText || 'Running…';
     document.getElementById('resultArea').innerHTML = '';
     document.getElementById('chartArea').innerHTML = '';
@@ -1012,6 +1044,7 @@ function clearQueryOutput(tabID) {
   }
   lastResultData = null;
   lastErrorMessage = '';
+  disposeActiveResultMap();
   document.getElementById('runBtn').disabled = false;
   document.getElementById('resultArea').innerHTML = '';
   document.getElementById('chartArea').innerHTML = '';
@@ -1041,7 +1074,7 @@ function exportQuery(format) {
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
-    a.download = 'query.' + format;
+    a.download = 'query.' + exportFileExtension(format);
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1051,6 +1084,18 @@ function exportQuery(format) {
     status.textContent = '';
     renderError(err.message || err.toString());
   });
+}
+
+function exportFileExtension(format) {
+  switch (format) {
+    case 'csv-excel':
+    case 'excel-csv':
+      return 'excel.csv';
+    case 'geojson':
+      return 'geojson';
+    default:
+      return format || 'csv';
+  }
 }
 
 function currentSQL() {
@@ -1244,6 +1289,7 @@ function renderError(msg) {
 function renderErrorToPage(msg) {
   lastResultData = null;
   lastErrorMessage = msg;
+  disposeActiveResultMap();
   document.getElementById('statusMsg').textContent = '';
   document.getElementById('runBtn').disabled = false;
   document.getElementById('chartArea').innerHTML = '';
@@ -1260,6 +1306,7 @@ function renderResultToPage(data) {
   var status = document.getElementById('statusMsg');
   var area = document.getElementById('resultArea');
   document.getElementById('runBtn').disabled = false;
+  disposeActiveResultMap();
 
   if (data.error) {
     renderErrorToPage(data.error);
@@ -1290,6 +1337,11 @@ function renderResultToPage(data) {
     }
     if (tab.viewMode === 'xml') {
       area.innerHTML = renderStructuredResult(data, 'xml');
+      document.getElementById('chartArea').innerHTML = '';
+      return;
+    }
+    if (tab.viewMode === 'map') {
+      area.innerHTML = renderMapResult(data);
       document.getElementById('chartArea').innerHTML = '';
       return;
     }
@@ -1337,6 +1389,13 @@ function renderResultToPage(data) {
     area.innerHTML = '<div class="alert alert-success mt-1 py-2"><i class="bi bi-check-circle-fill me-2"></i>' +
       'OK — ' + affected + ' row(s) affected · ' + ms + ' ms</div>';
   }
+}
+
+function disposeActiveResultMap() {
+  if (activeResultMap && activeResultMap.remove) {
+    try { activeResultMap.remove(); } catch (e) {}
+  }
+  activeResultMap = null;
 }
 
 function renderCardResult(data) {
@@ -1450,6 +1509,311 @@ function renderTreeValue(value) {
     }
     return '<div class="tree-leaf"><span class="tree-key">' + escHtml(key) + ':</span> ' + escHtml(String(child)) + '</div>';
   }).join('') + '</div>';
+}
+
+function renderMapResult(data) {
+  var fc = buildGeoFeatureCollectionFromRows(data);
+  if (!fc.features.length) {
+    return '<div class="alert alert-info mt-1 py-2">No GeoJSON geometry or latitude/longitude columns detected.</div>';
+  }
+  window.setTimeout(function() { initResultMap(fc); }, 0);
+  return '<div class="card mt-1"><div class="card-body py-2">' +
+    '<div class="d-flex justify-content-between align-items-center mb-2">' +
+    '<h2 class="h6 mb-0"><i class="bi bi-geo-alt text-primary"></i> Map</h2>' +
+    '<span class="small text-muted">' + fc.features.length + ' feature(s)</span></div>' +
+    '<div id="resultMapCanvas" class="query-map-canvas"></div></div></div>';
+}
+
+function buildGeoFeatureCollectionFromRows(data) {
+  var columns = data.columns || [];
+  var rows = data.rows || [];
+  var features = [];
+  var geometryIdx = detectGeoJSONColumn(columns, rows);
+  var lonLat = detectLonLatIndexes(columns);
+  rows.forEach(function(row) {
+    var props = rowPropertiesForMap(columns, row, geometryIdx, lonLat.lon, lonLat.lat);
+    if (geometryIdx >= 0 && geometryIdx < row.length) {
+      features = features.concat(featuresFromGeoJSONCell(row[geometryIdx], props));
+      return;
+    }
+    if (lonLat.lon >= 0 && lonLat.lat >= 0 && lonLat.lon < row.length && lonLat.lat < row.length) {
+      var lon = Number(row[lonLat.lon]);
+      var lat = Number(row[lonLat.lat]);
+      if (isFinite(lon) && isFinite(lat) && lon >= -180 && lon <= 180 && lat >= -90 && lat <= 90) {
+        features.push({type: 'Feature', geometry: {type: 'Point', coordinates: [lon, lat]}, properties: props});
+      }
+    }
+  });
+  return {type: 'FeatureCollection', features: features};
+}
+
+function detectGeoJSONColumn(columns, rows) {
+  var bestIdx = -1;
+  var bestScore = 0;
+  columns.forEach(function(col, idx) {
+    var score = /geojson|geometry|geom|shape/i.test(col || '') ? 2 : 0;
+    rows.forEach(function(row) {
+      if (idx < row.length && featuresFromGeoJSONCell(row[idx], {}).length) score += 3;
+    });
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = idx;
+    }
+  });
+  return bestScore >= 3 ? bestIdx : -1;
+}
+
+function detectLonLatIndexes(columns) {
+  var out = {lon: -1, lat: -1};
+  columns.forEach(function(col, idx) {
+    var name = String(col || '').trim();
+    if (out.lon < 0 && /^(lon|lng|long|longitude|x)$/i.test(name)) out.lon = idx;
+    if (out.lat < 0 && /^(lat|latitude|y)$/i.test(name)) out.lat = idx;
+  });
+  return out;
+}
+
+function rowPropertiesForMap(columns, row) {
+  var skip = {};
+  Array.prototype.slice.call(arguments, 2).forEach(function(idx) {
+    if (idx >= 0) skip[idx] = true;
+  });
+  var props = {};
+  columns.forEach(function(col, idx) {
+    if (skip[idx]) return;
+    props[col] = idx < row.length ? row[idx] : '';
+  });
+  return props;
+}
+
+function featuresFromGeoJSONCell(raw, rowProps) {
+  var text = String(raw || '').trim();
+  if (!text || text.charAt(0) !== '{') return [];
+  try {
+    return featuresFromGeoJSONObject(JSON.parse(text), rowProps || {});
+  } catch (e) {
+    return [];
+  }
+}
+
+function featuresFromGeoJSONObject(obj, rowProps) {
+  if (!obj || !obj.type) return [];
+  var type = String(obj.type).toLowerCase();
+  if (type === 'featurecollection') {
+    var out = [];
+    (obj.features || []).forEach(function(feature) {
+      out = out.concat(featuresFromGeoJSONObject(feature, rowProps));
+    });
+    return out;
+  }
+  if (type === 'feature') {
+    if (!isGeoJSONGeometry(obj.geometry)) return [];
+    return [{type: 'Feature', geometry: obj.geometry, properties: mergeMapProperties(rowProps, obj.properties || {})}];
+  }
+  if (isGeoJSONGeometry(obj)) {
+    return [{type: 'Feature', geometry: obj, properties: rowProps || {}}];
+  }
+  return [];
+}
+
+function isGeoJSONGeometry(obj) {
+  if (!obj || !obj.type) return false;
+  return /^(Point|MultiPoint|LineString|MultiLineString|Polygon|MultiPolygon|GeometryCollection)$/i.test(obj.type);
+}
+
+function mergeMapProperties(first, second) {
+  var out = {};
+  Object.keys(first || {}).forEach(function(key) { out[key] = first[key]; });
+  Object.keys(second || {}).forEach(function(key) { out[key] = second[key]; });
+  return out;
+}
+
+function initResultMap(featureCollection) {
+  var target = document.getElementById('resultMapCanvas');
+  if (!target) return;
+  if (activeResultMap && activeResultMap.remove) {
+    try { activeResultMap.remove(); } catch (e) {}
+  }
+  activeResultMap = null;
+  if (window.maplibregl && window.maplibregl.Map) {
+    try {
+      renderMapLibreResult(target, featureCollection);
+      return;
+    } catch (e) {
+      disposeActiveResultMap();
+    }
+  }
+  renderSVGResultMap(target, featureCollection);
+}
+
+function renderMapLibreResult(target, featureCollection) {
+  target.innerHTML = '';
+  var map = new maplibregl.Map({
+    container: target,
+    style: {
+      version: 8,
+      sources: {},
+      layers: [{id: 'background', type: 'background', paint: {'background-color': '#eef2f7'}}]
+    },
+    center: [0, 0],
+    zoom: 1,
+    attributionControl: false
+  });
+  activeResultMap = map;
+  map.on('load', function() {
+    map.addSource('result-features', {type: 'geojson', data: featureCollection});
+    map.addLayer({id: 'result-fill', type: 'fill', source: 'result-features',
+      filter: ['any', ['==', ['geometry-type'], 'Polygon'], ['==', ['geometry-type'], 'MultiPolygon']],
+      paint: {'fill-color': '#2563eb', 'fill-opacity': 0.18}});
+    map.addLayer({id: 'result-line', type: 'line', source: 'result-features',
+      paint: {'line-color': '#1d4ed8', 'line-width': 2}});
+    map.addLayer({id: 'result-point', type: 'circle', source: 'result-features',
+      filter: ['any', ['==', ['geometry-type'], 'Point'], ['==', ['geometry-type'], 'MultiPoint']],
+      paint: {'circle-color': '#dc2626', 'circle-radius': 5, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.5}});
+    var bounds = geoFeatureBounds(featureCollection.features);
+    if (bounds) {
+      map.fitBounds([[bounds.minLon, bounds.minLat], [bounds.maxLon, bounds.maxLat]], {padding: 38, maxZoom: 14, duration: 0});
+    }
+  });
+}
+
+function renderSVGResultMap(target, featureCollection) {
+  var bounds = geoFeatureBounds(featureCollection.features);
+  if (!bounds) {
+    target.innerHTML = '<div class="text-muted small p-3">No renderable coordinates.</div>';
+    return;
+  }
+  var width = 960;
+  var height = 420;
+  var shapes = featureCollection.features.map(function(feature, idx) {
+    return svgForGeometry(feature.geometry, bounds, width, height, idx);
+  }).join('');
+  target.innerHTML = '<svg class="query-map-svg" viewBox="0 0 ' + width + ' ' + height + '" role="img">' +
+    '<rect x="0" y="0" width="' + width + '" height="' + height + '" rx="0" fill="var(--surface-strong)"/>' +
+    '<g>' + shapes + '</g></svg>';
+}
+
+function svgForGeometry(geometry, bounds, width, height, idx) {
+  if (!geometry || !geometry.type) return '';
+  var type = String(geometry.type);
+  var coords = geometry.coordinates || [];
+  if (type === 'Point') {
+    return svgPoint(coords, bounds, width, height);
+  }
+  if (type === 'MultiPoint') {
+    return coords.map(function(point) { return svgPoint(point, bounds, width, height); }).join('');
+  }
+  if (type === 'LineString') {
+    return svgLine(coords, bounds, width, height);
+  }
+  if (type === 'MultiLineString') {
+    return coords.map(function(line) { return svgLine(line, bounds, width, height); }).join('');
+  }
+  if (type === 'Polygon') {
+    return svgPolygon(coords, bounds, width, height, idx);
+  }
+  if (type === 'MultiPolygon') {
+    return coords.map(function(poly, pidx) { return svgPolygon(poly, bounds, width, height, idx + pidx); }).join('');
+  }
+  if (type === 'GeometryCollection') {
+    return (geometry.geometries || []).map(function(child) { return svgForGeometry(child, bounds, width, height, idx); }).join('');
+  }
+  return '';
+}
+
+function svgPoint(coord, bounds, width, height) {
+  var p = projectGeoCoord(coord, bounds, width, height);
+  if (!p) return '';
+  return '<circle cx="' + p.x + '" cy="' + p.y + '" r="5" class="query-map-point"/>';
+}
+
+function svgLine(coords, bounds, width, height) {
+  var points = coords.map(function(coord) { return projectGeoCoord(coord, bounds, width, height); }).filter(Boolean);
+  if (points.length < 2) return '';
+  return '<polyline points="' + points.map(function(p) { return p.x + ',' + p.y; }).join(' ') + '" class="query-map-line"/>';
+}
+
+function svgPolygon(rings, bounds, width, height, idx) {
+  var path = rings.map(function(ring) {
+    var points = ring.map(function(coord) { return projectGeoCoord(coord, bounds, width, height); }).filter(Boolean);
+    if (points.length < 3) return '';
+    return 'M ' + points.map(function(p) { return p.x + ' ' + p.y; }).join(' L ') + ' Z';
+  }).join(' ');
+  if (!path) return '';
+  return '<path d="' + path + '" class="query-map-polygon query-map-polygon-' + (idx % 6) + '"/>';
+}
+
+function projectGeoCoord(coord, bounds, width, height) {
+  if (!coord || coord.length < 2) return null;
+  var lon = Number(coord[0]);
+  var lat = Number(coord[1]);
+  if (!isFinite(lon) || !isFinite(lat)) return null;
+  var pad = 26;
+  var dx = bounds.maxLon - bounds.minLon || 1;
+  var dy = bounds.maxLat - bounds.minLat || 1;
+  return {
+    x: Math.round((pad + (lon - bounds.minLon) / dx * (width - pad * 2)) * 100) / 100,
+    y: Math.round((height - pad - (lat - bounds.minLat) / dy * (height - pad * 2)) * 100) / 100
+  };
+}
+
+function geoFeatureBounds(features) {
+  var bounds = null;
+  features.forEach(function(feature) {
+    eachGeoCoord(feature.geometry, function(coord) {
+      var lon = Number(coord[0]);
+      var lat = Number(coord[1]);
+      if (!isFinite(lon) || !isFinite(lat)) return;
+      if (!bounds) {
+        bounds = {minLon: lon, maxLon: lon, minLat: lat, maxLat: lat};
+      } else {
+        bounds.minLon = Math.min(bounds.minLon, lon);
+        bounds.maxLon = Math.max(bounds.maxLon, lon);
+        bounds.minLat = Math.min(bounds.minLat, lat);
+        bounds.maxLat = Math.max(bounds.maxLat, lat);
+      }
+    });
+  });
+  if (bounds && bounds.minLon === bounds.maxLon) {
+    bounds.minLon -= 0.01;
+    bounds.maxLon += 0.01;
+  }
+  if (bounds && bounds.minLat === bounds.maxLat) {
+    bounds.minLat -= 0.01;
+    bounds.maxLat += 0.01;
+  }
+  return bounds;
+}
+
+function eachGeoCoord(geometry, fn) {
+  if (!geometry || !geometry.type) return;
+  var type = String(geometry.type);
+  if (type === 'GeometryCollection') {
+    (geometry.geometries || []).forEach(function(child) { eachGeoCoord(child, fn); });
+    return;
+  }
+  walkGeoCoordinates(geometry.coordinates, type, fn);
+}
+
+function walkGeoCoordinates(coords, type, fn) {
+  if (!coords) return;
+  if (type === 'Point') {
+    fn(coords);
+    return;
+  }
+  if (type === 'LineString' || type === 'MultiPoint') {
+    coords.forEach(fn);
+    return;
+  }
+  if (type === 'Polygon' || type === 'MultiLineString') {
+    coords.forEach(function(line) { line.forEach(fn); });
+    return;
+  }
+  if (type === 'MultiPolygon') {
+    coords.forEach(function(poly) {
+      poly.forEach(function(line) { line.forEach(fn); });
+    });
+  }
 }
 
 function renderPivotResult(data) {

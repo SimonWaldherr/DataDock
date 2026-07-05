@@ -234,8 +234,8 @@ func redactInlineSecrets(s string) string {
 		return ""
 	}
 	replacements := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)(authorization:\s*bearer\s+)[^\s,;]+`),
-		regexp.MustCompile(`(?i)(api[_-]?key\s*[=:]\s*)[^\s,;]+`),
+		regexp.MustCompile(`(?i)(authorization\s*[:=]\s*(?:bearer\s+|basic\s+)?)[^\s,;]+`),
+		regexp.MustCompile(`(?i)(api[_-]?key\s*[:=]\s*)[^\s,;]+`),
 		regexp.MustCompile(`(?i)(password\s*[=:]\s*)[^\s,;]+`),
 		regexp.MustCompile(`(?i)(token\s*[=:]\s*)[^\s,;]+`),
 		regexp.MustCompile(`(?i)(secret\s*[=:]\s*)[^\s,;]+`),

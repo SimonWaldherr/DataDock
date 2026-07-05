@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/SimonWaldherr/datadock/internal/standards"
+	"github.com/SimonWaldherr/datadock/internal/typed"
 	tinysql "github.com/SimonWaldherr/tinySQL"
 	tsqldriver "github.com/SimonWaldherr/tinySQL/driver"
 )
@@ -141,6 +142,8 @@ func TestDemoDataCreatesAllDemoTables(t *testing.T) {
 		"datadock_demo_orders":      20,
 		"datadock_demo_order_items": 26,
 		"datadock_demo_metrics":     60,
+		"datadock_demo_locations":   6,
+		"datadock_demo_payloads":    3,
 	}
 	for table, minRows := range expectedTables {
 		req := httptest.NewRequest(http.MethodGet, "/t/"+table, nil)
@@ -167,6 +170,13 @@ GROUP BY project_id`)
 	}
 	if len(rows) < 8 {
 		t.Fatalf("expected aggregate rows for demo projects, got %d", len(rows))
+	}
+	_, rows, err = app.queryRows(context.Background(), "SELECT name, lon, lat FROM datadock_demo_locations")
+	if err != nil {
+		t.Fatalf("demo geo query: %v", err)
+	}
+	if len(rows) != 6 {
+		t.Fatalf("expected 6 demo locations, got %d", len(rows))
 	}
 
 	if _, err := app.nativeDB.Catalog().GetJob(demoJobName); err != nil {
@@ -409,6 +419,12 @@ func TestQueryEditor(t *testing.T) {
 		"monaco-editor",
 		"Test LLM",
 		"F5",
+		"Excel CSV",
+		"GeoJSON",
+		`option value="map"`,
+		"Locations for Map view",
+		"JSON/XML payload tree",
+		"Excel CSV edge cases",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected query editor to contain %q", want)
@@ -879,6 +895,44 @@ func TestAPIExportHandler(t *testing.T) {
 	}
 	if !xlsxZipContains(t, xlsxRec.Body.Bytes(), "42") {
 		t.Errorf("expected exported XLSX value")
+	}
+}
+
+func TestExcelCSVCellKeepsExcelFromGuessingText(t *testing.T) {
+	tests := map[string]string{
+		"00123":                `="00123"`,
+		"2026-07-05T21:25:49Z": `2026-07-05 21:25:49`,
+		"=SUM(1,2)":            `="=SUM(1,2)"`,
+		"12.5":                 "12.5",
+	}
+
+	if got := excelCSVCell("2026-07-05T21:25:49Z", typed.KindDateTime); got != tests["2026-07-05T21:25:49Z"] {
+		t.Fatalf("datetime excel cell = %q, want %q", got, tests["2026-07-05T21:25:49Z"])
+	}
+	if got := excelCSVCell("12.5", typed.KindFloat); got != tests["12.5"] {
+		t.Fatalf("float excel cell = %q, want %q", got, tests["12.5"])
+	}
+	for _, input := range []string{"00123", "=SUM(1,2)"} {
+		if got := excelCSVCell(input, typed.KindText); got != tests[input] {
+			t.Fatalf("text excel cell %q = %q, want %q", input, got, tests[input])
+		}
+	}
+}
+
+func TestGeoJSONExportFromLonLat(t *testing.T) {
+	columns := []string{"name", "lon", "lat"}
+	rows := [][]string{{"Munich", "11.5761", "48.1372"}}
+	kinds := typed.InferColumns(rows, len(columns))
+	fc := buildGeoJSONFeatureCollection(columns, rows, kinds)
+	if fc.Type != "FeatureCollection" || len(fc.Features) != 1 {
+		t.Fatalf("unexpected feature collection: %#v", fc)
+	}
+	coords, ok := fc.Features[0].Geometry["coordinates"].([]float64)
+	if !ok || len(coords) != 2 || coords[0] != 11.5761 || coords[1] != 48.1372 {
+		t.Fatalf("unexpected coordinates: %#v", fc.Features[0].Geometry["coordinates"])
+	}
+	if got := fc.Features[0].Properties["name"]; got != "Munich" {
+		t.Fatalf("unexpected properties: %#v", fc.Features[0].Properties)
 	}
 }
 
