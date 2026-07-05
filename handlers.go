@@ -1608,29 +1608,58 @@ func (a *App) queryExecHandler(w http.ResponseWriter, r *http.Request) {
 // apiQueryHandler handles JSON-based SQL execution from the editor's JS.
 func (a *App) apiQueryHandler(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		SQL string `json:"sql"`
+		SQL    string `json:"sql"`
+		Limit  int    `json:"limit"`
+		Offset int    `json:"offset"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
 		return
 	}
-	result := a.executeSQL(r.Context(), strings.TrimSpace(body.SQL))
+	limit := clampQueryWindowLimit(body.Limit)
+	offset := body.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	result := a.executeSQLWindow(r.Context(), strings.TrimSpace(body.SQL), offset, limit)
 
 	type apiResult struct {
-		Columns   []string   `json:"columns,omitempty"`
-		Rows      [][]string `json:"rows,omitempty"`
-		Affected  int64      `json:"affected,omitempty"`
-		ElapsedMs int64      `json:"elapsed_ms"`
-		Error     string     `json:"error,omitempty"`
+		Columns        []string   `json:"columns,omitempty"`
+		Rows           [][]string `json:"rows,omitempty"`
+		Affected       int64      `json:"affected,omitempty"`
+		ElapsedMs      int64      `json:"elapsed_ms"`
+		StatementClass string     `json:"statement_class,omitempty"`
+		Offset         int        `json:"offset,omitempty"`
+		Limit          int        `json:"limit,omitempty"`
+		HasMore        bool       `json:"has_more,omitempty"`
+		Error          string     `json:"error,omitempty"`
 	}
 	out := apiResult{
-		Columns:   result.Columns,
-		Rows:      result.Rows,
-		Affected:  result.Affected,
-		ElapsedMs: result.Elapsed.Milliseconds(),
-		Error:     result.Err,
+		Columns:        result.Columns,
+		Rows:           result.Rows,
+		Affected:       result.Affected,
+		ElapsedMs:      result.Elapsed.Milliseconds(),
+		StatementClass: string(result.StatementClass),
+		Offset:         result.Offset,
+		Limit:          result.Limit,
+		HasMore:        result.HasMore,
+		Error:          result.Err,
 	}
 	a.writeJSON(w, http.StatusOK, out)
+}
+
+func clampQueryWindowLimit(limit int) int {
+	const (
+		defaultLimit = 500
+		maxLimit     = 5000
+	)
+	if limit <= 0 {
+		return defaultLimit
+	}
+	if limit > maxLimit {
+		return maxLimit
+	}
+	return limit
 }
 
 // apiExportHandler streams the result of a read-only SQL query as CSV or JSON.

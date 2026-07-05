@@ -15,6 +15,7 @@ import (
 
 	dbcatalog "github.com/SimonWaldherr/datadock/internal/catalog"
 	"github.com/SimonWaldherr/datadock/internal/resultutil"
+	"github.com/SimonWaldherr/datadock/internal/sqlutil"
 )
 
 const (
@@ -577,7 +578,8 @@ func (a *App) validateAutoRunnableSQL(ctx context.Context, sqlText string) error
 	if !isSingleSQLStatement(sqlText) {
 		return errors.New("generated SQL must contain a single statement")
 	}
-	if !isResultQuerySQL(sqlText) {
+	class := classifySQL(sqlText)
+	if class != sqlutil.StatementReadQuery {
 		return errors.New("automatic execution is limited to SELECT, WITH, SHOW, or EXPLAIN")
 	}
 	dialect := a.currentDialect()
@@ -594,9 +596,7 @@ func (a *App) validateAutoRunnableSQL(ctx context.Context, sqlText string) error
 }
 
 func isSingleSQLStatement(sqlText string) bool {
-	sqlText = strings.TrimSpace(sqlText)
-	sqlText = strings.TrimSuffix(sqlText, ";")
-	return !strings.Contains(sqlText, ";")
+	return classifySQL(sqlText) != sqlutil.StatementScript
 }
 
 func containsSQLWord(upperSQL, word string) bool {

@@ -10,6 +10,7 @@
 <div class="card">
   <div class="card-body py-2">
     <div class="d-flex flex-column gap-2">
+      <label class="visually-hidden" for="llmPrompt">Ask the SQL assistant</label>
       <textarea id="llmPrompt" class="form-control form-control-sm" rows="2"
                 placeholder="Ask in natural language, e.g. show the top customers by revenue"></textarea>
       <div class="toolbar">
@@ -34,9 +35,9 @@
           </button>
           <ul id="samplePromptMenu" class="dropdown-menu"></ul>
         </div>
-        <span id="llmStatus" class="small text-muted ms-1"></span>
+        <span id="llmStatus" class="small text-muted ms-1" role="status" aria-live="polite"></span>
       </div>
-      <div id="llmAnswer" class="small"></div>
+      <div id="llmAnswer" class="small" aria-live="polite"></div>
     </div>
   </div>
 </div>
@@ -44,15 +45,16 @@
 <div class="card">
   <div class="card-body pb-2">
     <div class="query-tabbar d-flex align-items-center gap-1 mb-2">
-      <div id="queryTabs" class="nav nav-tabs flex-nowrap overflow-auto"></div>
-      <button type="button" class="btn btn-outline-secondary btn-sm ms-auto flex-shrink-0" onclick="newQueryTab()" title="New tab">
+      <div id="queryTabs" class="nav nav-tabs flex-nowrap overflow-auto" role="tablist" aria-label="Query tabs"></div>
+      <button type="button" class="btn btn-outline-secondary btn-sm ms-auto flex-shrink-0" onclick="newQueryTab()" title="New tab" aria-label="New query tab">
         <i class="bi bi-plus-lg"></i>
       </button>
     </div>
+    <label class="visually-hidden" for="sqlInput">SQL query</label>
     <textarea id="sqlInput" class="sql-editor" rows="6"
               placeholder="SELECT * FROM your_table LIMIT 100"
               spellcheck="false">{{.SQL}}</textarea>
-    <div id="monacoEditor" class="d-none" style="height:220px;border-radius:.4rem;overflow:hidden;border:1px solid #444"></div>
+    <div id="monacoEditor" class="d-none" style="height:220px;border-radius:.4rem;overflow:hidden;border:1px solid #444" role="region" aria-label="SQL editor"></div>
     <div class="toolbar mt-2 mb-1">
       <button id="runBtn" class="btn btn-primary btn-sm" onclick="runQuery()">
         <i class="bi bi-play-fill me-1"></i>Run <kbd class="ms-1 opacity-75" style="font-size:.65rem">Ctrl+Enter</kbd>
@@ -75,6 +77,7 @@
       <button id="liveToggleBtn" class="btn btn-outline-secondary btn-sm" onclick="toggleLiveQuery()">
         <i class="bi bi-broadcast me-1"></i>Live
       </button>
+      <label class="visually-hidden" for="liveIntervalSelect">Live refresh interval</label>
       <select id="liveIntervalSelect" class="form-select form-select-sm query-live-select" onchange="setLiveInterval(this.value)" title="Live refresh interval">
         <option value="1000">1s</option>
         <option value="2000">2s</option>
@@ -83,6 +86,7 @@
         <option value="30000">30s</option>
         <option value="60000">1m</option>
       </select>
+      <label class="visually-hidden" for="viewModeSelect">Result view mode</label>
       <select id="viewModeSelect" class="form-select form-select-sm query-view-select" onchange="setQueryViewMode(this.value)" title="Result view mode">
         <option value="table">Table</option>
         <option value="log">Logs</option>
@@ -118,7 +122,7 @@
       <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('xlsx')">
         <i class="bi bi-file-earmark-spreadsheet me-1"></i>XLSX
       </button>
-      <span id="statusMsg" class="small text-muted ms-2"></span>
+      <span id="statusMsg" class="small text-muted ms-2" role="status" aria-live="polite"></span>
     </div>
   </div>
 </div>
@@ -150,7 +154,7 @@
   </div>
 </div>
 
-<div id="resultArea"></div>
+<div id="resultArea" role="region" aria-label="Query result"></div>
 
 <!-- No-JS fallback (hidden when JS is active) -->
 <noscript>
@@ -190,6 +194,7 @@ var queryHistoryKey = 'datadock.queryHistory.v1';
 var queryTabsKey = 'datadock.queryTabs.v1';
 var queryTabsActiveKey = 'datadock.queryTabs.active.v1';
 var maxLocalQueryHistory = 20;
+var defaultResultWindowLimit = 500;
 var sqlEditor = null;
 var monacoBaseURL = 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.40.0/min';
 var queryTabs = [];
@@ -521,9 +526,15 @@ function renderQueryTabs() {
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'nav-link query-tab-button' + (tab.id === activeQueryTabID ? ' active' : '');
+    btn.id = 'query-tab-' + tab.id;
+    btn.setAttribute('role', 'tab');
+    btn.setAttribute('aria-selected', tab.id === activeQueryTabID ? 'true' : 'false');
+    btn.setAttribute('aria-controls', 'resultArea');
+    btn.setAttribute('tabindex', tab.id === activeQueryTabID ? '0' : '-1');
     btn.title = runtime.statusText ? tab.title + ' - ' + runtime.statusText : tab.title;
     btn.textContent = (runtime.running ? '● ' : '') + tab.title;
     btn.onclick = function() { switchQueryTab(tab.id); };
+    btn.onkeydown = function(e) { handleQueryTabKeydown(e, tab.id); };
     btn.ondblclick = function(e) {
       e.preventDefault();
       renameQueryTab(tab.id);
@@ -535,6 +546,7 @@ function renderQueryTabs() {
       close.type = 'button';
       close.className = 'btn btn-link btn-sm query-tab-close';
       close.title = 'Close tab';
+      close.setAttribute('aria-label', 'Close ' + tab.title);
       close.innerHTML = '<i class="bi bi-x"></i>';
       close.onclick = function(e) {
         e.preventDefault();
@@ -545,6 +557,24 @@ function renderQueryTabs() {
     }
     target.appendChild(wrap);
   });
+}
+
+function handleQueryTabKeydown(e, tabID) {
+  var idx = queryTabs.findIndex(function(tab) { return tab.id === tabID; });
+  if (idx < 0) return;
+  var nextIdx = idx;
+  if (e.key === 'ArrowRight') nextIdx = (idx + 1) % queryTabs.length;
+  if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + queryTabs.length) % queryTabs.length;
+  if (e.key === 'Home') nextIdx = 0;
+  if (e.key === 'End') nextIdx = queryTabs.length - 1;
+  if (nextIdx !== idx) {
+    e.preventDefault();
+    switchQueryTab(queryTabs[nextIdx].id);
+    window.setTimeout(function() {
+      var btn = document.getElementById('query-tab-' + queryTabs[nextIdx].id);
+      if (btn) btn.focus();
+    }, 0);
+  }
 }
 
 function newQueryTab(sql, title) {
@@ -712,12 +742,14 @@ function runQueryWithDemoDataFallback(tabID, sql) {
 
 function executeQueryForTab(tabID, sql, options) {
   options = options || {};
-  var runtime = beginQueryRun(tabID, options.live ? 'Live refresh…' : 'Running…');
+  var runtime = beginQueryRun(tabID, options.live ? 'Live refresh…' : (options.append ? 'Loading more…' : 'Running…'), !!options.append);
   var requestID = runtime.requestID;
+  var offset = Math.max(0, Number(options.offset || 0));
+  var limit = Math.max(1, Number(options.limit || defaultResultWindowLimit));
   fetch('/api/query', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({sql: sql})
+    body: JSON.stringify({sql: sql, offset: offset, limit: limit})
   })
     .then(function (r) { return r.json(); })
     .then(function (data) {
@@ -729,7 +761,7 @@ function executeQueryForTab(tabID, sql, options) {
             return fetch('/api/query', {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({sql: sql})
+              body: JSON.stringify({sql: sql, offset: offset, limit: limit})
             }).then(function (r2) { return r2.json(); });
           });
       }
@@ -737,14 +769,14 @@ function executeQueryForTab(tabID, sql, options) {
     })
     .then(function(data) {
       if (!data || !isCurrentQueryRequest(tabID, requestID)) return;
-      finishQueryRun(tabID, data, sql);
+      finishQueryRun(tabID, data, sql, options);
       if (options.live) {
         scheduleLiveTab(tabID);
       }
     })
     .catch(function (err) {
       if (!isCurrentQueryRequest(tabID, requestID)) return;
-      finishQueryRun(tabID, {error: err.message || err.toString()}, sql);
+      finishQueryRun(tabID, {error: err.message || err.toString()}, sql, options);
       if (options.live) {
         scheduleLiveTab(tabID);
       }
@@ -925,20 +957,26 @@ function clearEditor() {
   focusEditor();
 }
 
-function beginQueryRun(tabID, statusText) {
+function beginQueryRun(tabID, statusText, preserveOutput) {
   var runtime = getQueryTabRuntime(tabID);
   runtime.running = true;
   runtime.requestID = ++queryRequestSeq;
   runtime.statusText = statusText || 'Running…';
-  runtime.resultData = null;
-  runtime.errorMessage = '';
+  if (!preserveOutput) {
+    runtime.resultData = null;
+    runtime.errorMessage = '';
+  }
   if (tabID === activeQueryTabID) {
-    lastResultData = null;
-    lastErrorMessage = '';
+    if (!preserveOutput) {
+      lastResultData = null;
+      lastErrorMessage = '';
+    }
     document.getElementById('statusMsg').textContent = runtime.statusText;
     document.getElementById('runBtn').disabled = true;
-    document.getElementById('resultArea').innerHTML = '';
-    document.getElementById('chartArea').innerHTML = '';
+    if (!preserveOutput) {
+      document.getElementById('resultArea').innerHTML = '';
+      document.getElementById('chartArea').innerHTML = '';
+    }
   }
   renderQueryTabs();
   return runtime;
@@ -957,17 +995,33 @@ function isCurrentQueryRequest(tabID, requestID) {
   return getQueryTabRuntime(tabID).requestID === requestID;
 }
 
-function finishQueryRun(tabID, data, sql) {
+function finishQueryRun(tabID, data, sql, options) {
+  options = options || {};
   var runtime = getQueryTabRuntime(tabID);
+  var previous = runtime.resultData;
   runtime.running = false;
-  runtime.resultData = data && !data.error ? data : null;
+  runtime.resultData = mergeQueryWindow(previous, data, options);
   runtime.errorMessage = data && data.error ? data.error : '';
-  runtime.statusText = queryStatusText(data);
+  runtime.statusText = queryStatusText(runtime.resultData || data);
   saveQueryResultHistory(sql, data);
   if (tabID === activeQueryTabID) {
     renderActiveTabOutput();
   }
   renderQueryTabs();
+}
+
+function mergeQueryWindow(previous, data, options) {
+  if (!data || data.error) return null;
+  if (!options.append || !previous || !previous.rows || !data.rows) return data;
+  var merged = {};
+  Object.keys(data).forEach(function(key) { merged[key] = data[key]; });
+  merged.columns = previous.columns || data.columns || [];
+  merged.rows = (previous.rows || []).concat(data.rows || []);
+  merged.offset = previous.offset || 0;
+  merged.limit = data.limit || previous.limit || defaultResultWindowLimit;
+  merged.has_more = !!data.has_more;
+  merged.elapsed_ms = data.elapsed_ms || previous.elapsed_ms || 0;
+  return merged;
 }
 
 function queryStatusText(data) {
@@ -976,7 +1030,7 @@ function queryStatusText(data) {
   var ms = data.elapsed_ms || 0;
   if (data.columns && data.columns.length > 0) {
     var rows = data.rows || [];
-    return rows.length + ' row(s) · ' + ms + ' ms';
+    return rows.length + ' row(s) shown' + (data.has_more ? ' · more available' : '') + ' · ' + ms + ' ms';
   }
   return 'OK · ' + (data.affected || 0) + ' row(s) · ' + ms + ' ms';
 }
@@ -1000,12 +1054,17 @@ function renderActiveTabOutput() {
   var tab = getActiveQueryTab() || {};
   document.getElementById('runBtn').disabled = !!runtime.running;
   if (runtime.running) {
-    lastResultData = null;
-    lastErrorMessage = '';
-    disposeActiveResultMap();
     document.getElementById('statusMsg').textContent = runtime.statusText || 'Running…';
-    document.getElementById('resultArea').innerHTML = '';
-    document.getElementById('chartArea').innerHTML = '';
+    if (runtime.resultData) {
+      renderResultToPage(runtime.resultData);
+      document.getElementById('statusMsg').textContent = runtime.statusText || 'Running…';
+    } else {
+      lastResultData = null;
+      lastErrorMessage = '';
+      disposeActiveResultMap();
+      document.getElementById('resultArea').innerHTML = '';
+      document.getElementById('chartArea').innerHTML = '';
+    }
     return;
   }
   if (runtime.errorMessage) {
@@ -1318,40 +1377,40 @@ function renderResultToPage(data) {
     lastResultData = data;
     lastErrorMessage = '';
     var rows = data.rows || [];
-    status.textContent = rows.length + ' row(s) · ' + ms + ' ms';
+    status.textContent = queryStatusText(data);
     var tab = getActiveQueryTab() || {};
     if (tab.viewMode === 'log') {
-      area.innerHTML = renderLogResult(data);
+      area.innerHTML = renderResultWindowBar(data) + renderLogResult(data);
       document.getElementById('chartArea').innerHTML = '';
       return;
     }
     if (tab.viewMode === 'cards') {
-      area.innerHTML = renderCardResult(data);
+      area.innerHTML = renderResultWindowBar(data) + renderCardResult(data);
       document.getElementById('chartArea').innerHTML = '';
       return;
     }
     if (tab.viewMode === 'json') {
-      area.innerHTML = renderStructuredResult(data, 'json');
+      area.innerHTML = renderResultWindowBar(data) + renderStructuredResult(data, 'json');
       document.getElementById('chartArea').innerHTML = '';
       return;
     }
     if (tab.viewMode === 'xml') {
-      area.innerHTML = renderStructuredResult(data, 'xml');
+      area.innerHTML = renderResultWindowBar(data) + renderStructuredResult(data, 'xml');
       document.getElementById('chartArea').innerHTML = '';
       return;
     }
     if (tab.viewMode === 'map') {
-      area.innerHTML = renderMapResult(data);
+      area.innerHTML = renderResultWindowBar(data) + renderMapResult(data);
       document.getElementById('chartArea').innerHTML = '';
       return;
     }
     if (tab.viewMode === 'pivot') {
-      area.innerHTML = renderPivotResult(data);
+      area.innerHTML = renderResultWindowBar(data) + renderPivotResult(data);
       document.getElementById('chartArea').innerHTML = '';
       return;
     }
     if (tab.viewMode === 'profile') {
-      area.innerHTML = renderProfileResult(data);
+      area.innerHTML = renderResultWindowBar(data) + renderProfileResult(data);
       document.getElementById('chartArea').innerHTML = '';
       return;
     }
@@ -1362,11 +1421,11 @@ function renderResultToPage(data) {
       return;
     }
     if (tab.viewMode === 'notebook') {
-      area.innerHTML = renderNotebookResult(data);
+      area.innerHTML = renderResultWindowBar(data) + renderNotebookResult(data);
       document.getElementById('chartArea').innerHTML = '';
       return;
     }
-    var html = '<div class="card mt-1"><div class="table-responsive">' +
+    var html = renderResultWindowBar(data) + '<div class="card mt-1"><div class="table-responsive">' +
       '<table class="table table-sm table-hover result-table mb-0"><thead><tr>';
     data.columns.forEach(function(c){ html += '<th>' + escHtml(c) + '</th>'; });
     html += '</tr></thead><tbody>';
@@ -1389,6 +1448,33 @@ function renderResultToPage(data) {
     area.innerHTML = '<div class="alert alert-success mt-1 py-2"><i class="bi bi-check-circle-fill me-2"></i>' +
       'OK — ' + affected + ' row(s) affected · ' + ms + ' ms</div>';
   }
+}
+
+function renderResultWindowBar(data) {
+  if (!data || !data.columns || !data.columns.length) return '';
+  var rows = data.rows || [];
+  var limit = data.limit || defaultResultWindowLimit;
+  var statementClass = data.statement_class ? ' · ' + data.statement_class.replace('_', ' ') : '';
+  var html = '<div class="d-flex align-items-center justify-content-between gap-2 mt-1 small text-muted">' +
+    '<div>' + rows.length + ' row(s) loaded' + (data.has_more ? ' · window size ' + limit : '') + statementClass + '</div>';
+  if (data.has_more) {
+    html += '<button type="button" class="btn btn-outline-secondary btn-sm" onclick="loadMoreQueryRows()">' +
+      '<i class="bi bi-plus-circle me-1"></i>Load more</button>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function loadMoreQueryRows() {
+  var tab = getActiveQueryTab();
+  var runtime = getQueryTabRuntime(activeQueryTabID);
+  if (!tab || !runtime.resultData || runtime.running || !runtime.resultData.has_more) return;
+  var rows = runtime.resultData.rows || [];
+  executeQueryForTab(activeQueryTabID, tab.sql || currentSQL().trim(), {
+    append: true,
+    offset: rows.length,
+    limit: runtime.resultData.limit || defaultResultWindowLimit
+  });
 }
 
 function disposeActiveResultMap() {

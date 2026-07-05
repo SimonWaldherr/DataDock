@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -754,6 +755,43 @@ func TestAPIQueryHandler(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "42") {
 		t.Errorf("expected 42 in response, got: %s", w.Body.String())
+	}
+}
+
+func TestAPIQueryHandlerWindow(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE vals (id INT, v INT)"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for i := 1; i <= 3; i++ {
+		if _, err := app.sqlDB.Exec("INSERT INTO vals (id, v) VALUES (?, ?)", i, i*10); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+
+	body := strings.NewReader(`{"sql":"SELECT id, v FROM vals ORDER BY id","limit":2}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/query", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	app.apiQueryHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Rows           [][]string `json:"rows"`
+		Limit          int        `json:"limit"`
+		HasMore        bool       `json:"has_more"`
+		StatementClass string     `json:"statement_class"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v\n%s", err, w.Body.String())
+	}
+	if len(got.Rows) != 2 || !got.HasMore || got.Limit != 2 {
+		t.Fatalf("unexpected window response: %#v", got)
+	}
+	if got.StatementClass != "read_query" {
+		t.Fatalf("statement class = %q, want read_query", got.StatementClass)
 	}
 }
 

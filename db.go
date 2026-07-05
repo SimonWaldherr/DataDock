@@ -145,11 +145,15 @@ type TableObject struct {
 
 // QueryResult holds the result of an arbitrary SQL query.
 type QueryResult struct {
-	Columns  []string
-	Rows     [][]string
-	Affected int64
-	Elapsed  time.Duration
-	Err      string
+	Columns        []string
+	Rows           [][]string
+	Affected       int64
+	Elapsed        time.Duration
+	Err            string
+	StatementClass sqlutil.StatementClass
+	Offset         int
+	Limit          int
+	HasMore        bool
 }
 
 func (a *App) activeConn(ctx context.Context) *DBConnection {
@@ -567,7 +571,7 @@ func (a *App) executeSQL(ctx context.Context, query string) QueryResult { //noli
 	start := time.Now()
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
-	result := QueryResult{}
+	result := QueryResult{StatementClass: classifySQL(query)}
 
 	if !isResultQuerySQL(query) && a.currentReadOnlyMode() {
 		result.Err = "maintenance mode is active: only SELECT/WITH/SHOW/EXPLAIN queries are allowed"
@@ -600,6 +604,48 @@ func (a *App) executeSQL(ctx context.Context, query string) QueryResult { //noli
 	return result
 }
 
+func (a *App) executeSQLWindow(ctx context.Context, query string, offset, limit int) QueryResult { //nolint:gosec
+	start := time.Now()
+	ctx, cancel := a.withQueryTimeout(ctx)
+	defer cancel()
+	result := QueryResult{
+		StatementClass: classifySQL(query),
+		Offset:         offset,
+		Limit:          limit,
+	}
+
+	if !isResultQuerySQL(query) && a.currentReadOnlyMode() {
+		result.Err = "maintenance mode is active: only SELECT/WITH/SHOW/EXPLAIN queries are allowed"
+		result.Elapsed = time.Since(start)
+		return result
+	}
+
+	if isResultQuerySQL(query) {
+		cols, rows, hasMore, err := a.queryRowsWindow(ctx, query, offset, limit)
+		if err != nil {
+			result.Err = err.Error()
+			result.Elapsed = time.Since(start)
+			return result
+		}
+		result.Columns = cols
+		result.Rows = rows
+		result.HasMore = hasMore
+	} else {
+		conn := a.activeConn(ctx)
+		res, err := a.execConn(ctx, conn, "query.exec", query)
+		if err != nil {
+			result.Err = err.Error()
+			result.Elapsed = time.Since(start)
+			return result
+		}
+		n, _ := res.RowsAffected()
+		result.Affected = n
+	}
+
+	result.Elapsed = time.Since(start)
+	return result
+}
+
 func (a *App) queryRows(ctx context.Context, query string) ([]string, [][]string, error) { //nolint:gosec
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
@@ -612,6 +658,18 @@ func (a *App) queryRows(ctx context.Context, query string) ([]string, [][]string
 	return scanRows(rows)
 }
 
+func (a *App) queryRowsWindow(ctx context.Context, query string, offset, limit int) ([]string, [][]string, bool, error) { //nolint:gosec
+	ctx, cancel := a.withQueryTimeout(ctx)
+	defer cancel()
+	conn := a.activeConn(ctx)
+	rows, err := a.queryConn(ctx, conn, "query.rows", query)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer rows.Close()
+	return scanRowsWindow(rows, offset, limit)
+}
+
 func scanRows(rows *sql.Rows) ([]string, [][]string, error) {
 	cols, err := rows.Columns()
 	if err != nil {
@@ -620,21 +678,66 @@ func scanRows(rows *sql.Rows) ([]string, [][]string, error) {
 
 	result := make([][]string, 0)
 	for rows.Next() {
-		vals := make([]interface{}, len(cols))
-		ptrs := make([]interface{}, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
+		row, err := scanSQLRow(rows, cols)
+		if err != nil {
 			return nil, nil, err
-		}
-		row := make([]string, len(cols))
-		for i, v := range vals {
-			row[i] = anyToString(v)
 		}
 		result = append(result, row)
 	}
 	return cols, result, rows.Err()
+}
+
+func scanRowsWindow(rows *sql.Rows, offset, limit int) ([]string, [][]string, bool, error) {
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+
+	result := make([][]string, 0, limit)
+	seen := 0
+	hasMore := false
+	for rows.Next() {
+		row, err := scanSQLRow(rows, cols)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if seen < offset {
+			seen++
+			continue
+		}
+		if len(result) >= limit {
+			hasMore = true
+			break
+		}
+		result = append(result, row)
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, false, err
+	}
+	return cols, result, hasMore, nil
+}
+
+func scanSQLRow(rows *sql.Rows, cols []string) ([]string, error) {
+	vals := make([]interface{}, len(cols))
+	ptrs := make([]interface{}, len(cols))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	if err := rows.Scan(ptrs...); err != nil {
+		return nil, err
+	}
+	row := make([]string, len(cols))
+	for i, v := range vals {
+		row[i] = anyToString(v)
+	}
+	return row, nil
 }
 
 func (c *DBConnection) tableObjects(ctx context.Context) ([]TableObject, error) {
@@ -796,6 +899,10 @@ func isDataDockSystemObject(name string) bool {
 
 func isResultQuerySQL(query string) bool {
 	return sqlutil.IsResultProducing(query)
+}
+
+func classifySQL(query string) sqlutil.StatementClass {
+	return sqlutil.Classify(query)
 }
 
 // quoteName wraps a table or column name in double-quotes for safety.
