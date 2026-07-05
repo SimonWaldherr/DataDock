@@ -50,13 +50,13 @@ func Build(cfg Config) (*tinysql.CatalogJob, error) {
 		job.ScheduleType = "MANUAL"
 	}
 	if cfg.IntervalMs > 0 {
-		job.IntervalMs = int64(time.Duration(cfg.IntervalMs) / time.Millisecond)
+		job.IntervalMs = cfg.IntervalMs
 	}
 	if cfg.RunAt != nil {
 		job.RunAt = cfg.RunAt
 	}
 	if cfg.MaxRuntimeMs > 0 {
-		job.MaxRuntimeMs = int64(time.Duration(cfg.MaxRuntimeMs) / time.Millisecond)
+		job.MaxRuntimeMs = cfg.MaxRuntimeMs
 	}
 	if cfg.Timezone != "" {
 		job.Timezone = strings.TrimSpace(cfg.Timezone)
