@@ -34,8 +34,15 @@ func main() {
 	connectTimeout := flag.Duration("connect-timeout", envDurationDefault("DATADOCK_CONNECT_TIMEOUT", 10*time.Second), "Timeout for adding/pinging managed database connections")
 	queryTimeout := flag.Duration("query-timeout", envDurationDefault("DATADOCK_QUERY_TIMEOUT", 60*time.Second), "Default timeout for interactive SQL queries and exports")
 	llmTimeout := flag.Duration("llm-timeout", envDurationDefault("DATADOCK_LLM_TIMEOUT", 45*time.Second), "Timeout for OpenAI-compatible LLM requests")
+	verboseMode := flag.Bool("verbose", envBoolDefault("DATADOCK_VERBOSE", false), "Write redacted outbound/inbound system communication logs to stdout")
+	watchDir := flag.String("watch-dir", envDefault("DATADOCK_WATCH_DIR", ""), "Optional directory to auto-import supported files into tinySQL tables")
+	watchInterval := flag.Duration("watch-interval", envDurationDefault("DATADOCK_WATCH_INTERVAL", 3*time.Second), "Polling interval for -watch-dir auto-import")
 	auditPath := flag.String("audit-log", envDefault("DATADOCK_AUDIT_LOG", ""), "Optional path for a tamper-evident tinySQL audit log")
 	flag.Parse()
+	verbose := NewVerboseLogger(*verboseMode)
+	if verbose.Enabled() {
+		verbose.Log(VerboseEvent{System: "datadock", Operation: "verbose_enabled", Target: "stdout", Preview: "redacted communication logging enabled"})
+	}
 
 	// Open or create the tinySQL database.
 	nativeDB, err := openNativeDB(*dbFile)
@@ -64,11 +71,21 @@ func main() {
 	sqlDB.SetMaxOpenConns(8)
 	sqlDB.SetMaxIdleConns(4)
 
+	if verbose.Enabled() {
+		verbose.Log(VerboseEvent{System: "database", Direction: "outbound", Operation: "open", Target: "tinysql://default", Preview: "tenant=" + *tenant})
+	}
+	pingStart := time.Now()
 	if err := sqlDB.PingContext(context.Background()); err != nil {
+		if verbose.Enabled() {
+			verbose.Log(VerboseEvent{System: "database", Direction: "inbound", Operation: "ping", Target: "tinysql://default", Duration: time.Since(pingStart), Error: err.Error()})
+		}
 		log.Fatalf("ping: %v", err)
 	}
+	if verbose.Enabled() {
+		verbose.Log(VerboseEvent{System: "database", Direction: "inbound", Operation: "ping", Target: "tinysql://default", Duration: time.Since(pingStart), Status: "ok"})
+	}
 
-	if err := tinysql.StartJobScheduler(nativeDB, *tenant); err != nil {
+	if err := nativeDB.StartJobScheduler(verboseSQLJobExecutor{db: nativeDB, tenant: *tenant, verbose: verbose}); err != nil {
 		log.Printf("job scheduler disabled: %v", err)
 	} else {
 		defer tinysql.StopJobScheduler(nativeDB)
@@ -80,6 +97,7 @@ func main() {
 	}
 
 	app := newApp(nativeDB, sqlDB, *tenant, tpl)
+	app.setVerboseLogger(verbose)
 	settings := RuntimeSettings{
 		Dialect:        *sqlDialect,
 		ConnectTimeout: *connectTimeout,
@@ -111,6 +129,11 @@ func main() {
 	if strings.TrimSpace(*auditPath) != "" {
 		log.Printf("audit log flag ignored: github.com/SimonWaldherr/tinySQL v0.12.0 does not expose audit logging")
 	}
+	watchCtx, watchCancel := context.WithCancel(context.Background())
+	defer watchCancel()
+	if strings.TrimSpace(*watchDir) != "" {
+		startAutoImportWatcher(watchCtx, app, *watchDir, *watchInterval)
+	}
 
 	mux := http.NewServeMux()
 	app.registerRoutes(mux)
@@ -133,6 +156,7 @@ func main() {
 
 	select {
 	case <-signalCtx.Done():
+		watchCancel()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -186,6 +210,22 @@ func envDurationDefault(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+func envBoolDefault(key string, fallback bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	case "0", "false", "f", "no", "n", "off":
+		return false
+	default:
+		log.Printf("invalid boolean in %s=%q, using %t", key, v, fallback)
+		return fallback
+	}
 }
 
 func mergeRuntimeSettingsWithExplicitFlags(stored, flags RuntimeSettings) RuntimeSettings {

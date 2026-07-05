@@ -58,13 +58,13 @@ func (a *App) migrateTable(ctx context.Context, sourceID, targetID, sourceTable,
 		TargetTable: targetTable,
 	}
 	if createTarget {
-		if err := createMigratedTable(ctx, target, targetTable, meta.Columns); err != nil {
+		if err := a.createMigratedTable(ctx, target, targetTable, meta.Columns); err != nil {
 			return summary, err
 		}
 		summary.Created = true
 	}
 
-	rows, err := source.DB.QueryContext(ctx, "SELECT * FROM "+source.QuoteIdent(meta.Name))
+	rows, err := a.queryConn(ctx, source, "migration.read", "SELECT * FROM "+source.QuoteIdent(meta.Name))
 	if err != nil {
 		return summary, err
 	}
@@ -88,7 +88,7 @@ func (a *App) migrateTable(ctx context.Context, sourceID, targetID, sourceTable,
 		if err := rows.Scan(ptrs...); err != nil {
 			return summary, err
 		}
-		if _, err := target.DB.ExecContext(ctx, insertSQL, values...); err != nil {
+		if _, err := a.execConn(ctx, target, "migration.insert", insertSQL, values...); err != nil {
 			return summary, err
 		}
 		summary.Rows++
@@ -96,7 +96,7 @@ func (a *App) migrateTable(ctx context.Context, sourceID, targetID, sourceTable,
 	return summary, rows.Err()
 }
 
-func createMigratedTable(ctx context.Context, target *DBConnection, table string, columns []Column) error {
+func (a *App) createMigratedTable(ctx context.Context, target *DBConnection, table string, columns []Column) error {
 	if len(columns) == 0 {
 		return fmt.Errorf("source table has no columns")
 	}
@@ -108,7 +108,7 @@ func createMigratedTable(ctx context.Context, target *DBConnection, table string
 		defs = append(defs, target.QuoteIdent(col.Name)+" "+migrationColumnType(target, col.TypeName))
 	}
 	ddl := fmt.Sprintf("CREATE TABLE %s (%s)", target.QuoteIdent(table), strings.Join(defs, ", "))
-	_, err := target.DB.ExecContext(ctx, ddl)
+	_, err := a.execConn(ctx, target, "migration.create_table", ddl)
 	return err
 }
 

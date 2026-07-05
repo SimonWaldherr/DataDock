@@ -34,12 +34,98 @@ type App struct {
 	pageSize       int
 	defaultTheme   string
 	defaultDensity string
+	verbose        *VerboseLogger
 }
 
 // Column describes a single column returned by a query.
 type Column struct {
 	Name     string
 	TypeName string
+}
+
+func (a *App) setVerboseLogger(verbose *VerboseLogger) {
+	a.settingsMu.Lock()
+	a.verbose = verbose
+	a.settingsMu.Unlock()
+	if a.conns != nil {
+		a.conns.SetVerbose(verbose)
+	}
+}
+
+func (a *App) verboseLogger() *VerboseLogger {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	return a.verbose
+}
+
+func (a *App) queryConn(ctx context.Context, conn *DBConnection, operation, query string, args ...any) (*sql.Rows, error) {
+	if conn == nil || conn.DB == nil {
+		return nil, fmt.Errorf("database connection is not available")
+	}
+	start := time.Now()
+	if a.verboseLogger().Enabled() {
+		a.verboseLogger().Log(VerboseEvent{
+			System:    "database",
+			Direction: "outbound",
+			Operation: operation,
+			Target:    conn.verboseTarget(),
+			SQL:       query,
+			ArgsCount: len(args),
+		})
+	}
+	rows, err := conn.DB.QueryContext(ctx, query, args...)
+	if a.verboseLogger().Enabled() {
+		event := VerboseEvent{
+			System:    "database",
+			Direction: "inbound",
+			Operation: operation,
+			Target:    conn.verboseTarget(),
+			Duration:  time.Since(start),
+			Status:    "ok",
+		}
+		if err != nil {
+			event.Status = "error"
+			event.Error = err.Error()
+		}
+		a.verboseLogger().Log(event)
+	}
+	return rows, err
+}
+
+func (a *App) execConn(ctx context.Context, conn *DBConnection, operation, query string, args ...any) (sql.Result, error) {
+	if conn == nil || conn.DB == nil {
+		return nil, fmt.Errorf("database connection is not available")
+	}
+	start := time.Now()
+	if a.verboseLogger().Enabled() {
+		a.verboseLogger().Log(VerboseEvent{
+			System:    "database",
+			Direction: "outbound",
+			Operation: operation,
+			Target:    conn.verboseTarget(),
+			SQL:       query,
+			ArgsCount: len(args),
+		})
+	}
+	res, err := conn.DB.ExecContext(ctx, query, args...)
+	if a.verboseLogger().Enabled() {
+		event := VerboseEvent{
+			System:    "database",
+			Direction: "inbound",
+			Operation: operation,
+			Target:    conn.verboseTarget(),
+			Duration:  time.Since(start),
+			Status:    "ok",
+		}
+		if err != nil {
+			event.Status = "error"
+			event.Error = err.Error()
+		} else if n, nerr := res.RowsAffected(); nerr == nil {
+			event.Preview = fmt.Sprintf("rows_affected=%d", n)
+		}
+		a.verboseLogger().Log(event)
+	}
+	return res, err
 }
 
 // TableMeta holds metadata about a table.
@@ -75,6 +161,10 @@ func (a *App) activeConn(ctx context.Context) *DBConnection {
 			return conn
 		}
 	}
+	return a.localTinySQLConn()
+}
+
+func (a *App) localTinySQLConn() *DBConnection {
 	return &DBConnection{
 		ID:      defaultConnectionID,
 		Name:    "tinySQL",
@@ -82,6 +172,7 @@ func (a *App) activeConn(ctx context.Context) *DBConnection {
 		Dialect: DialectProfileForName("tinysql"),
 		DB:      a.sqlDB,
 		Native:  a.nativeDB,
+		Verbose: a.verboseLogger(),
 	}
 }
 
@@ -239,7 +330,12 @@ func (a *App) tableMeta(ctx context.Context, name string) (TableMeta, error) {
 
 	// Row count (best-effort; ignore error). Use the DB-sourced meta.Name, not
 	// the user-provided name, when building the SQL query.
-	_ = a.sqlDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+quoteName(meta.Name)).Scan(&meta.RowCount)
+	if rows, err := a.queryConn(ctx, a.localTinySQLConn(), "metadata.row_count", "SELECT COUNT(*) FROM "+quoteName(meta.Name)); err == nil {
+		if rows.Next() {
+			_ = rows.Scan(&meta.RowCount)
+		}
+		rows.Close()
+	}
 
 	return meta, nil
 }
@@ -262,7 +358,7 @@ func (a *App) queryBackedMeta(ctx context.Context, name, kind string) (TableMeta
 	defer cancel()
 	conn := a.activeConn(ctx)
 	query := conn.selectPageSQL(name, "", "asc", 0, 0)
-	rows, err := conn.DB.QueryContext(ctx, query)
+	rows, err := a.queryConn(ctx, conn, "metadata.query_backed_meta", query)
 	if err != nil {
 		return TableMeta{}, err
 	}
@@ -283,7 +379,12 @@ func (a *App) queryBackedMeta(ctx context.Context, name, kind string) (TableMeta
 			meta.HasID = true
 		}
 	}
-	_ = conn.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+conn.QuoteIdent(name)).Scan(&meta.RowCount)
+	if rows, err := a.queryConn(ctx, conn, "metadata.row_count", "SELECT COUNT(*) FROM "+conn.QuoteIdent(name)); err == nil {
+		if rows.Next() {
+			_ = rows.Scan(&meta.RowCount)
+		}
+		rows.Close()
+	}
 	return meta, nil
 }
 
@@ -299,7 +400,7 @@ func (a *App) tableRows(ctx context.Context, name string, page int) ([]Column, [
 
 	conn := a.activeConn(ctx)
 	query := conn.selectPageSQL(name, "", "asc", pageSize, offset)
-	rows, err := conn.DB.QueryContext(ctx, query)
+	rows, err := a.queryConn(ctx, conn, "table.rows", query)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -338,7 +439,7 @@ func (a *App) getRecord(ctx context.Context, table string, id string) ([]Column,
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
 	conn := a.activeConn(ctx)
-	rows, err := conn.DB.QueryContext(ctx,
+	rows, err := a.queryConn(ctx, conn, "record.get",
 		fmt.Sprintf("SELECT * FROM %s WHERE %s = %s", conn.QuoteIdent(table), conn.QuoteIdent("id"), conn.Placeholder(1)), parseID(id))
 	if err != nil {
 		return nil, nil, err
@@ -379,7 +480,12 @@ func (a *App) insertRecord(ctx context.Context, table string, values map[string]
 	// Determine next id via MAX(id)+1.
 	conn := a.activeConn(ctx)
 	var maxID sql.NullInt64
-	_ = conn.DB.QueryRowContext(ctx, "SELECT MAX("+conn.QuoteIdent("id")+") FROM "+conn.QuoteIdent(table)).Scan(&maxID)
+	if rows, err := a.queryConn(ctx, conn, "record.next_id", "SELECT MAX("+conn.QuoteIdent("id")+") FROM "+conn.QuoteIdent(table)); err == nil {
+		if rows.Next() {
+			_ = rows.Scan(&maxID)
+		}
+		rows.Close()
+	}
 	nextID := maxID.Int64 + 1
 
 	colNames := make([]string, 0, len(cols))
@@ -408,7 +514,7 @@ func (a *App) insertRecord(ctx context.Context, table string, values map[string]
 		strings.Join(colNames, ", "),
 		strings.Join(placeholders, ", "),
 	)
-	_, err := conn.DB.ExecContext(ctx, query, args...)
+	_, err := a.execConn(ctx, conn, "record.insert", query, args...)
 	return err
 }
 
@@ -439,7 +545,7 @@ func (a *App) updateRecord(ctx context.Context, table string, id string, values 
 		conn.QuoteIdent("id"),
 		conn.Placeholder(len(args)),
 	)
-	_, err := conn.DB.ExecContext(ctx, query, args...)
+	_, err := a.execConn(ctx, conn, "record.update", query, args...)
 	return err
 }
 
@@ -449,7 +555,7 @@ func (a *App) deleteRecord(ctx context.Context, table string, id string) error {
 	defer cancel()
 	conn := a.activeConn(ctx)
 	query := fmt.Sprintf("DELETE FROM %s WHERE %s = %s", conn.QuoteIdent(table), conn.QuoteIdent("id"), conn.Placeholder(1))
-	_, err := conn.DB.ExecContext(ctx, query, parseID(id))
+	_, err := a.execConn(ctx, conn, "record.delete", query, parseID(id))
 	return err
 }
 
@@ -479,7 +585,8 @@ func (a *App) executeSQL(ctx context.Context, query string) QueryResult { //noli
 		result.Columns = cols
 		result.Rows = rows
 	} else {
-		res, err := a.activeConn(ctx).DB.ExecContext(ctx, query)
+		conn := a.activeConn(ctx)
+		res, err := a.execConn(ctx, conn, "query.exec", query)
 		if err != nil {
 			result.Err = err.Error()
 			result.Elapsed = time.Since(start)
@@ -496,7 +603,8 @@ func (a *App) executeSQL(ctx context.Context, query string) QueryResult { //noli
 func (a *App) queryRows(ctx context.Context, query string) ([]string, [][]string, error) { //nolint:gosec
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
-	rows, err := a.activeConn(ctx).DB.QueryContext(ctx, query)
+	conn := a.activeConn(ctx)
+	rows, err := a.queryConn(ctx, conn, "query.rows", query)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -543,7 +651,7 @@ func (c *DBConnection) tableObjects(ctx context.Context) ([]TableObject, error) 
 	default:
 		query = "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') ORDER BY name"
 	}
-	rows, err := c.DB.QueryContext(ctx, query)
+	rows, err := c.queryContext(ctx, "metadata.table_objects", query)
 	if err != nil {
 		return nil, err
 	}
@@ -593,7 +701,7 @@ func (c *DBConnection) tableMeta(ctx context.Context, name string) (TableMeta, e
 		return TableMeta{}, fmt.Errorf("table %q not found", name)
 	}
 	query := c.selectPageSQL(canonical, "", "asc", 0, 0)
-	rows, err := c.DB.QueryContext(ctx, query)
+	rows, err := c.queryContext(ctx, "metadata.table_meta", query)
 	if err != nil {
 		return TableMeta{}, err
 	}
@@ -614,7 +722,12 @@ func (c *DBConnection) tableMeta(ctx context.Context, name string) (TableMeta, e
 			meta.HasID = true
 		}
 	}
-	_ = c.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+c.QuoteIdent(canonical)).Scan(&meta.RowCount)
+	if rows, err := c.queryContext(ctx, "metadata.row_count", "SELECT COUNT(*) FROM "+c.QuoteIdent(canonical)); err == nil {
+		if rows.Next() {
+			_ = rows.Scan(&meta.RowCount)
+		}
+		rows.Close()
+	}
 	return meta, nil
 }
 

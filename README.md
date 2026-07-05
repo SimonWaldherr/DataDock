@@ -94,11 +94,27 @@ Open your browser at **http://localhost:8080**.
 | `-connect-timeout` | `$DATADOCK_CONNECT_TIMEOUT` or `10s` | Timeout for adding and pinging managed database connections. |
 | `-query-timeout` | `$DATADOCK_QUERY_TIMEOUT` or `60s` | Default timeout for interactive SQL queries, browsing, and exports. |
 | `-llm-timeout` | `$DATADOCK_LLM_TIMEOUT` or `45s` | Timeout for OpenAI-compatible LLM requests. |
+| `-verbose` | `$DATADOCK_VERBOSE` or `false` | Write redacted communication logs for LLM HTTP calls, LLM discovery, database opens/pings, SQL queries, mutations, imports, jobs, and migrations to stdout. |
+| `-watch-dir` | `$DATADOCK_WATCH_DIR` | Optional directory to auto-import/update supported files into local tinySQL tables. |
+| `-watch-interval` | `$DATADOCK_WATCH_INTERVAL` or `3s` | Polling interval for `-watch-dir`. |
 
 Flags and environment variables are bootstrap defaults only. After startup, the
 Admin settings page can change the active dialect, connection timeout, query
 timeout, LLM timeout, LLM base URL, model, and API key for the running server.
 Leaving the LLM base URL or model empty disables LLM support cleanly.
+
+Verbose mode is intended to be safe for production diagnostics: it is opt-in,
+logs to stdout as structured JSON lines, masks credentials and secret-looking
+fields, records SQL parameter counts instead of parameter values, and truncates
+payload previews. It still logs SQL text and request/response metadata, so only
+enable it where operational stdout access is appropriately restricted.
+
+The SQL editor supports multiple result views per tab: table, live logs, cards,
+JSON/XML trees, pivot summaries, column profiles, schema graph, and notebook.
+Query share links include the active SQL, tab title, view mode, live settings,
+and log filter. `-watch-dir` imports CSV/TSV/JSON/NDJSON/XML/YAML/XLSX/GeoJSON/KML
+files on startup and whenever their size or modification time changes; the table
+name is derived from the filename and refreshed on update.
 
 ## Admin Settings
 

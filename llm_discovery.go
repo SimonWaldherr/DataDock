@@ -37,13 +37,21 @@ type llmDiscoveryCandidate struct {
 }
 
 func discoverLLMServers(ctx context.Context, client *http.Client, host, port string) LLMDiscoveryResult {
+	return discoverLLMServersVerbose(ctx, client, host, port, nil)
+}
+
+func discoverLLMServersVerbose(ctx context.Context, client *http.Client, host, port string, verbose *VerboseLogger) LLMDiscoveryResult {
 	host = strings.TrimSpace(host)
 	port = strings.TrimSpace(port)
 	if host == "" {
 		host = "127.0.0.1"
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 1200 * time.Millisecond}
+		if verbose.Enabled() {
+			client = verbose.HTTPClient(1200 * time.Millisecond)
+		} else {
+			client = &http.Client{Timeout: 1200 * time.Millisecond}
+		}
 	}
 	result := LLMDiscoveryResult{Host: host, Port: port}
 	for _, candidate := range llmDiscoveryCandidates(host, port) {

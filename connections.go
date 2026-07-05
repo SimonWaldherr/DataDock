@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	tinysql "github.com/SimonWaldherr/tinySQL"
 
@@ -28,6 +29,7 @@ type DBConnection struct {
 	Dialect DialectProfile
 	DB      *sql.DB
 	Native  *tinysql.DB
+	Verbose *VerboseLogger
 }
 
 type ConnectionInfo struct {
@@ -38,6 +40,50 @@ type ConnectionInfo struct {
 	DSNDisplay string
 	Active     bool
 	Default    bool
+}
+
+func (c *DBConnection) verboseTarget() string {
+	if c == nil {
+		return "database://unknown"
+	}
+	if c.ID == defaultConnectionID || c.IsTinySQL() {
+		return "tinysql://" + c.ID
+	}
+	if display := maskedDSN(c.DSN); display != "" {
+		return c.Kind + "://" + c.ID + " " + display
+	}
+	return c.Kind + "://" + c.ID
+}
+
+func (c *DBConnection) queryContext(ctx context.Context, operation, query string, args ...any) (*sql.Rows, error) {
+	start := time.Now()
+	if c.Verbose.Enabled() {
+		c.Verbose.Log(VerboseEvent{
+			System:    "database",
+			Direction: "outbound",
+			Operation: operation,
+			Target:    c.verboseTarget(),
+			SQL:       query,
+			ArgsCount: len(args),
+		})
+	}
+	rows, err := c.DB.QueryContext(ctx, query, args...)
+	if c.Verbose.Enabled() {
+		event := VerboseEvent{
+			System:    "database",
+			Direction: "inbound",
+			Operation: operation,
+			Target:    c.verboseTarget(),
+			Duration:  time.Since(start),
+			Status:    "ok",
+		}
+		if err != nil {
+			event.Status = "error"
+			event.Error = err.Error()
+		}
+		c.Verbose.Log(event)
+	}
+	return rows, err
 }
 
 type ManagedConnectionConfig struct {
@@ -201,26 +247,82 @@ func (m *ConnectionManager) DefaultID() string {
 	return m.defaultID
 }
 
+func (m *ConnectionManager) SetVerbose(verbose *VerboseLogger) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, conn := range m.conns {
+		if conn != nil {
+			conn.Verbose = verbose
+		}
+	}
+}
+
 func OpenManagedConnection(ctx context.Context, id, name, kind, dsn string) (*DBConnection, error) {
+	return OpenManagedConnectionVerbose(ctx, id, name, kind, dsn, nil)
+}
+
+func OpenManagedConnectionVerbose(ctx context.Context, id, name, kind, dsn string, verbose *VerboseLogger) (*DBConnection, error) {
 	id = sanitizeConnectionID(id)
 	if id == "" {
 		return nil, fmt.Errorf("connection id is required")
 	}
 	kind, driverName, connStr, dialect := parseConnectionDSN(kind, dsn)
+	start := time.Now()
+	if verbose.Enabled() {
+		verbose.Log(VerboseEvent{
+			System:    "database",
+			Direction: "outbound",
+			Operation: "open",
+			Target:    kind + "://" + id + " " + maskedDSN(dsn),
+			Preview:   "driver=" + driverName,
+		})
+	}
 	db, err := sql.Open(driverName, connStr)
 	if err != nil {
+		if verbose.Enabled() {
+			verbose.Log(VerboseEvent{
+				System:    "database",
+				Direction: "inbound",
+				Operation: "open",
+				Target:    kind + "://" + id + " " + maskedDSN(dsn),
+				Duration:  time.Since(start),
+				Status:    "error",
+				Error:     err.Error(),
+			})
+		}
 		return nil, err
 	}
 	db.SetMaxOpenConns(8)
 	db.SetMaxIdleConns(4)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
+		if verbose.Enabled() {
+			verbose.Log(VerboseEvent{
+				System:    "database",
+				Direction: "inbound",
+				Operation: "ping",
+				Target:    kind + "://" + id + " " + maskedDSN(dsn),
+				Duration:  time.Since(start),
+				Status:    "error",
+				Error:     err.Error(),
+			})
+		}
 		return nil, err
+	}
+	if verbose.Enabled() {
+		verbose.Log(VerboseEvent{
+			System:    "database",
+			Direction: "inbound",
+			Operation: "ping",
+			Target:    kind + "://" + id + " " + maskedDSN(dsn),
+			Duration:  time.Since(start),
+			Status:    "ok",
+		})
 	}
 	if strings.TrimSpace(name) == "" {
 		name = id
 	}
-	return &DBConnection{ID: id, Name: name, Kind: kind, DSN: dsn, Dialect: dialect, DB: db}, nil
+	return &DBConnection{ID: id, Name: name, Kind: kind, DSN: dsn, Dialect: dialect, DB: db, Verbose: verbose}, nil
 }
 
 func parseConnectionDSN(kind, dsn string) (normalizedKind, driverName, connStr string, dialect DialectProfile) {
@@ -430,7 +532,7 @@ func (c *DBConnection) sampleColumnValues(ctx context.Context, table, column str
 	if c.Dialect.Name == "Microsoft SQL Server" {
 		query = fmt.Sprintf("SELECT TOP %d %s FROM %s", limit, c.QuoteIdent(column), c.QuoteIdent(table))
 	}
-	rows, err := c.DB.QueryContext(ctx, query)
+	rows, err := c.queryContext(ctx, "metadata.column_values", query)
 	if err != nil {
 		return nil
 	}

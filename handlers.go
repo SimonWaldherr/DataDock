@@ -22,6 +22,7 @@ import (
 	dbjobs "github.com/SimonWaldherr/datadock/internal/jobs"
 	"github.com/SimonWaldherr/datadock/internal/resultutil"
 	"github.com/SimonWaldherr/datadock/internal/standards"
+	"github.com/SimonWaldherr/datadock/internal/typed"
 	tinysql "github.com/SimonWaldherr/tinySQL"
 )
 
@@ -171,6 +172,7 @@ func (a *App) writeProblem(w http.ResponseWriter, r *http.Request, status int, t
 
 func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]string, format, filenameBase string) bool {
 	filenameBase = safeExportFilenameBase(filenameBase)
+	kinds := typed.InferColumns(rows, len(columns))
 	switch strings.ToLower(strings.TrimSpace(format)) {
 	case "", "csv":
 		w.Header().Set("Content-Type", standards.MediaTypeCSV)
@@ -196,14 +198,14 @@ func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]stri
 	case "json":
 		w.Header().Set("Content-Type", standards.MediaTypeJSON)
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.json"`, filenameBase))
-		records := make([]map[string]string, 0, len(rows))
+		records := make([]map[string]any, 0, len(rows))
 		for _, row := range rows {
-			record := make(map[string]string, len(columns))
+			record := make(map[string]any, len(columns))
 			for i, col := range columns {
 				if i < len(row) {
-					record[col] = row[i]
+					record[col] = typed.JSONValue(row[i], kinds[i])
 				} else {
-					record[col] = ""
+					record[col] = nil
 				}
 			}
 			records = append(records, record)
@@ -214,7 +216,7 @@ func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]stri
 		w.Header().Set("Content-Type", standards.MediaTypeXML)
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.xml"`, filenameBase))
 		_, _ = w.Write([]byte(xml.Header))
-		_ = xml.NewEncoder(w).Encode(exportXMLDocument(columns, rows))
+		_ = xml.NewEncoder(w).Encode(exportXMLDocument(columns, rows, kinds))
 		return true
 	case "xlsx":
 		w.Header().Set("Content-Type", standards.MediaTypeXLSX)
@@ -237,15 +239,19 @@ type exportXMLRow struct {
 
 type exportXMLCell struct {
 	Name  string `xml:"name,attr"`
+	Type  string `xml:"type,attr,omitempty"`
 	Value string `xml:",chardata"`
 }
 
-func exportXMLDocument(columns []string, rows [][]string) exportXMLDoc {
+func exportXMLDocument(columns []string, rows [][]string, kinds []typed.Kind) exportXMLDoc {
 	doc := exportXMLDoc{Columns: columns, Rows: make([]exportXMLRow, 0, len(rows))}
 	for _, row := range rows {
 		out := exportXMLRow{Cells: make([]exportXMLCell, 0, len(columns))}
 		for i, col := range columns {
 			cell := exportXMLCell{Name: col}
+			if i < len(kinds) {
+				cell.Type = string(kinds[i])
+			}
 			if i < len(row) {
 				cell.Value = row[i]
 			}
@@ -258,6 +264,7 @@ func exportXMLDocument(columns []string, rows [][]string) exportXMLDoc {
 
 func writeXLSX(w http.ResponseWriter, columns []string, rows [][]string) error {
 	zw := zip.NewWriter(w)
+	kinds := typed.InferColumns(rows, len(columns))
 	files := map[string]string{
 		"[Content_Types].xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
 			`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
@@ -280,8 +287,8 @@ func writeXLSX(w http.ResponseWriter, columns []string, rows [][]string) error {
 			`<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
 			`<sheets><sheet name="Result" sheetId="1" r:id="rId1"/></sheets></workbook>`,
 		"xl/styles.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
-			`<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>`,
-		"xl/worksheets/sheet1.xml": xlsxSheetXML(columns, rows),
+			`<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="3"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/><numFmt numFmtId="165" formatCode="yyyy-mm-dd hh:mm:ss"/><numFmt numFmtId="166" formatCode="hh:mm:ss"/></numFmts><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>`,
+		"xl/worksheets/sheet1.xml": xlsxSheetXML(columns, rows, kinds),
 	}
 	order := []string{
 		"[Content_Types].xml",
@@ -305,13 +312,13 @@ func writeXLSX(w http.ResponseWriter, columns []string, rows [][]string) error {
 	return zw.Close()
 }
 
-func xlsxSheetXML(columns []string, rows [][]string) string {
+func xlsxSheetXML(columns []string, rows [][]string, kinds []typed.Kind) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`)
 	b.WriteString(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>`)
 	writeXLSXRow(&b, 1, columns)
 	for i, row := range rows {
-		writeXLSXRow(&b, i+2, row)
+		writeXLSXTypedRow(&b, i+2, row, kinds, len(columns))
 	}
 	b.WriteString(`</sheetData></worksheet>`)
 	return b.String()
@@ -329,6 +336,94 @@ func writeXLSXRow(b *strings.Builder, rowNum int, values []string) {
 		b.WriteString(`</t></is></c>`)
 	}
 	b.WriteString(`</row>`)
+}
+
+func writeXLSXTypedRow(b *strings.Builder, rowNum int, values []string, kinds []typed.Kind, columnCount int) {
+	b.WriteString(`<row r="`)
+	b.WriteString(strconv.Itoa(rowNum))
+	b.WriteString(`">`)
+	for i := 0; i < columnCount; i++ {
+		value := ""
+		if i < len(values) {
+			value = values[i]
+		}
+		kind := typed.KindText
+		if i < len(kinds) {
+			kind = kinds[i]
+		}
+		writeXLSXTypedCell(b, i+1, rowNum, value, kind)
+	}
+	b.WriteString(`</row>`)
+}
+
+func writeXLSXTypedCell(b *strings.Builder, col, rowNum int, value string, kind typed.Kind) {
+	ref := xlsxCellRef(col, rowNum)
+	classified := typed.Classify(value)
+	if classified.Kind == typed.KindBlank {
+		b.WriteString(`<c r="`)
+		b.WriteString(ref)
+		b.WriteString(`"/>`)
+		return
+	}
+	switch kind {
+	case typed.KindInt:
+		if classified.Kind == typed.KindInt {
+			writeXLSXNumericCell(b, ref, strconv.FormatInt(classified.Int, 10), "")
+			return
+		}
+	case typed.KindFloat:
+		if classified.Kind == typed.KindFloat || classified.Kind == typed.KindInt {
+			writeXLSXNumericCell(b, ref, strconv.FormatFloat(classified.Float, 'g', -1, 64), "")
+			return
+		}
+	case typed.KindBool:
+		if classified.Kind == typed.KindBool {
+			b.WriteString(`<c r="`)
+			b.WriteString(ref)
+			b.WriteString(`" t="b"><v>`)
+			if classified.Bool {
+				b.WriteByte('1')
+			} else {
+				b.WriteByte('0')
+			}
+			b.WriteString(`</v></c>`)
+			return
+		}
+	case typed.KindDate, typed.KindDateTime, typed.KindTime:
+		if classified.Kind == kind {
+			if serial, ok := typed.ExcelSerial(classified, kind); ok {
+				style := "1"
+				if kind == typed.KindDateTime {
+					style = "2"
+				} else if kind == typed.KindTime {
+					style = "3"
+				}
+				writeXLSXNumericCell(b, ref, strconv.FormatFloat(serial, 'f', -1, 64), style)
+				return
+			}
+		}
+	}
+	writeXLSXTextCell(b, ref, value)
+}
+
+func writeXLSXNumericCell(b *strings.Builder, ref, value, style string) {
+	b.WriteString(`<c r="`)
+	b.WriteString(ref)
+	if style != "" {
+		b.WriteString(`" s="`)
+		b.WriteString(style)
+	}
+	b.WriteString(`"><v>`)
+	b.WriteString(value)
+	b.WriteString(`</v></c>`)
+}
+
+func writeXLSXTextCell(b *strings.Builder, ref, value string) {
+	b.WriteString(`<c r="`)
+	b.WriteString(ref)
+	b.WriteString(`" t="inlineStr"><is><t>`)
+	b.WriteString(xmlText(value))
+	b.WriteString(`</t></is></c>`)
 }
 
 func xlsxCellRef(col, row int) string {
@@ -545,7 +640,7 @@ func (a *App) addConnectionHandler(w http.ResponseWriter, r *http.Request) {
 	setDefault := r.Form.Get("set_default") != ""
 	ctx, cancel := a.withConnectTimeout(r.Context())
 	defer cancel()
-	conn, err := OpenManagedConnection(ctx, id, name, kind, dsn)
+	conn, err := OpenManagedConnectionVerbose(ctx, id, name, kind, dsn, a.verboseLogger())
 	if err != nil {
 		a.render(w, r, "connections", map[string]interface{}{"Error": connectionErrorMessage(err, a.currentConnectTimeout())})
 		return
@@ -687,7 +782,7 @@ func (a *App) tableRowsSorted(r *http.Request, page int, sortCol, dir string, me
 
 	ctx, cancel := a.withQueryTimeout(r.Context())
 	defer cancel()
-	rows, err := conn.DB.QueryContext(ctx, query)
+	rows, err := a.queryConn(ctx, conn, "table.sorted_rows", query)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -956,7 +1051,7 @@ func (a *App) createTableHandler(w http.ResponseWriter, r *http.Request) {
 	ddl := fmt.Sprintf("CREATE TABLE %s (%s)", conn.QuoteIdent(safeTableName), strings.Join(defs, ", "))
 	ctx, cancel := a.withQueryTimeout(r.Context())
 	defer cancel()
-	if _, err := conn.DB.ExecContext(ctx, ddl); err != nil {
+	if _, err := a.execConn(ctx, conn, "table.create", ddl); err != nil {
 		a.render(w, r, "create_table", map[string]interface{}{
 			"Error":     "Could not create table: " + err.Error(),
 			"TableName": safeTableName,
@@ -1441,7 +1536,7 @@ func (a *App) dropTableHandler(w http.ResponseWriter, r *http.Request) {
 	conn := a.activeConn(r.Context())
 	ctx, cancel := a.withQueryTimeout(r.Context())
 	defer cancel()
-	if _, err := conn.DB.ExecContext(ctx, "DROP TABLE "+conn.QuoteIdent(meta.Name)); err != nil {
+	if _, err := a.execConn(ctx, conn, "table.drop", "DROP TABLE "+conn.QuoteIdent(meta.Name)); err != nil {
 		a.serverError(w, err)
 		return
 	}
@@ -1593,7 +1688,7 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 func (a *App) apiLLMDiscoverHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3500*time.Millisecond)
 	defer cancel()
-	result := discoverLLMServers(ctx, nil, r.URL.Query().Get("host"), r.URL.Query().Get("port"))
+	result := discoverLLMServersVerbose(ctx, nil, r.URL.Query().Get("host"), r.URL.Query().Get("port"), a.verboseLogger())
 	a.writeJSON(w, http.StatusOK, result)
 }
 
@@ -1614,7 +1709,7 @@ func (a *App) apiLLMAutoConfigHandler(w http.ResponseWriter, r *http.Request) {
 	if baseURL == "" || model == "" {
 		ctx, cancel := context.WithTimeout(r.Context(), 3500*time.Millisecond)
 		defer cancel()
-		result := discoverLLMServers(ctx, nil, body.Host, body.Port)
+		result := discoverLLMServersVerbose(ctx, nil, body.Host, body.Port, a.verboseLogger())
 		if result.Recommended == nil || len(result.Recommended.Models) == 0 {
 			a.writeProblem(w, r, http.StatusNotFound, "No LLM server found", "No Ollama, LM Studio, llmster, or OpenAI-compatible local server responded with models.")
 			return
@@ -1948,22 +2043,64 @@ func (a *App) apiImportHandler(w http.ResponseWriter, r *http.Request) {
 func (a *App) executeTinySQL(ctx context.Context, sqlText string) QueryResult {
 	start := time.Now()
 	result := QueryResult{}
+	if a.verboseLogger().Enabled() {
+		a.verboseLogger().Log(VerboseEvent{
+			System:    "database",
+			Direction: "outbound",
+			Operation: "tinysql.execute",
+			Target:    "tinysql://" + a.tenant,
+			SQL:       sqlText,
+		})
+	}
 	stmt, err := tinysql.ParseSQL(sqlText)
 	if err != nil {
 		result.Err = err.Error()
 		result.Elapsed = time.Since(start)
+		if a.verboseLogger().Enabled() {
+			a.verboseLogger().Log(VerboseEvent{
+				System:    "database",
+				Direction: "inbound",
+				Operation: "tinysql.execute",
+				Target:    "tinysql://" + a.tenant,
+				Duration:  result.Elapsed,
+				Status:    "error",
+				Error:     err.Error(),
+			})
+		}
 		return result
 	}
 	rs, err := tinysql.Execute(ctx, a.nativeDB, a.tenant, stmt)
 	if err != nil {
 		result.Err = err.Error()
 		result.Elapsed = time.Since(start)
+		if a.verboseLogger().Enabled() {
+			a.verboseLogger().Log(VerboseEvent{
+				System:    "database",
+				Direction: "inbound",
+				Operation: "tinysql.execute",
+				Target:    "tinysql://" + a.tenant,
+				Duration:  result.Elapsed,
+				Status:    "error",
+				Error:     err.Error(),
+			})
+		}
 		return result
 	}
 	if rs != nil {
 		result.Columns, result.Rows = resultutil.ResultSetToStringMatrix(rs)
 	}
 	result.Elapsed = time.Since(start)
+	if a.verboseLogger().Enabled() {
+		a.verboseLogger().Log(VerboseEvent{
+			System:    "database",
+			Direction: "inbound",
+			Operation: "tinysql.execute",
+			Target:    "tinysql://" + a.tenant,
+			Duration:  result.Elapsed,
+			Status:    "ok",
+			Preview:   fmt.Sprintf("columns=%d rows=%d", len(result.Columns), len(result.Rows)),
+		})
+	}
 	return result
 }
 
@@ -2018,7 +2155,7 @@ func importFormatFromName(filename, selected string) string {
 	name := strings.ToLower(strings.TrimSpace(filename))
 	if i := strings.LastIndex(name, "."); i >= 0 {
 		switch name[i+1:] {
-		case "csv", "tsv", "json", "ndjson", "xlsx", "xml", "yaml", "yml":
+		case "csv", "tsv", "json", "ndjson", "xlsx", "xml", "yaml", "yml", "geojson", "kml":
 			return name[i+1:]
 		}
 	}

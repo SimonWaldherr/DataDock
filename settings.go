@@ -109,6 +109,7 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 		APIKey:  strings.TrimSpace(s.LLMAPIKey),
 		Model:   strings.TrimSpace(s.LLMModel),
 		Timeout: s.LLMTimeout,
+		Verbose: a.verboseLogger(),
 	}
 
 	var llm LLMClient
@@ -160,10 +161,11 @@ func (a *App) saveSetting(ctx context.Context, key, value string) error {
 	if err := a.ensureRuntimeSettingsTable(ctx); err != nil {
 		return err
 	}
-	if _, err := a.sqlDB.ExecContext(ctx, "DELETE FROM "+runtimeSettingsTable+" WHERE setting_key = ?", key); err != nil {
+	conn := a.localTinySQLConn()
+	if _, err := a.execConn(ctx, conn, "settings.delete", "DELETE FROM "+runtimeSettingsTable+" WHERE setting_key = ?", key); err != nil {
 		return err
 	}
-	_, err := a.sqlDB.ExecContext(ctx,
+	_, err := a.execConn(ctx, conn, "settings.insert",
 		"INSERT INTO "+runtimeSettingsTable+" (setting_key, setting_value) VALUES (?, ?)",
 		key, value,
 	)
@@ -174,7 +176,7 @@ func (a *App) loadRuntimeSettings(ctx context.Context) (RuntimeSettings, bool, e
 	if err := a.ensureRuntimeSettingsTable(ctx); err != nil {
 		return RuntimeSettings{}, false, err
 	}
-	rows, err := a.sqlDB.QueryContext(ctx, "SELECT setting_key, setting_value FROM "+runtimeSettingsTable)
+	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "settings.load", "SELECT setting_key, setting_value FROM "+runtimeSettingsTable)
 	if err != nil {
 		return RuntimeSettings{}, false, fmt.Errorf("load runtime settings: %w", err)
 	}
@@ -242,7 +244,7 @@ func (a *App) openManagedConnectionConfigs(ctx context.Context, configs []Manage
 		if skipExisting && a.conns.Get(cfg.ID) != nil {
 			continue
 		}
-		conn, err := OpenManagedConnection(ctx, cfg.ID, cfg.Name, cfg.Kind, cfg.DSN)
+		conn, err := OpenManagedConnectionVerbose(ctx, cfg.ID, cfg.Name, cfg.Kind, cfg.DSN, a.verboseLogger())
 		if err != nil {
 			return fmt.Errorf("%s: %w", cfg.ID, err)
 		}
@@ -264,7 +266,18 @@ func (a *App) loadSetting(ctx context.Context, key string) (string, bool, error)
 		return "", false, err
 	}
 	var value string
-	err := a.sqlDB.QueryRowContext(ctx, "SELECT setting_value FROM "+runtimeSettingsTable+" WHERE setting_key = ?", key).Scan(&value)
+	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "settings.load_one", "SELECT setting_value FROM "+runtimeSettingsTable+" WHERE setting_key = ?", key)
+	if err == nil {
+		defer rows.Close()
+		if rows.Next() {
+			err = rows.Scan(&value)
+		} else {
+			err = sql.ErrNoRows
+		}
+		if err == nil {
+			err = rows.Err()
+		}
+	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) || strings.Contains(strings.ToLower(err.Error()), "no rows") {
 			return "", false, nil
@@ -275,7 +288,7 @@ func (a *App) loadSetting(ctx context.Context, key string) (string, bool, error)
 }
 
 func (a *App) ensureRuntimeSettingsTable(ctx context.Context) error {
-	_, err := a.sqlDB.ExecContext(ctx, "CREATE TABLE "+runtimeSettingsTable+" (setting_key TEXT, setting_value TEXT)")
+	_, err := a.execConn(ctx, a.localTinySQLConn(), "settings.ensure_table", "CREATE TABLE "+runtimeSettingsTable+" (setting_key TEXT, setting_value TEXT)")
 	if err == nil {
 		return nil
 	}

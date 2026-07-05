@@ -805,7 +805,7 @@ func TestTableExportCSVAndJSON(t *testing.T) {
 	if got := xmlRec.Header().Get("Content-Type"); !strings.Contains(got, "application/xml") {
 		t.Errorf("expected XML content type, got %q", got)
 	}
-	if body := xmlRec.Body.String(); !strings.Contains(body, `<cell name="name">Alice</cell>`) {
+	if body := xmlRec.Body.String(); !strings.Contains(body, `<cell name="name" type="text">Alice</cell>`) {
 		t.Errorf("unexpected XML body: %s", body)
 	}
 
@@ -845,7 +845,7 @@ func TestAPIExportHandler(t *testing.T) {
 	if got := w.Header().Get("Content-Disposition"); !strings.Contains(got, "query.json") {
 		t.Errorf("expected query.json content disposition, got %q", got)
 	}
-	if !strings.Contains(w.Body.String(), `"v":"42"`) {
+	if !strings.Contains(w.Body.String(), `"v":42`) {
 		t.Errorf("expected exported value, got: %s", w.Body.String())
 	}
 
@@ -861,7 +861,7 @@ func TestAPIExportHandler(t *testing.T) {
 	if got := xmlRec.Header().Get("Content-Disposition"); !strings.Contains(got, "query.xml") {
 		t.Errorf("expected query.xml content disposition, got %q", got)
 	}
-	if !strings.Contains(xmlRec.Body.String(), `<cell name="v">42</cell>`) {
+	if !strings.Contains(xmlRec.Body.String(), `<cell name="v" type="int">42</cell>`) {
 		t.Errorf("expected exported XML value, got: %s", xmlRec.Body.String())
 	}
 

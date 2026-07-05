@@ -42,6 +42,7 @@ type LLMConfig struct {
 	APIKey  string
 	Model   string
 	Timeout time.Duration
+	Verbose *VerboseLogger
 }
 
 type LLMRequest struct {
@@ -69,9 +70,13 @@ func NewOpenAICompatibleClient(cfg LLMConfig) *OpenAICompatibleClient {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 45 * time.Second
 	}
+	httpClient := &http.Client{Timeout: cfg.Timeout}
+	if cfg.Verbose.Enabled() {
+		httpClient = cfg.Verbose.HTTPClient(cfg.Timeout)
+	}
 	return &OpenAICompatibleClient{
 		cfg:        cfg,
-		httpClient: &http.Client{Timeout: cfg.Timeout},
+		httpClient: httpClient,
 	}
 }
 
@@ -116,6 +121,17 @@ func (c *OpenAICompatibleClient) Complete(ctx context.Context, req LLMRequest) (
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("LLM request failed: %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+	}
+	if c.cfg.Verbose.Enabled() {
+		c.cfg.Verbose.Log(VerboseEvent{
+			System:        "llm",
+			Direction:     "inbound",
+			Operation:     req.Action,
+			Target:        chatCompletionsURL(c.cfg.BaseURL),
+			Status:        resp.Status,
+			ResponseBytes: int64(len(respBody)),
+			Preview:       string(respBody),
+		})
 	}
 
 	var out chatCompletionResponse
@@ -524,8 +540,8 @@ func (a *App) sampleColumnValues(ctx context.Context, table, column string, limi
 	if limit <= 0 {
 		return nil
 	}
-	rows, err := a.sqlDB.QueryContext(ctx,
-		fmt.Sprintf("SELECT %s FROM %s LIMIT %d", quoteName(column), quoteName(table), limit))
+	query := fmt.Sprintf("SELECT %s FROM %s LIMIT %d", quoteName(column), quoteName(table), limit)
+	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "llm.sample_values", query)
 	if err != nil {
 		return nil
 	}

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/SimonWaldherr/datadock/internal/typed"
 	tinysql "github.com/SimonWaldherr/tinySQL"
 )
 
@@ -145,6 +146,17 @@ func importRecords(ctx context.Context, db *tinysql.DB, tenant, tableName string
 		}
 	}
 	res.ColumnNames = columns
+	columnKinds := make([]typed.Kind, len(columns))
+	for i := range columnKinds {
+		columnKinds[i] = typed.KindText
+	}
+	if opts.TypeInference {
+		columnKinds = typed.InferColumns(records, len(columns))
+	}
+	res.ColumnTypes = make([]tinysql.ColType, len(columns))
+	for i, kind := range columnKinds {
+		res.ColumnTypes[i] = tinysqlType(kind)
+	}
 	if opts.Truncate {
 		if _, err := exec(ctx, db, tenant, "DELETE FROM "+quoteIdent(tableName)); err != nil {
 			return nil, err
@@ -153,8 +165,7 @@ func importRecords(ctx context.Context, db *tinysql.DB, tenant, tableName string
 	if opts.CreateTable {
 		defs := make([]string, len(columns))
 		for i, col := range columns {
-			defs[i] = quoteIdent(col) + " TEXT"
-			res.ColumnTypes = append(res.ColumnTypes, tinysql.TextType)
+			defs[i] = quoteIdent(col) + " " + sqlType(columnKinds[i])
 		}
 		if _, err := exec(ctx, db, tenant, "CREATE TABLE "+quoteIdent(tableName)+" ("+strings.Join(defs, ", ")+")"); err != nil && !strings.Contains(strings.ToLower(err.Error()), "already exists") {
 			return nil, err
@@ -164,7 +175,7 @@ func importRecords(ctx context.Context, db *tinysql.DB, tenant, tableName string
 		values := make([]string, len(columns))
 		for i := range columns {
 			if i < len(record) {
-				values[i] = sqlLiteral(record[i])
+				values[i] = typedSQLLiteral(record[i], columnKinds[i])
 			} else {
 				values[i] = "NULL"
 			}
@@ -273,4 +284,71 @@ func joinQuoted(columns []string) string {
 
 func sqlLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+func sqlType(kind typed.Kind) string {
+	switch kind {
+	case typed.KindInt:
+		return "INT"
+	case typed.KindFloat:
+		return "FLOAT"
+	case typed.KindBool:
+		return "BOOL"
+	case typed.KindDate:
+		return "DATE"
+	case typed.KindTime:
+		return "TIME"
+	case typed.KindDateTime:
+		return "DATETIME"
+	default:
+		return "TEXT"
+	}
+}
+
+func tinysqlType(kind typed.Kind) tinysql.ColType {
+	switch kind {
+	case typed.KindInt:
+		return tinysql.IntType
+	case typed.KindFloat:
+		return tinysql.FloatType
+	case typed.KindBool:
+		return tinysql.BoolType
+	case typed.KindDate:
+		return tinysql.DateType
+	case typed.KindTime:
+		return tinysql.TimeType
+	case typed.KindDateTime:
+		return tinysql.DateTimeType
+	default:
+		return tinysql.TextType
+	}
+}
+
+func typedSQLLiteral(raw string, kind typed.Kind) string {
+	value := typed.Classify(raw)
+	if value.Kind == typed.KindBlank {
+		return "NULL"
+	}
+	switch kind {
+	case typed.KindInt:
+		if value.Kind == typed.KindInt {
+			return strconv.FormatInt(value.Int, 10)
+		}
+	case typed.KindFloat:
+		if value.Kind == typed.KindFloat || value.Kind == typed.KindInt {
+			return strconv.FormatFloat(value.Float, 'g', -1, 64)
+		}
+	case typed.KindBool:
+		if value.Kind == typed.KindBool {
+			if value.Bool {
+				return "TRUE"
+			}
+			return "FALSE"
+		}
+	case typed.KindDate, typed.KindTime, typed.KindDateTime:
+		if value.Kind == kind {
+			return sqlLiteral(strings.TrimSpace(raw))
+		}
+	}
+	return sqlLiteral(raw)
 }

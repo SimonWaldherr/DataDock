@@ -43,6 +43,12 @@
 
 <div class="card">
   <div class="card-body pb-2">
+    <div class="query-tabbar d-flex align-items-center gap-1 mb-2">
+      <div id="queryTabs" class="nav nav-tabs flex-nowrap overflow-auto"></div>
+      <button type="button" class="btn btn-outline-secondary btn-sm ms-auto flex-shrink-0" onclick="newQueryTab()" title="New tab">
+        <i class="bi bi-plus-lg"></i>
+      </button>
+    </div>
     <textarea id="sqlInput" class="sql-editor" rows="6"
               placeholder="SELECT * FROM your_table LIMIT 100"
               spellcheck="false">{{.SQL}}</textarea>
@@ -66,6 +72,30 @@
       <button class="btn btn-outline-secondary btn-sm" onclick="toggleSchemaPreview()">
         <i class="bi bi-diagram-3 me-1"></i>Schema
       </button>
+      <button id="liveToggleBtn" class="btn btn-outline-secondary btn-sm" onclick="toggleLiveQuery()">
+        <i class="bi bi-broadcast me-1"></i>Live
+      </button>
+      <select id="liveIntervalSelect" class="form-select form-select-sm query-live-select" onchange="setLiveInterval(this.value)" title="Live refresh interval">
+        <option value="1000">1s</option>
+        <option value="2000">2s</option>
+        <option value="5000" selected>5s</option>
+        <option value="15000">15s</option>
+        <option value="30000">30s</option>
+        <option value="60000">1m</option>
+      </select>
+      <select id="viewModeSelect" class="form-select form-select-sm query-view-select" onchange="setQueryViewMode(this.value)" title="Result view mode">
+        <option value="table">Table</option>
+        <option value="log">Logs</option>
+        <option value="cards">Cards</option>
+        <option value="json">JSON</option>
+        <option value="xml">XML</option>
+        <option value="pivot">Pivot</option>
+        <option value="profile">Profile</option>
+        <option value="schema">Schema</option>
+        <option value="notebook">Notebook</option>
+      </select>
+      <input id="logFilterInput" class="form-control form-control-sm query-log-filter d-none"
+             placeholder="Filter logs" oninput="setLogFilter(this.value)" spellcheck="false">
       <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('csv')">
         <i class="bi bi-filetype-csv me-1"></i>CSV
       </button>
@@ -150,9 +180,18 @@
 var lastResultData = null;
 var lastErrorMessage = '';
 var queryHistoryKey = 'datadock.queryHistory.v1';
+var queryTabsKey = 'datadock.queryTabs.v1';
+var queryTabsActiveKey = 'datadock.queryTabs.active.v1';
 var maxLocalQueryHistory = 20;
 var sqlEditor = null;
 var monacoBaseURL = 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.40.0/min';
+var queryTabs = [];
+var activeQueryTabID = '';
+var suppressTabSave = false;
+var queryTabRuntime = {};
+var queryRequestSeq = 0;
+var queryLiveTimers = {};
+var defaultLiveIntervalMs = 5000;
 
 // Ready-to-run examples against the built-in demo dataset, so the editor and
 // the LLM assistant can be tried out immediately without inventing a query or
@@ -200,6 +239,7 @@ document.addEventListener('DOMContentLoaded', function () {
   // noscript is not rendered in DOM so nothing to hide.
 
   var ta = document.getElementById('sqlInput');
+  initQueryTabs(ta.value || '');
   restoreQueryFromHash();
   ta.addEventListener('keydown', function (e) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -211,10 +251,380 @@ document.addEventListener('DOMContentLoaded', function () {
       runQuery();
     }
   });
+  ta.addEventListener('input', saveActiveQueryTabFromEditor);
   loadMonacoEditor();
   renderLocalQueryHistory();
   renderSampleMenus();
 });
+
+function initQueryTabs(initialSQL) {
+  queryTabs = loadQueryTabs();
+  if (queryTabs.length === 0) {
+    queryTabs = [{
+      id: newQueryTabID(),
+      title: 'Query 1',
+      sql: initialSQL || '',
+      manualTitle: false,
+      liveEnabled: false,
+      liveIntervalMs: defaultLiveIntervalMs,
+      viewMode: 'table',
+      logFilter: '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }];
+  } else if (initialSQL && queryTabs.length === 1 && !queryTabs[0].sql) {
+    queryTabs[0].sql = initialSQL;
+  }
+  activeQueryTabID = loadActiveQueryTabID();
+  if (!getQueryTab(activeQueryTabID)) {
+    activeQueryTabID = queryTabs[0].id;
+  }
+  persistQueryTabs();
+  var active = getActiveQueryTab();
+  suppressTabSave = true;
+  setEditorValue(active ? active.sql : '');
+  suppressTabSave = false;
+  renderQueryTabs();
+  syncActiveTabControls();
+  scheduleAllLiveTabs();
+}
+
+function loadQueryTabs() {
+  try {
+    var raw = localStorage.getItem(queryTabsKey);
+    var parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(function(tab) {
+      return tab && typeof tab.id === 'string';
+    }).map(function(tab, idx) {
+      return {
+        id: tab.id,
+        title: String(tab.title || ('Query ' + (idx + 1))),
+        sql: String(tab.sql || ''),
+        manualTitle: !!tab.manualTitle,
+        liveEnabled: !!tab.liveEnabled,
+        liveIntervalMs: normalizeLiveInterval(tab.liveIntervalMs),
+        viewMode: normalizeViewMode(tab.viewMode),
+        logFilter: String(tab.logFilter || ''),
+        createdAt: tab.createdAt || new Date().toISOString(),
+        updatedAt: tab.updatedAt || new Date().toISOString()
+      };
+    }).slice(0, 24);
+  } catch (e) {
+    return [];
+  }
+}
+
+function normalizeViewMode(value) {
+  var allowed = ['table', 'log', 'cards', 'json', 'xml', 'pivot', 'profile', 'schema', 'notebook'];
+  value = String(value || 'table');
+  return allowed.indexOf(value) >= 0 ? value : 'table';
+}
+
+function normalizeLiveInterval(value) {
+  value = Number(value || defaultLiveIntervalMs);
+  var allowed = [1000, 2000, 5000, 15000, 30000, 60000];
+  return allowed.indexOf(value) >= 0 ? value : defaultLiveIntervalMs;
+}
+
+function loadActiveQueryTabID() {
+  try {
+    return localStorage.getItem(queryTabsActiveKey) || '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function persistQueryTabs() {
+  try {
+    localStorage.setItem(queryTabsKey, JSON.stringify(queryTabs));
+    localStorage.setItem(queryTabsActiveKey, activeQueryTabID || '');
+  } catch (e) {}
+}
+
+function newQueryTabID() {
+  return 'tab-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+}
+
+function getQueryTab(id) {
+  for (var i = 0; i < queryTabs.length; i++) {
+    if (queryTabs[i].id === id) return queryTabs[i];
+  }
+  return null;
+}
+
+function getActiveQueryTab() {
+  return getQueryTab(activeQueryTabID);
+}
+
+function syncActiveTabControls() {
+  var tab = getActiveQueryTab();
+  if (!tab) return;
+  var liveBtn = document.getElementById('liveToggleBtn');
+  var intervalSelect = document.getElementById('liveIntervalSelect');
+  var viewSelect = document.getElementById('viewModeSelect');
+  var filterInput = document.getElementById('logFilterInput');
+  if (liveBtn) {
+    liveBtn.classList.toggle('btn-success', !!tab.liveEnabled);
+    liveBtn.classList.toggle('btn-outline-secondary', !tab.liveEnabled);
+    liveBtn.innerHTML = tab.liveEnabled ?
+      '<i class="bi bi-broadcast-pin me-1"></i>Live' :
+      '<i class="bi bi-broadcast me-1"></i>Live';
+  }
+  if (intervalSelect) {
+    intervalSelect.value = String(normalizeLiveInterval(tab.liveIntervalMs));
+  }
+  if (viewSelect) {
+    viewSelect.value = normalizeViewMode(tab.viewMode);
+  }
+  if (filterInput) {
+    filterInput.classList.toggle('d-none', tab.viewMode !== 'log');
+    filterInput.value = tab.logFilter || '';
+  }
+}
+
+function toggleLiveQuery() {
+  saveActiveQueryTabFromEditor();
+  var tab = getActiveQueryTab();
+  if (!tab) return;
+  tab.liveEnabled = !tab.liveEnabled;
+  tab.liveIntervalMs = normalizeLiveInterval(tab.liveIntervalMs);
+  tab.updatedAt = new Date().toISOString();
+  persistQueryTabs();
+  syncActiveTabControls();
+  renderQueryTabs();
+  if (tab.liveEnabled) {
+    runLiveQueryTab(tab.id);
+  } else {
+    stopLiveTab(tab.id);
+    setQueryTabStatus(tab.id, '');
+  }
+}
+
+function setLiveInterval(value) {
+  var tab = getActiveQueryTab();
+  if (!tab) return;
+  tab.liveIntervalMs = normalizeLiveInterval(value);
+  tab.updatedAt = new Date().toISOString();
+  persistQueryTabs();
+  if (tab.liveEnabled) {
+    scheduleLiveTab(tab.id);
+  }
+}
+
+function setQueryViewMode(value) {
+  var tab = getActiveQueryTab();
+  if (!tab) return;
+  tab.viewMode = normalizeViewMode(value);
+  tab.updatedAt = new Date().toISOString();
+  persistQueryTabs();
+  syncActiveTabControls();
+  renderActiveTabOutput();
+}
+
+function setLogFilter(value) {
+  var tab = getActiveQueryTab();
+  if (!tab) return;
+  tab.logFilter = value || '';
+  tab.updatedAt = new Date().toISOString();
+  persistQueryTabs();
+  renderActiveTabOutput();
+}
+
+function scheduleAllLiveTabs() {
+  queryTabs.forEach(function(tab) {
+    if (tab.liveEnabled) {
+      scheduleLiveTab(tab.id);
+    }
+  });
+}
+
+function scheduleLiveTab(tabID) {
+  stopLiveTab(tabID);
+  var tab = getQueryTab(tabID);
+  if (!tab || !tab.liveEnabled) return;
+  queryLiveTimers[tabID] = window.setTimeout(function() {
+    runLiveQueryTab(tabID);
+  }, normalizeLiveInterval(tab.liveIntervalMs));
+}
+
+function stopLiveTab(tabID) {
+  if (queryLiveTimers[tabID]) {
+    window.clearTimeout(queryLiveTimers[tabID]);
+    delete queryLiveTimers[tabID];
+  }
+}
+
+function runLiveQueryTab(tabID) {
+  var tab = getQueryTab(tabID);
+  if (!tab || !tab.liveEnabled) return;
+  var runtime = getQueryTabRuntime(tabID);
+  if (runtime.running) {
+    scheduleLiveTab(tabID);
+    return;
+  }
+  var sql = (tab.sql || '').trim();
+  if (!sql) {
+    setQueryTabStatus(tabID, 'Live waiting for SQL');
+    scheduleLiveTab(tabID);
+    return;
+  }
+  executeQueryForTab(tabID, sql, {live: true});
+}
+
+function getQueryTabRuntime(id) {
+  if (!queryTabRuntime[id]) {
+    queryTabRuntime[id] = {
+      running: false,
+      requestID: 0,
+      statusText: '',
+      resultData: null,
+      errorMessage: ''
+    };
+  }
+  return queryTabRuntime[id];
+}
+
+function renderQueryTabs() {
+  var target = document.getElementById('queryTabs');
+  if (!target) return;
+  target.innerHTML = '';
+  queryTabs.forEach(function(tab) {
+    var runtime = getQueryTabRuntime(tab.id);
+    var wrap = document.createElement('div');
+    wrap.className = 'nav-item d-flex align-items-center query-tab-item' +
+      (tab.id === activeQueryTabID ? ' active' : '') +
+      (runtime.running ? ' running' : '') +
+      (runtime.errorMessage ? ' has-error' : '');
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'nav-link query-tab-button' + (tab.id === activeQueryTabID ? ' active' : '');
+    btn.title = runtime.statusText ? tab.title + ' - ' + runtime.statusText : tab.title;
+    btn.textContent = (runtime.running ? '● ' : '') + tab.title;
+    btn.onclick = function() { switchQueryTab(tab.id); };
+    btn.ondblclick = function(e) {
+      e.preventDefault();
+      renameQueryTab(tab.id);
+    };
+    wrap.appendChild(btn);
+
+    if (queryTabs.length > 1) {
+      var close = document.createElement('button');
+      close.type = 'button';
+      close.className = 'btn btn-link btn-sm query-tab-close';
+      close.title = 'Close tab';
+      close.innerHTML = '<i class="bi bi-x"></i>';
+      close.onclick = function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        closeQueryTab(tab.id);
+      };
+      wrap.appendChild(close);
+    }
+    target.appendChild(wrap);
+  });
+}
+
+function newQueryTab(sql, title) {
+  saveActiveQueryTabFromEditor();
+  var count = queryTabs.length + 1;
+  var now = new Date().toISOString();
+  var tab = {
+    id: newQueryTabID(),
+    title: title || ('Query ' + count),
+    sql: sql || '',
+    manualTitle: !!title,
+    createdAt: now,
+    updatedAt: now
+  };
+  queryTabs.push(tab);
+  activeQueryTabID = tab.id;
+  setEditorValue(tab.sql);
+  persistQueryTabs();
+  renderQueryTabs();
+  syncActiveTabControls();
+  clearQueryOutput();
+  focusEditor();
+}
+
+function switchQueryTab(id) {
+  if (id === activeQueryTabID) return;
+  saveActiveQueryTabFromEditor();
+  var tab = getQueryTab(id);
+  if (!tab) return;
+  activeQueryTabID = id;
+  suppressTabSave = true;
+  setEditorValue(tab.sql || '');
+  suppressTabSave = false;
+  persistQueryTabs();
+  renderQueryTabs();
+  syncActiveTabControls();
+  renderActiveTabOutput();
+  focusEditor();
+}
+
+function closeQueryTab(id) {
+  if (queryTabs.length <= 1) return;
+  saveActiveQueryTabFromEditor();
+  var idx = queryTabs.findIndex(function(tab) { return tab.id === id; });
+  if (idx < 0) return;
+  stopLiveTab(id);
+  delete queryTabRuntime[id];
+  queryTabs.splice(idx, 1);
+  if (activeQueryTabID === id) {
+    activeQueryTabID = queryTabs[Math.max(0, idx - 1)].id;
+    var active = getActiveQueryTab();
+    suppressTabSave = true;
+    setEditorValue(active ? active.sql : '');
+    suppressTabSave = false;
+  }
+  persistQueryTabs();
+  renderQueryTabs();
+  syncActiveTabControls();
+  renderActiveTabOutput();
+  focusEditor();
+}
+
+function renameQueryTab(id) {
+  var tab = getQueryTab(id);
+  if (!tab) return;
+  var title = window.prompt('Tab name', tab.title);
+  if (title === null) return;
+  title = title.trim();
+  if (!title) return;
+  tab.title = title.slice(0, 40);
+  tab.manualTitle = true;
+  tab.updatedAt = new Date().toISOString();
+  persistQueryTabs();
+  renderQueryTabs();
+}
+
+function saveActiveQueryTabFromEditor() {
+  if (suppressTabSave) return;
+  var tab = getActiveQueryTab();
+  if (!tab) return;
+  tab.sql = getEditorValue();
+  tab.updatedAt = new Date().toISOString();
+  var titleChanged = false;
+  if (!tab.manualTitle) {
+    var nextTitle = titleForSQL(tab.sql, queryTabs.indexOf(tab) + 1);
+    titleChanged = nextTitle !== tab.title;
+    tab.title = nextTitle;
+  }
+  persistQueryTabs();
+  if (titleChanged) {
+    renderQueryTabs();
+  }
+}
+
+function titleForSQL(sql, idx) {
+  var compact = (sql || '').replace(/\s+/g, ' ').trim();
+  if (!compact) return 'Query ' + idx;
+  compact = compact.replace(/;$/, '');
+  if (compact.length > 32) compact = compact.slice(0, 32) + '...';
+  return compact;
+}
 
 function renderSampleMenus() {
   var queryMenu = document.getElementById('sampleQueryMenu');
@@ -262,12 +672,17 @@ function runSampleQuery(idx) {
   if (!item) return;
   setEditorValue(item.sql);
   focusEditor();
-  runQueryWithDemoDataFallback(item.sql);
+  runQueryWithDemoDataFallback(activeQueryTabID, item.sql);
 }
 
-function runQueryWithDemoDataFallback(sql) {
-  var status = document.getElementById('statusMsg');
-  status.textContent = 'Running…';
+function runQueryWithDemoDataFallback(tabID, sql) {
+  executeQueryForTab(tabID, sql, {demoFallback: true});
+}
+
+function executeQueryForTab(tabID, sql, options) {
+  options = options || {};
+  var runtime = beginQueryRun(tabID, options.live ? 'Live refresh…' : 'Running…');
+  var requestID = runtime.requestID;
   fetch('/api/query', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -275,8 +690,9 @@ function runQueryWithDemoDataFallback(sql) {
   })
     .then(function (r) { return r.json(); })
     .then(function (data) {
-      if (data.error && isMissingObjectError(data.error)) {
-        status.textContent = 'Loading demo data…';
+      if (!isCurrentQueryRequest(tabID, requestID)) return null;
+      if (options.demoFallback && data.error && isMissingObjectError(data.error)) {
+        setQueryTabStatus(tabID, 'Loading demo data…');
         return fetch('/demo-data', {method: 'POST'})
           .then(function () {
             return fetch('/api/query', {
@@ -288,8 +704,20 @@ function runQueryWithDemoDataFallback(sql) {
       }
       return data;
     })
-    .then(renderResult)
-    .catch(function (err) { renderError(err.message || err.toString()); });
+    .then(function(data) {
+      if (!data || !isCurrentQueryRequest(tabID, requestID)) return;
+      finishQueryRun(tabID, data, sql);
+      if (options.live) {
+        scheduleLiveTab(tabID);
+      }
+    })
+    .catch(function (err) {
+      if (!isCurrentQueryRequest(tabID, requestID)) return;
+      finishQueryRun(tabID, {error: err.message || err.toString()}, sql);
+      if (options.live) {
+        scheduleLiveTab(tabID);
+      }
+    });
 }
 
 function isMissingObjectError(msg) {
@@ -457,34 +885,138 @@ function testLLMHealth() {
 function runQuery() {
   var sql = currentSQL().trim();
   if (!sql) return;
-  var btn = document.getElementById('runBtn');
-  var status = document.getElementById('statusMsg');
-  btn.disabled = true;
-  status.textContent = 'Running…';
-
-  fetch('/api/query', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({sql: sql})
-  })
-  .then(function(r){ return r.json(); })
-  .then(function(data) {
-    btn.disabled = false;
-    renderResult(data);
-  })
-  .catch(function(err) {
-    btn.disabled = false;
-    status.textContent = '';
-    renderError(err.toString());
-  });
+  executeQueryForTab(activeQueryTabID, sql, {});
 }
 
 function clearEditor() {
   setEditorValue('');
+  clearQueryOutput();
+  focusEditor();
+}
+
+function beginQueryRun(tabID, statusText) {
+  var runtime = getQueryTabRuntime(tabID);
+  runtime.running = true;
+  runtime.requestID = ++queryRequestSeq;
+  runtime.statusText = statusText || 'Running…';
+  runtime.resultData = null;
+  runtime.errorMessage = '';
+  if (tabID === activeQueryTabID) {
+    lastResultData = null;
+    lastErrorMessage = '';
+    document.getElementById('statusMsg').textContent = runtime.statusText;
+    document.getElementById('runBtn').disabled = true;
+    document.getElementById('resultArea').innerHTML = '';
+    document.getElementById('chartArea').innerHTML = '';
+  }
+  renderQueryTabs();
+  return runtime;
+}
+
+function setQueryTabStatus(tabID, statusText) {
+  var runtime = getQueryTabRuntime(tabID);
+  runtime.statusText = statusText || '';
+  if (tabID === activeQueryTabID) {
+    document.getElementById('statusMsg').textContent = runtime.statusText;
+  }
+  renderQueryTabs();
+}
+
+function isCurrentQueryRequest(tabID, requestID) {
+  return getQueryTabRuntime(tabID).requestID === requestID;
+}
+
+function finishQueryRun(tabID, data, sql) {
+  var runtime = getQueryTabRuntime(tabID);
+  runtime.running = false;
+  runtime.resultData = data && !data.error ? data : null;
+  runtime.errorMessage = data && data.error ? data.error : '';
+  runtime.statusText = queryStatusText(data);
+  saveQueryResultHistory(sql, data);
+  if (tabID === activeQueryTabID) {
+    renderActiveTabOutput();
+  }
+  renderQueryTabs();
+}
+
+function queryStatusText(data) {
+  if (!data) return '';
+  if (data.error) return 'Error';
+  var ms = data.elapsed_ms || 0;
+  if (data.columns && data.columns.length > 0) {
+    var rows = data.rows || [];
+    return rows.length + ' row(s) · ' + ms + ' ms';
+  }
+  return 'OK · ' + (data.affected || 0) + ' row(s) · ' + ms + ' ms';
+}
+
+function saveQueryResultHistory(sql, data) {
+  if (!sql || !data) return;
+  if (data.error) {
+    saveLocalQueryHistory(sql, 0, 0, data.error);
+    return;
+  }
+  var ms = data.elapsed_ms || 0;
+  if (data.columns && data.columns.length > 0) {
+    saveLocalQueryHistory(sql, (data.rows || []).length, ms, '');
+  } else {
+    saveLocalQueryHistory(sql, data.affected || 0, ms, '');
+  }
+}
+
+function renderActiveTabOutput() {
+  var runtime = getQueryTabRuntime(activeQueryTabID);
+  var tab = getActiveQueryTab() || {};
+  document.getElementById('runBtn').disabled = !!runtime.running;
+  if (runtime.running) {
+    lastResultData = null;
+    lastErrorMessage = '';
+    document.getElementById('statusMsg').textContent = runtime.statusText || 'Running…';
+    document.getElementById('resultArea').innerHTML = '';
+    document.getElementById('chartArea').innerHTML = '';
+    return;
+  }
+  if (runtime.errorMessage) {
+    renderErrorToPage(runtime.errorMessage);
+    return;
+  }
+  if (runtime.resultData) {
+    renderResultToPage(runtime.resultData);
+    return;
+  }
+  if (tab.viewMode === 'schema') {
+    document.getElementById('statusMsg').textContent = '';
+    document.getElementById('resultArea').innerHTML = renderSchemaGraphShell();
+    document.getElementById('chartArea').innerHTML = '';
+    loadSchemaGraph();
+    return;
+  }
+  lastResultData = null;
+  lastErrorMessage = '';
+  document.getElementById('statusMsg').textContent = runtime.statusText || '';
+  document.getElementById('resultArea').innerHTML = '';
+  document.getElementById('chartArea').innerHTML = '';
+}
+
+function clearQueryOutput(tabID) {
+  tabID = tabID || activeQueryTabID;
+  var runtime = getQueryTabRuntime(tabID);
+  runtime.running = false;
+  runtime.requestID = ++queryRequestSeq;
+  runtime.statusText = '';
+  runtime.resultData = null;
+  runtime.errorMessage = '';
+  if (tabID !== activeQueryTabID) {
+    renderQueryTabs();
+    return;
+  }
+  lastResultData = null;
+  lastErrorMessage = '';
+  document.getElementById('runBtn').disabled = false;
   document.getElementById('resultArea').innerHTML = '';
   document.getElementById('chartArea').innerHTML = '';
   document.getElementById('statusMsg').textContent = '';
-  focusEditor();
+  renderQueryTabs();
 }
 
 function exportQuery(format) {
@@ -536,25 +1068,64 @@ function currentSQL() {
 }
 
 function shareQuery() {
-  var sql = getEditorValue();
-  if (!sql.trim()) return;
-  var encoded = utf8ToB64(sql);
-  var url = window.location.origin + window.location.pathname + '#q=' + encodeURIComponent(encoded);
-  window.location.hash = 'q=' + encodeURIComponent(encoded);
+  saveActiveQueryTabFromEditor();
+  var tab = getActiveQueryTab();
+  if (!tab || !String(tab.sql || '').trim()) return;
+  var shareState = {
+    v: 2,
+    title: tab.title,
+    sql: tab.sql,
+    viewMode: normalizeViewMode(tab.viewMode),
+    liveEnabled: !!tab.liveEnabled,
+    liveIntervalMs: normalizeLiveInterval(tab.liveIntervalMs),
+    logFilter: tab.logFilter || ''
+  };
+  var encoded = utf8ToB64(JSON.stringify(shareState));
+  var url = window.location.origin + window.location.pathname + '#s=' + encodeURIComponent(encoded);
+  window.location.hash = 's=' + encodeURIComponent(encoded);
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(url).catch(function(){});
   }
-  document.getElementById('statusMsg').textContent = 'Share link copied';
+  setQueryTabStatus(activeQueryTabID, 'Share link copied');
 }
 
 function restoreQueryFromHash() {
   var hash = window.location.hash || '';
-  if (hash.indexOf('#q=') !== 0) return;
   try {
-    var encoded = decodeURIComponent(hash.slice(3));
-    var sql = b64ToUtf8(encoded);
-    if (sql.trim()) {
-      setEditorValue(sql);
+    if (hash.indexOf('#s=') === 0) {
+      var state = JSON.parse(b64ToUtf8(decodeURIComponent(hash.slice(3))));
+      if (state && String(state.sql || '').trim()) {
+        var tab = getActiveQueryTab();
+        if (tab && String(tab.sql || '').trim()) {
+          newQueryTab(state.sql, state.title || 'Shared Query');
+          tab = getActiveQueryTab();
+        } else if (tab) {
+          tab.sql = state.sql;
+          tab.title = state.title || titleForSQL(state.sql, queryTabs.indexOf(tab) + 1);
+        }
+        if (tab) {
+          tab.manualTitle = !!state.title;
+          tab.viewMode = normalizeViewMode(state.viewMode);
+          tab.liveEnabled = !!state.liveEnabled;
+          tab.liveIntervalMs = normalizeLiveInterval(state.liveIntervalMs);
+          tab.logFilter = String(state.logFilter || '');
+          suppressTabSave = true;
+          setEditorValue(tab.sql);
+          suppressTabSave = false;
+          persistQueryTabs();
+          syncActiveTabControls();
+          renderQueryTabs();
+          if (tab.liveEnabled) runLiveQueryTab(tab.id);
+        }
+      }
+      return;
+    }
+    if (hash.indexOf('#q=') === 0) {
+      var encoded = decodeURIComponent(hash.slice(3));
+      var sql = b64ToUtf8(encoded);
+      if (sql.trim()) {
+        setEditorValue(sql);
+      }
     }
   } catch (e) {}
 }
@@ -566,9 +1137,11 @@ function getEditorValue() {
 function setEditorValue(value) {
   if (sqlEditor) {
     sqlEditor.setValue(value || '');
+    saveActiveQueryTabFromEditor();
     return;
   }
   document.getElementById('sqlInput').value = value || '';
+  saveActiveQueryTabFromEditor();
 }
 
 function focusEditor() {
@@ -619,6 +1192,7 @@ function initMonacoEditor() {
       container.classList.remove('d-none');
       sqlEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runQuery);
       sqlEditor.addCommand(monaco.KeyCode.F5, runQuery);
+      sqlEditor.onDidChangeModelContent(saveActiveQueryTabFromEditor);
     });
   } catch (e) {
     sqlEditor = null;
@@ -664,11 +1238,14 @@ function copySchemaPreview() {
 }
 
 function renderError(msg) {
-  var sql = currentSQL().trim();
-  if (sql) saveLocalQueryHistory(sql, 0, 0, msg);
+  finishQueryRun(activeQueryTabID, {error: msg}, currentSQL().trim());
+}
+
+function renderErrorToPage(msg) {
   lastResultData = null;
   lastErrorMessage = msg;
   document.getElementById('statusMsg').textContent = '';
+  document.getElementById('runBtn').disabled = false;
   document.getElementById('chartArea').innerHTML = '';
   document.getElementById('resultArea').innerHTML =
     '<div class="alert alert-danger mt-1 py-2"><i class="bi bi-exclamation-triangle-fill me-2"></i>' +
@@ -676,16 +1253,16 @@ function renderError(msg) {
 }
 
 function renderResult(data) {
+  finishQueryRun(activeQueryTabID, data, currentSQL().trim());
+}
+
+function renderResultToPage(data) {
   var status = document.getElementById('statusMsg');
   var area = document.getElementById('resultArea');
+  document.getElementById('runBtn').disabled = false;
 
   if (data.error) {
-    lastResultData = null;
-    lastErrorMessage = data.error;
-    status.textContent = '';
-    document.getElementById('chartArea').innerHTML = '';
-    area.innerHTML = '<div class="alert alert-danger mt-1 py-2"><i class="bi bi-exclamation-triangle-fill me-2"></i>' +
-      escHtml(data.error) + '</div>';
+    renderErrorToPage(data.error);
     return;
   }
 
@@ -694,8 +1271,49 @@ function renderResult(data) {
     lastResultData = data;
     lastErrorMessage = '';
     var rows = data.rows || [];
-    saveLocalQueryHistory(currentSQL().trim(), rows.length, ms, '');
     status.textContent = rows.length + ' row(s) · ' + ms + ' ms';
+    var tab = getActiveQueryTab() || {};
+    if (tab.viewMode === 'log') {
+      area.innerHTML = renderLogResult(data);
+      document.getElementById('chartArea').innerHTML = '';
+      return;
+    }
+    if (tab.viewMode === 'cards') {
+      area.innerHTML = renderCardResult(data);
+      document.getElementById('chartArea').innerHTML = '';
+      return;
+    }
+    if (tab.viewMode === 'json') {
+      area.innerHTML = renderStructuredResult(data, 'json');
+      document.getElementById('chartArea').innerHTML = '';
+      return;
+    }
+    if (tab.viewMode === 'xml') {
+      area.innerHTML = renderStructuredResult(data, 'xml');
+      document.getElementById('chartArea').innerHTML = '';
+      return;
+    }
+    if (tab.viewMode === 'pivot') {
+      area.innerHTML = renderPivotResult(data);
+      document.getElementById('chartArea').innerHTML = '';
+      return;
+    }
+    if (tab.viewMode === 'profile') {
+      area.innerHTML = renderProfileResult(data);
+      document.getElementById('chartArea').innerHTML = '';
+      return;
+    }
+    if (tab.viewMode === 'schema') {
+      area.innerHTML = renderSchemaGraphShell();
+      document.getElementById('chartArea').innerHTML = '';
+      loadSchemaGraph();
+      return;
+    }
+    if (tab.viewMode === 'notebook') {
+      area.innerHTML = renderNotebookResult(data);
+      document.getElementById('chartArea').innerHTML = '';
+      return;
+    }
     var html = '<div class="card mt-1"><div class="table-responsive">' +
       '<table class="table table-sm table-hover result-table mb-0"><thead><tr>';
     data.columns.forEach(function(c){ html += '<th>' + escHtml(c) + '</th>'; });
@@ -713,13 +1331,354 @@ function renderResult(data) {
   } else {
     lastResultData = null;
     lastErrorMessage = '';
-    saveLocalQueryHistory(currentSQL().trim(), data.affected || 0, ms, '');
     document.getElementById('chartArea').innerHTML = '';
     var affected = data.affected || 0;
     status.textContent = '';
     area.innerHTML = '<div class="alert alert-success mt-1 py-2"><i class="bi bi-check-circle-fill me-2"></i>' +
       'OK — ' + affected + ' row(s) affected · ' + ms + ' ms</div>';
   }
+}
+
+function renderCardResult(data) {
+  var columns = data.columns || [];
+  var rows = data.rows || [];
+  var html = '<div class="result-card-grid mt-1">';
+  rows.forEach(function(row, idx) {
+    html += '<div class="result-record-card"><div class="d-flex justify-content-between align-items-center mb-2">' +
+      '<span class="fw-semibold">Record ' + (idx + 1) + '</span><span class="text-muted small">' + columns.length + ' field(s)</span></div>';
+    columns.forEach(function(col, cidx) {
+      html += '<div class="record-field"><div class="record-key">' + escHtml(col) + '</div><div class="record-value">' +
+        escHtml(row[cidx] || '') + '</div></div>';
+    });
+    html += '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+function renderStructuredResult(data, mode) {
+  var values = [];
+  (data.rows || []).forEach(function(row) {
+    row.forEach(function(cell) {
+      var text = String(cell || '').trim();
+      if (!text) return;
+      if (mode === 'json' && looksLikeJSON(text)) {
+        try { values.push({label: 'JSON cell', value: JSON.parse(text)}); } catch (e) {}
+      }
+      if (mode === 'xml' && looksLikeXML(text)) {
+        values.push({label: 'XML cell', value: parseXMLTree(text)});
+      }
+    });
+  });
+  if (values.length === 0 && mode === 'json') {
+    values.push({label: 'Rows as JSON', value: rowsAsObjects(data)});
+  }
+  if (values.length === 0) {
+    return '<div class="alert alert-info mt-1 py-2">No ' + mode.toUpperCase() + ' content detected in this result.</div>';
+  }
+  var html = '<div class="card mt-1"><div class="card-body py-2"><h2 class="h6 mb-2">' +
+    '<i class="bi bi-braces text-primary"></i> ' + mode.toUpperCase() + ' Tree</h2>';
+  values.slice(0, 20).forEach(function(item, idx) {
+    html += '<details class="tree-node" open><summary>' + escHtml(item.label + ' ' + (idx + 1)) + '</summary>' +
+      renderTreeValue(item.value) + '</details>';
+  });
+  html += '</div></div>';
+  return html;
+}
+
+function rowsAsObjects(data) {
+  return (data.rows || []).map(function(row) {
+    var obj = {};
+    (data.columns || []).forEach(function(col, idx) { obj[col] = row[idx]; });
+    return obj;
+  });
+}
+
+function looksLikeJSON(text) {
+  return /^[\[{]/.test(text);
+}
+
+function looksLikeXML(text) {
+  return /^<[^>]+>/.test(text);
+}
+
+function parseXMLTree(text) {
+  try {
+    var doc = new DOMParser().parseFromString(text, 'application/xml');
+    if (doc.querySelector('parsererror')) return text;
+    return xmlNodeToObject(doc.documentElement);
+  } catch (e) {
+    return text;
+  }
+}
+
+function xmlNodeToObject(node) {
+  var out = {name: node.nodeName};
+  if (node.attributes && node.attributes.length) {
+    out.attributes = {};
+    Array.prototype.forEach.call(node.attributes, function(attr) { out.attributes[attr.name] = attr.value; });
+  }
+  var children = Array.prototype.filter.call(node.childNodes || [], function(child) {
+    return child.nodeType === 1 || child.nodeType === 3 && child.nodeValue.trim();
+  });
+  if (children.length === 1 && children[0].nodeType === 3) {
+    out.text = children[0].nodeValue.trim();
+  } else if (children.length) {
+    out.children = children.map(function(child) {
+      return child.nodeType === 3 ? child.nodeValue.trim() : xmlNodeToObject(child);
+    });
+  }
+  return out;
+}
+
+function renderTreeValue(value) {
+  if (value === null || value === undefined) {
+    return '<div class="tree-leaf null-cell">null</div>';
+  }
+  if (typeof value !== 'object') {
+    return '<div class="tree-leaf">' + escHtml(String(value)) + '</div>';
+  }
+  if (Array.isArray(value)) {
+    return '<div class="tree-children">' + value.map(function(item, idx) {
+      return '<details class="tree-node"><summary>[' + idx + ']</summary>' + renderTreeValue(item) + '</details>';
+    }).join('') + '</div>';
+  }
+  return '<div class="tree-children">' + Object.keys(value).map(function(key) {
+    var child = value[key];
+    if (child !== null && typeof child === 'object') {
+      return '<details class="tree-node"><summary>' + escHtml(key) + '</summary>' + renderTreeValue(child) + '</details>';
+    }
+    return '<div class="tree-leaf"><span class="tree-key">' + escHtml(key) + ':</span> ' + escHtml(String(child)) + '</div>';
+  }).join('') + '</div>';
+}
+
+function renderPivotResult(data) {
+  var columns = data.columns || [];
+  var rows = data.rows || [];
+  if (columns.length < 2 || rows.length === 0) {
+    return '<div class="alert alert-info mt-1 py-2">Pivot needs at least two columns and one row.</div>';
+  }
+  var groupIdx = firstTextColumn(data);
+  var numeric = numericColumnIndexes(data);
+  if (groupIdx < 0 || numeric.length === 0) {
+    return '<div class="alert alert-info mt-1 py-2">Pivot needs one categorical column and one numeric column.</div>';
+  }
+  var groups = {};
+  rows.forEach(function(row) {
+    var key = row[groupIdx] || '(blank)';
+    if (!groups[key]) groups[key] = {count: 0, sums: {}};
+    groups[key].count++;
+    numeric.forEach(function(idx) {
+      groups[key].sums[idx] = (groups[key].sums[idx] || 0) + Number(row[idx] || 0);
+    });
+  });
+  var keys = Object.keys(groups).sort(function(a, b) { return groups[b].count - groups[a].count; }).slice(0, 100);
+  var html = '<div class="card mt-1"><div class="table-responsive"><table class="table table-sm result-table mb-0">' +
+    '<thead><tr><th>' + escHtml(columns[groupIdx]) + '</th><th>count</th>';
+  numeric.forEach(function(idx) { html += '<th>sum ' + escHtml(columns[idx]) + '</th>'; });
+  html += '</tr></thead><tbody>';
+  keys.forEach(function(key) {
+    html += '<tr><td>' + escHtml(key) + '</td><td>' + groups[key].count + '</td>';
+    numeric.forEach(function(idx) { html += '<td>' + formatNumber(groups[key].sums[idx]) + '</td>'; });
+    html += '</tr>';
+  });
+  html += '</tbody></table></div></div>';
+  return html;
+}
+
+function renderProfileResult(data) {
+  var columns = data.columns || [];
+  var rows = data.rows || [];
+  var html = '<div class="result-card-grid mt-1">';
+  columns.forEach(function(col, idx) {
+    var values = rows.map(function(row) { return row[idx] || ''; });
+    var nonEmpty = values.filter(function(v) { return String(v).trim() !== ''; });
+    var distinct = {};
+    values.forEach(function(v) { distinct[v] = true; });
+    var nums = nonEmpty.map(Number).filter(function(v) { return !isNaN(v); });
+    html += '<div class="result-record-card"><h2 class="h6 mb-2">' + escHtml(col) + '</h2>' +
+      '<div class="small text-muted mb-2">' + nonEmpty.length + '/' + rows.length + ' non-empty · ' +
+      Object.keys(distinct).length + ' distinct</div>';
+    if (nums.length) {
+      var sum = nums.reduce(function(a, b) { return a + b; }, 0);
+      html += '<div class="record-field"><div class="record-key">min</div><div class="record-value">' + formatNumber(Math.min.apply(null, nums)) + '</div></div>' +
+        '<div class="record-field"><div class="record-key">max</div><div class="record-value">' + formatNumber(Math.max.apply(null, nums)) + '</div></div>' +
+        '<div class="record-field"><div class="record-key">avg</div><div class="record-value">' + formatNumber(sum / nums.length) + '</div></div>';
+    }
+    html += '<div class="record-field"><div class="record-key">examples</div><div class="record-value">' +
+      escHtml(nonEmpty.slice(0, 5).join(', ')) + '</div></div></div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+function renderNotebookResult(data) {
+  return '<div class="notebook-view mt-1">' +
+    '<section class="notebook-cell"><div class="notebook-cell-title">SQL</div><pre>' + escHtml(getEditorValue()) + '</pre></section>' +
+    '<section class="notebook-cell"><div class="notebook-cell-title">Result Summary</div><p>' +
+    escHtml(queryStatusText(data)) + '</p></section>' +
+    '<section class="notebook-cell"><div class="notebook-cell-title">Data</div>' + renderTableFragment(data) + '</section>' +
+    '</div>';
+}
+
+function renderTableFragment(data) {
+  if (!data || !data.columns || data.columns.length === 0) return '<div class="text-muted small">No tabular result.</div>';
+  var html = '<div class="table-responsive"><table class="table table-sm result-table mb-0"><thead><tr>';
+  data.columns.forEach(function(c) { html += '<th>' + escHtml(c) + '</th>'; });
+  html += '</tr></thead><tbody>';
+  (data.rows || []).slice(0, 50).forEach(function(row) {
+    html += '<tr>';
+    row.forEach(function(cell) { html += '<td>' + escHtml(cell || '') + '</td>'; });
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+  return html;
+}
+
+function renderSchemaGraphShell() {
+  return '<div class="card mt-1"><div class="card-body py-2"><div class="d-flex justify-content-between align-items-center mb-2">' +
+    '<h2 class="h6 mb-0"><i class="bi bi-diagram-3 text-primary"></i> Schema Graph</h2>' +
+    '<span class="small text-muted">tables, columns, relationships</span></div><div id="schemaGraph" class="schema-graph">Loading...</div></div></div>';
+}
+
+function loadSchemaGraph() {
+  fetch('/api/schema')
+    .then(function(r) { return r.json(); })
+    .then(function(schema) {
+      var target = document.getElementById('schemaGraph');
+      if (!target) return;
+      var tables = schema.tables || [];
+      var relationships = schema.relationships || [];
+      if (!tables.length) {
+        target.innerHTML = '<div class="text-muted small">No schema context available.</div>';
+        return;
+      }
+      var html = '<div class="schema-graph-grid">';
+      tables.forEach(function(table) {
+        html += '<div class="schema-node"><div class="schema-node-title">' + escHtml(table.name) +
+          '<span class="text-muted small ms-1">' + escHtml(table.kind || 'table') + '</span></div>';
+        (table.columns || []).forEach(function(col) {
+          html += '<div class="schema-column">' + escHtml(col.name) +
+            '<span class="text-muted"> ' + escHtml(col.type || '') + '</span></div>';
+        });
+        html += '</div>';
+      });
+      html += '</div>';
+      if (relationships.length) {
+        html += '<div class="mt-3 small"><div class="fw-semibold mb-1">Relationships</div>';
+        relationships.forEach(function(rel) {
+          html += '<div class="schema-edge">' + escHtml(rel.from || '') + ' → ' + escHtml(rel.to || '') + '</div>';
+        });
+        html += '</div>';
+      }
+      target.innerHTML = html;
+    })
+    .catch(function(err) {
+      var target = document.getElementById('schemaGraph');
+      if (target) target.textContent = err.message || String(err);
+    });
+}
+
+function firstTextColumn(data) {
+  for (var i = 0; i < (data.columns || []).length; i++) {
+    var numericCount = 0;
+    (data.rows || []).forEach(function(row) {
+      if (row[i] !== '' && !isNaN(Number(row[i]))) numericCount++;
+    });
+    if (numericCount < Math.max(1, Math.floor((data.rows || []).length * 0.5))) return i;
+  }
+  return -1;
+}
+
+function numericColumnIndexes(data) {
+  var out = [];
+  (data.columns || []).forEach(function(_, idx) {
+    var numericCount = 0;
+    (data.rows || []).forEach(function(row) {
+      if (row[idx] !== '' && !isNaN(Number(row[idx]))) numericCount++;
+    });
+    if (numericCount > 0 && numericCount >= Math.ceil((data.rows || []).length * 0.6)) out.push(idx);
+  });
+  return out;
+}
+
+function formatNumber(value) {
+  if (!isFinite(value)) return '';
+  return Math.round(value * 1000) / 1000;
+}
+
+function renderLogResult(data) {
+  var tab = getActiveQueryTab() || {};
+  var filter = (tab.logFilter || '').toLowerCase();
+  var columns = data.columns || [];
+  var rows = (data.rows || []).slice(-1000);
+  var rendered = rows.map(function(row) {
+    return logLineFromRow(columns, row);
+  }).filter(function(line) {
+    return !filter || line.text.toLowerCase().indexOf(filter) >= 0;
+  });
+  var html = '<div class="card mt-1"><div class="card-body py-2">' +
+    '<div class="d-flex justify-content-between align-items-center mb-2">' +
+    '<h2 class="h6 mb-0"><i class="bi bi-file-text text-primary"></i> Logs</h2>' +
+    '<span class="small text-muted">' + rendered.length + ' visible / ' + rows.length + ' row(s)</span>' +
+    '</div><div id="logViewer" class="log-viewer">';
+  if (rendered.length === 0) {
+    html += '<div class="text-muted small px-2 py-2">No log rows match the current filter.</div>';
+  } else {
+    rendered.forEach(function(line) {
+      html += '<div class="log-line log-' + escHtml(line.level) + '">' + escHtml(line.text) + '</div>';
+    });
+  }
+  html += '</div></div></div>';
+  window.setTimeout(function() {
+    var viewer = document.getElementById('logViewer');
+    if (viewer) viewer.scrollTop = viewer.scrollHeight;
+  }, 0);
+  return html;
+}
+
+function logLineFromRow(columns, row) {
+  var time = '';
+  var level = '';
+  var message = '';
+  var parts = [];
+  columns.forEach(function(col, idx) {
+    var name = String(col || '');
+    var value = String(row[idx] || '');
+    if (!time && /time|date|ts|timestamp|created|updated/i.test(name)) {
+      time = value;
+      return;
+    }
+    if (!level && /level|severity|status|priority/i.test(name)) {
+      level = normalizeLogLevel(value);
+      parts.push(name + '=' + value);
+      return;
+    }
+    if (!message && /msg|message|log|event|error|detail|text/i.test(name)) {
+      message = value;
+      return;
+    }
+    parts.push(name + '=' + value);
+  });
+  if (!level) {
+    level = normalizeLogLevel(row.join(' '));
+  }
+  var textParts = [];
+  if (time) textParts.push(time);
+  textParts.push('[' + level.toUpperCase() + ']');
+  if (message) textParts.push(message);
+  if (parts.length > 0) textParts.push(parts.join(' '));
+  return {level: level, text: textParts.join(' ')};
+}
+
+function normalizeLogLevel(value) {
+  value = String(value || '').toLowerCase();
+  if (/fatal|panic|critical|crit/.test(value)) return 'fatal';
+  if (/error|err|fail|failed/.test(value)) return 'error';
+  if (/warn|warning/.test(value)) return 'warn';
+  if (/debug|trace/.test(value)) return 'debug';
+  if (/info|notice|ok|success|succeeded/.test(value)) return 'info';
+  return 'default';
 }
 
 function saveLocalQueryHistory(sql, rowCount, elapsedMs, errorText) {
