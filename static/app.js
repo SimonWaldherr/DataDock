@@ -25,8 +25,11 @@
     try { localStorage.setItem('datadock.density', density); } catch (e) {}
   }
 
-  var theme = storedValue('datadock.theme', 'workbench', allowedThemes);
-  var density = storedValue('datadock.density', 'comfortable', allowedDensity);
+  // The inline head script already resolved and applied the effective
+  // theme/density (localStorage override, falling back to the server's
+  // configured default), so reuse that instead of re-deriving a default here.
+  var theme = storedValue('datadock.theme', root.dataset.theme || 'workbench', allowedThemes);
+  var density = storedValue('datadock.density', root.dataset.density || 'comfortable', allowedDensity);
   applyTheme(theme);
   applyDensity(density);
 

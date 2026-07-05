@@ -45,6 +45,9 @@ func newApp(nativeDB *tinysql.DB, sqlDB *sql.DB, tenant string, tpl *template.Te
 		connectTimeout: 10 * time.Second,
 		queryTimeout:   60 * time.Second,
 		llmConfig:      LLMConfig{Timeout: 45 * time.Second},
+		pageSize:       defaultPageSize,
+		defaultTheme:   defaultUITheme,
+		defaultDensity: defaultUIDensity,
 	}
 }
 
@@ -62,10 +65,10 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 
 	// Record CRUD.
 	handle("GET /t/{table}/new", a.newRecordFormHandler)
-	handle("POST /t/{table}/new", a.createRecordHandler)
+	handle("POST /t/{table}/new", a.requireWritable(a.createRecordHandler))
 	handle("GET /t/{table}/{id}/edit", a.editRecordFormHandler)
-	handle("POST /t/{table}/{id}/edit", a.updateRecordHandler)
-	handle("POST /t/{table}/{id}/delete", a.deleteRecordHandler)
+	handle("POST /t/{table}/{id}/edit", a.requireWritable(a.updateRecordHandler))
+	handle("POST /t/{table}/{id}/delete", a.requireWritable(a.deleteRecordHandler))
 
 	// Table management.
 	handle("GET /connections", a.connectionsHandler)
@@ -75,14 +78,15 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /admin/settings", a.adminSettingsHandler)
 	handle("GET /jobs", a.jobsHandler)
 	handle("GET /migrate", a.migrationHandler)
-	handle("POST /migrate", a.runMigrationHandler)
+	handle("POST /migrate", a.requireWritable(a.runMigrationHandler))
 	handle("GET /create-table", a.createTableFormHandler)
-	handle("POST /create-table", a.createTableHandler)
+	handle("POST /create-table", a.requireWritable(a.createTableHandler))
 	handle("GET /import", a.importFormHandler)
-	handle("POST /import", a.importFileHandler)
-	handle("POST /demo-data", a.demoDataHandler)
+	handle("POST /import", a.requireWritable(a.importFileHandler))
+	handle("POST /demo-data", a.requireWritable(a.demoDataHandler))
+	handle("POST /demo-data/remove", a.requireWritable(a.demoDataRemoveHandler))
 	handle("GET /guide", a.guideHandler)
-	handle("POST /drop-table/{table}", a.dropTableHandler)
+	handle("POST /drop-table/{table}", a.requireWritable(a.dropTableHandler))
 
 	// SQL query editor.
 	handle("GET /query", a.queryEditorHandler)
@@ -96,9 +100,9 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("GET /api/admin/settings", a.apiAdminSettingsHandler)
 	handle("POST /api/admin/settings", a.apiAdminSettingsHandler)
 	handle("GET /api/jobs", a.apiJobsHandler)
-	handle("POST /api/jobs", a.apiJobsHandler)
-	handle("POST /api/jobs/run", a.apiRunJobHandler)
-	handle("POST /api/import", a.apiImportHandler)
+	handle("POST /api/jobs", a.requireWritable(a.apiJobsHandler))
+	handle("POST /api/jobs/run", a.requireWritable(a.apiRunJobHandler))
+	handle("POST /api/import", a.requireWritable(a.apiImportHandler))
 	handle("POST /api/llm", a.apiLLMHandler)
 	handle("GET /api/llm/discover", a.apiLLMDiscoverHandler)
 	handle("POST /api/llm/autoconfig", a.apiLLMAutoConfigHandler)
@@ -112,6 +116,9 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data m
 	objects := a.tableObjects(r.Context())
 	data["Tables"] = a.tableNames(r.Context())
 	data["TableObjects"] = objects
+	data["DefaultTheme"] = a.currentDefaultTheme()
+	data["DefaultDensity"] = a.currentDefaultDensity()
+	data["MaintenanceMode"] = a.currentReadOnlyMode()
 	if a.conns != nil {
 		sessionID := sessionIDFromContext(r.Context())
 		data["Connections"] = a.conns.ListFor(sessionID)
@@ -419,6 +426,7 @@ func (a *App) tableViewHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	pageSize := a.currentPageSize()
 	totalPages := 1
 	if meta.RowCount > pageSize {
 		totalPages = (meta.RowCount + pageSize - 1) / pageSize
@@ -472,11 +480,24 @@ func (a *App) guideHandler(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "guide", map[string]interface{}{})
 }
 
+// adminPageData assembles the base data every render of the "admin" template
+// needs (Status/StatusJSON/Settings), merging in any page-specific extras
+// such as an Error or Success message.
+func (a *App) adminPageData(ctx context.Context, extra map[string]interface{}) map[string]interface{} {
+	status := a.adminStatus(ctx)
+	data := map[string]interface{}{
+		"Status":     status,
+		"StatusJSON": formatStatusJSON(status),
+		"Settings":   a.runtimeSettingsView(),
+	}
+	for k, v := range extra {
+		data[k] = v
+	}
+	return data
+}
+
 func (a *App) adminHandler(w http.ResponseWriter, r *http.Request) {
-	a.render(w, r, "admin", map[string]interface{}{
-		"Status":   a.adminStatus(r.Context()),
-		"Settings": a.runtimeSettingsView(),
-	})
+	a.render(w, r, "admin", a.adminPageData(r.Context(), nil))
 }
 
 func (a *App) adminSettingsHandler(w http.ResponseWriter, r *http.Request) {
@@ -494,10 +515,7 @@ func (a *App) adminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		err = a.saveRuntimeSettings(r.Context())
 	}
-	data := map[string]interface{}{
-		"Status":   a.adminStatus(r.Context()),
-		"Settings": a.runtimeSettingsView(),
-	}
+	data := a.adminPageData(r.Context(), nil)
 	if err != nil {
 		data["Error"] = err.Error()
 		a.render(w, r, "admin", data)
@@ -645,6 +663,7 @@ func (a *App) tableRowsSorted(r *http.Request, page int, sortCol, dir string, me
 	if page < 1 {
 		page = 1
 	}
+	pageSize := a.currentPageSize()
 	offset := (page - 1) * pageSize
 
 	conn := a.activeConn(r.Context())
@@ -1014,9 +1033,13 @@ func (a *App) importFileHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// demoJobName identifies the sample scheduled job seeded alongside demo data
+// so the Jobs page has a working example out of the box.
+const demoJobName = "demo_orders_by_status"
+
 func (a *App) demoDataHandler(w http.ResponseWriter, r *http.Request) {
 	if conn := a.activeConn(r.Context()); conn != nil && !conn.IsTinySQL() {
-		a.render(w, r, "index", map[string]interface{}{"Error": "Demo data can only be imported into the local tinySQL database."})
+		a.render(w, r, "admin", a.adminPageData(r.Context(), map[string]interface{}{"Error": "Demo data can only be imported into the local tinySQL database."}))
 		return
 	}
 	ctx, cancel := a.withQueryTimeout(r.Context())
@@ -1024,11 +1047,62 @@ func (a *App) demoDataHandler(w http.ResponseWriter, r *http.Request) {
 	for _, stmt := range demoDataStatements() {
 		result := a.executeTinySQL(ctx, stmt)
 		if result.Err != "" && !strings.HasPrefix(stmt, "DROP TABLE ") {
-			a.render(w, r, "index", map[string]interface{}{"Error": "Could not import demo data: " + result.Err})
+			a.render(w, r, "admin", a.adminPageData(r.Context(), map[string]interface{}{"Error": "Could not import demo data: " + result.Err}))
 			return
 		}
 	}
+	a.seedDemoJob()
 	http.Redirect(w, r, "/t/datadock_demo_people", http.StatusSeeOther)
+}
+
+// demoDataRemoveHandler drops every demo table (and the seeded demo job) so a
+// server can be reset to a clean slate without touching real data.
+func (a *App) demoDataRemoveHandler(w http.ResponseWriter, r *http.Request) {
+	if conn := a.activeConn(r.Context()); conn != nil && !conn.IsTinySQL() {
+		a.render(w, r, "admin", a.adminPageData(r.Context(), map[string]interface{}{"Error": "Demo data can only be removed from the local tinySQL database."}))
+		return
+	}
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	for _, stmt := range demoDataDropStatements() {
+		a.executeTinySQL(ctx, stmt) // best-effort: tables may not exist yet
+	}
+	_ = a.nativeDB.Catalog().DeleteJob(demoJobName)
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+// seedDemoJob registers a small scheduled job over the demo orders table so
+// the Jobs page shows a realistic, already-working example.
+func (a *App) seedDemoJob() {
+	job, err := dbjobs.Build(dbjobs.Config{
+		Name:         demoJobName,
+		SQL:          "SELECT status, COUNT(*) AS order_count, SUM(total_amount) AS total_revenue FROM datadock_demo_orders GROUP BY status",
+		ScheduleType: "INTERVAL",
+		IntervalMs:   24 * 60 * 60 * 1000,
+		NoOverlap:    true,
+	})
+	if err != nil {
+		return
+	}
+	_ = a.nativeDB.RegisterJob(job)
+}
+
+// demoDataDropStatements lists DROP TABLE statements for every demo table,
+// ordered so tables referencing other demo tables are dropped first.
+func demoDataDropStatements() []string {
+	return []string{
+		"DROP TABLE datadock_demo_order_items",
+		"DROP TABLE datadock_demo_orders",
+		"DROP TABLE datadock_demo_products",
+		"DROP TABLE datadock_demo_customers",
+		"DROP TABLE datadock_demo_metrics",
+		"DROP TABLE datadock_demo_tickets",
+		"DROP TABLE datadock_demo_invoices",
+		"DROP TABLE datadock_demo_events",
+		"DROP TABLE datadock_demo_projects",
+		"DROP TABLE datadock_demo_people",
+		"DROP TABLE datadock_demo_departments",
+	}
 }
 
 func demoDataStatements() []string {
@@ -1162,20 +1236,159 @@ func demoDataStatements() []string {
 		{13, 8, 4, "medium", "open", "2026-07-04", ""},
 	}
 
-	statements := []string{
-		"DROP TABLE datadock_demo_tickets",
-		"DROP TABLE datadock_demo_invoices",
-		"DROP TABLE datadock_demo_events",
-		"DROP TABLE datadock_demo_projects",
-		"DROP TABLE datadock_demo_people",
-		"DROP TABLE datadock_demo_departments",
+	type customer struct {
+		id         int
+		name       string
+		segment    string
+		country    string
+		signupDate string
+	}
+	type product struct {
+		id        int
+		name      string
+		category  string
+		unitPrice int
+	}
+	type order struct {
+		id          int
+		customerID  int
+		orderDate   string
+		channel     string
+		status      string
+		totalAmount int
+	}
+	type orderItem struct {
+		id        int
+		orderID   int
+		productID int
+		quantity  int
+		unitPrice int
+	}
+	type metricPoint struct {
+		id     int
+		date   string
+		metric string
+		value  int
+	}
+
+	customers := []customer{
+		{1, "Northwind Labs", "Enterprise", "DE", "2024-01-12"},
+		{2, "Contoso Finance", "Enterprise", "US", "2023-11-03"},
+		{3, "Fabrikam Ops", "Mid-Market", "US", "2024-03-22"},
+		{4, "Tailspin Support", "SMB", "GB", "2024-06-15"},
+		{5, "Adventure Works", "Mid-Market", "CA", "2023-09-08"},
+		{6, "Wide World Importers", "Enterprise", "AU", "2024-02-19"},
+		{7, "Globex Analytics", "SMB", "FR", "2024-08-01"},
+		{8, "Initech Data", "Mid-Market", "US", "2024-05-27"},
+		{9, "Umbrella Retail", "Enterprise", "JP", "2023-12-14"},
+		{10, "Hooli Cloud", "SMB", "US", "2025-01-09"},
+	}
+	products := []product{
+		{1, "Starter Plan", "Subscription", 29},
+		{2, "Growth Plan", "Subscription", 99},
+		{3, "Scale Plan", "Subscription", 249},
+		{4, "Enterprise Plan", "Subscription", 899},
+		{5, "Onboarding Package", "Services", 1200},
+		{6, "Data Migration", "Services", 1800},
+		{7, "Priority Support", "Add-on", 150},
+		{8, "Extra Storage 1TB", "Add-on", 45},
+		{9, "Custom Report Pack", "Services", 600},
+		{10, "Training Workshop", "Services", 950},
+	}
+	orders := []order{
+		{1, 1, "2026-01-10", "web", "paid", 899},
+		{2, 1, "2026-03-10", "web", "paid", 435},
+		{3, 2, "2026-01-18", "sales", "paid", 249},
+		{4, 2, "2026-04-02", "sales", "paid", 1800},
+		{5, 3, "2026-02-05", "web", "paid", 99},
+		{6, 3, "2026-05-14", "partner", "pending", 600},
+		{7, 4, "2026-02-20", "web", "paid", 29},
+		{8, 4, "2026-06-01", "web", "refunded", 179},
+		{9, 5, "2026-01-25", "sales", "paid", 1200},
+		{10, 5, "2026-04-18", "sales", "paid", 950},
+		{11, 6, "2026-02-11", "partner", "paid", 1798},
+		{12, 6, "2026-05-30", "partner", "paid", 2400},
+		{13, 7, "2026-03-03", "web", "paid", 99},
+		{14, 7, "2026-06-15", "web", "cancelled", 249},
+		{15, 8, "2026-01-29", "sales", "paid", 1049},
+		{16, 8, "2026-05-06", "sales", "pending", 600},
+		{17, 9, "2026-02-27", "partner", "paid", 3600},
+		{18, 9, "2026-06-22", "partner", "paid", 1040},
+		{19, 10, "2026-03-19", "web", "paid", 58},
+		{20, 10, "2026-07-01", "web", "paid", 249},
+	}
+	orderItems := []orderItem{
+		{1, 1, 4, 1, 899},
+		{2, 2, 7, 2, 150},
+		{3, 2, 8, 3, 45},
+		{4, 3, 3, 1, 249},
+		{5, 4, 6, 1, 1800},
+		{6, 5, 2, 1, 99},
+		{7, 6, 9, 1, 600},
+		{8, 7, 1, 1, 29},
+		{9, 8, 1, 1, 29},
+		{10, 8, 7, 1, 150},
+		{11, 9, 5, 1, 1200},
+		{12, 10, 10, 1, 950},
+		{13, 11, 4, 2, 899},
+		{14, 12, 6, 1, 1800},
+		{15, 12, 9, 1, 600},
+		{16, 13, 2, 1, 99},
+		{17, 14, 3, 1, 249},
+		{18, 15, 4, 1, 899},
+		{19, 15, 7, 1, 150},
+		{20, 16, 9, 1, 600},
+		{21, 17, 6, 2, 1800},
+		{22, 18, 10, 1, 950},
+		{23, 18, 8, 2, 45},
+		{24, 19, 1, 2, 29},
+		{25, 20, 2, 1, 99},
+		{26, 20, 7, 1, 150},
+	}
+
+	// metrics holds a daily time series so the SQL editor's quick-chart
+	// date/time line detection has something realistic to plot.
+	var metrics []metricPoint
+	metricStart := time.Date(2026, 6, 5, 0, 0, 0, 0, time.UTC)
+	metricID := 1
+	for i := 0; i < 30; i++ {
+		day := metricStart.AddDate(0, 0, i)
+		dateStr := day.Format("2006-01-02")
+		weekend := day.Weekday() == time.Saturday || day.Weekday() == time.Sunday
+
+		dau := 220 + i*2 + (i*17)%23 - 11
+		revenue := 1500 + i*12 + (i*29)%97 - 48
+		if weekend {
+			dau -= 55
+			revenue -= 320
+		}
+		if dau < 40 {
+			dau = 40
+		}
+		if revenue < 200 {
+			revenue = 200
+		}
+
+		metrics = append(metrics, metricPoint{metricID, dateStr, "daily_active_users", dau})
+		metricID++
+		metrics = append(metrics, metricPoint{metricID, dateStr, "daily_revenue", revenue})
+		metricID++
+	}
+
+	statements := append([]string{}, demoDataDropStatements()...)
+	statements = append(statements,
 		"CREATE TABLE datadock_demo_departments (id INT, name TEXT, region TEXT, annual_budget INT)",
 		"CREATE TABLE datadock_demo_people (id INT, name TEXT, role TEXT, department_id INT, city TEXT, hired_on TEXT)",
 		"CREATE TABLE datadock_demo_projects (id INT, name TEXT, status TEXT, owner_id INT, department_id INT, start_date TEXT, due_date TEXT, budget INT)",
 		"CREATE TABLE datadock_demo_events (id INT, project_id INT, event_type TEXT, event_date TEXT, amount INT, severity TEXT)",
 		"CREATE TABLE datadock_demo_invoices (id INT, project_id INT, customer TEXT, invoice_date TEXT, status TEXT, amount INT)",
 		"CREATE TABLE datadock_demo_tickets (id INT, project_id INT, opened_by INT, priority TEXT, status TEXT, opened_on TEXT, closed_on TEXT)",
-	}
+		"CREATE TABLE datadock_demo_customers (id INT, name TEXT, segment TEXT, country TEXT, signup_date TEXT)",
+		"CREATE TABLE datadock_demo_products (id INT, name TEXT, category TEXT, unit_price INT)",
+		"CREATE TABLE datadock_demo_orders (id INT, customer_id INT, order_date TEXT, channel TEXT, status TEXT, total_amount INT)",
+		"CREATE TABLE datadock_demo_order_items (id INT, order_id INT, product_id INT, quantity INT, unit_price INT)",
+		"CREATE TABLE datadock_demo_metrics (id INT, metric_date TEXT, metric TEXT, value INT)",
+	)
 	for _, row := range departments {
 		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_departments (id, name, region, annual_budget) VALUES (%d, %s, %s, %d)", row.id, demoSQLString(row.name), demoSQLString(row.region), row.budget))
 	}
@@ -1193,6 +1406,21 @@ func demoDataStatements() []string {
 	}
 	for _, row := range tickets {
 		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_tickets (id, project_id, opened_by, priority, status, opened_on, closed_on) VALUES (%d, %d, %d, %s, %s, %s, %s)", row.id, row.projectID, row.openedBy, demoSQLString(row.priority), demoSQLString(row.status), demoSQLString(row.openedOn), demoSQLString(row.closedOn)))
+	}
+	for _, row := range customers {
+		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_customers (id, name, segment, country, signup_date) VALUES (%d, %s, %s, %s, %s)", row.id, demoSQLString(row.name), demoSQLString(row.segment), demoSQLString(row.country), demoSQLString(row.signupDate)))
+	}
+	for _, row := range products {
+		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_products (id, name, category, unit_price) VALUES (%d, %s, %s, %d)", row.id, demoSQLString(row.name), demoSQLString(row.category), row.unitPrice))
+	}
+	for _, row := range orders {
+		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_orders (id, customer_id, order_date, channel, status, total_amount) VALUES (%d, %d, %s, %s, %s, %d)", row.id, row.customerID, demoSQLString(row.orderDate), demoSQLString(row.channel), demoSQLString(row.status), row.totalAmount))
+	}
+	for _, row := range orderItems {
+		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_order_items (id, order_id, product_id, quantity, unit_price) VALUES (%d, %d, %d, %d, %d)", row.id, row.orderID, row.productID, row.quantity, row.unitPrice))
+	}
+	for _, row := range metrics {
+		statements = append(statements, fmt.Sprintf("INSERT INTO datadock_demo_metrics (id, metric_date, metric, value) VALUES (%d, %s, %s, %d)", row.id, demoSQLString(row.date), demoSQLString(row.metric), row.value))
 	}
 	return statements
 }
@@ -1320,12 +1548,32 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			LLMAPIKey      string `json:"llm_api_key"`
 			LLMModel       string `json:"llm_model"`
 			LLMTimeout     string `json:"llm_timeout"`
+			ReadOnlyMode   bool   `json:"read_only_mode"`
+			PageSize       int    `json:"page_size"`
+			DefaultTheme   string `json:"default_theme"`
+			DefaultDensity string `json:"default_density"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
 			return
 		}
-		settings, err := runtimeSettingsFromValues(body.Dialect, body.ConnectTimeout, body.QueryTimeout, body.LLMBaseURL, body.LLMAPIKey, body.LLMModel, body.LLMTimeout)
+		pageSize := ""
+		if body.PageSize > 0 {
+			pageSize = strconv.Itoa(body.PageSize)
+		}
+		settings, err := runtimeSettingsFromInput(runtimeSettingsInput{
+			Dialect:        body.Dialect,
+			ConnectTimeout: body.ConnectTimeout,
+			QueryTimeout:   body.QueryTimeout,
+			LLMBaseURL:     body.LLMBaseURL,
+			LLMAPIKey:      body.LLMAPIKey,
+			LLMModel:       body.LLMModel,
+			LLMTimeout:     body.LLMTimeout,
+			ReadOnlyMode:   body.ReadOnlyMode,
+			PageSize:       pageSize,
+			DefaultTheme:   body.DefaultTheme,
+			DefaultDensity: body.DefaultDensity,
+		})
 		if err == nil {
 			err = a.applyRuntimeSettings(settings)
 		}
@@ -1419,9 +1667,14 @@ func (a *App) adminStatus(ctx context.Context) map[string]any {
 		"backend_tables_memory": stats.TablesInMemory,
 		"backend_tables_disk":   stats.TablesOnDisk,
 		"memory_used_bytes":     stats.MemoryUsedBytes,
+		"memory_used_human":     formatByteSize(stats.MemoryUsedBytes),
 		"memory_limit_bytes":    stats.MemoryLimitBytes,
+		"memory_limit_human":    formatByteSize(stats.MemoryLimitBytes),
+		"memory_used_percent":   percentOf(stats.MemoryUsedBytes, stats.MemoryLimitBytes),
 		"disk_used_bytes":       stats.DiskUsedBytes,
+		"disk_used_human":       formatByteSize(stats.DiskUsedBytes),
 		"cache_hit_rate":        stats.CacheHitRate,
+		"cache_hit_percent":     int(stats.CacheHitRate * 100),
 		"sync_count":            stats.SyncCount,
 		"load_count":            stats.LoadCount,
 		"eviction_count":        stats.EvictionCount,
@@ -1451,6 +1704,50 @@ func (a *App) adminStatus(ctx context.Context) map[string]any {
 		}
 	}
 	return status
+}
+
+// formatByteSize renders a byte count as a short human-readable string.
+func formatByteSize(n int64) string {
+	if n <= 0 {
+		return "0 B"
+	}
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// percentOf returns used/limit as an integer percentage in [0, 100], or 0
+// when limit is not set (unlimited/unknown).
+func percentOf(used, limit int64) int {
+	if limit <= 0 {
+		return 0
+	}
+	pct := int(used * 100 / limit)
+	if pct < 0 {
+		return 0
+	}
+	if pct > 100 {
+		return 100
+	}
+	return pct
+}
+
+// formatStatusJSON renders the admin status map as real, human-readable JSON.
+// (Previously the Admin page printed the map with Go's "%#v" verb, which
+// emits Go composite-literal syntax rather than JSON.)
+func formatStatusJSON(status map[string]any) string {
+	b, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("%v", status)
+	}
+	return string(b)
 }
 
 func (a *App) apiJobsHandler(w http.ResponseWriter, r *http.Request) {
@@ -1869,39 +2166,72 @@ func boolDefault(v *bool, fallback bool) bool {
 	return *v
 }
 
-func runtimeSettingsFromForm(r *http.Request) (RuntimeSettings, error) {
-	return runtimeSettingsFromValues(
-		r.Form.Get("dialect"),
-		r.Form.Get("connect_timeout"),
-		r.Form.Get("query_timeout"),
-		r.Form.Get("llm_base_url"),
-		r.Form.Get("llm_api_key"),
-		r.Form.Get("llm_model"),
-		r.Form.Get("llm_timeout"),
-	)
+// runtimeSettingsInput carries the raw string/bool values collected from
+// either the Admin HTML form or the JSON admin settings API, so both paths
+// share one parsing/validation implementation.
+type runtimeSettingsInput struct {
+	Dialect        string
+	ConnectTimeout string
+	QueryTimeout   string
+	LLMBaseURL     string
+	LLMAPIKey      string
+	LLMModel       string
+	LLMTimeout     string
+	ReadOnlyMode   bool
+	PageSize       string
+	DefaultTheme   string
+	DefaultDensity string
 }
 
-func runtimeSettingsFromValues(dialect, connectTimeout, queryTimeout, llmBaseURL, llmAPIKey, llmModel, llmTimeout string) (RuntimeSettings, error) {
-	connect, err := parseOptionalDuration(connectTimeout, 10*time.Second, "connect_timeout")
+func runtimeSettingsFromForm(r *http.Request) (RuntimeSettings, error) {
+	return runtimeSettingsFromInput(runtimeSettingsInput{
+		Dialect:        r.Form.Get("dialect"),
+		ConnectTimeout: r.Form.Get("connect_timeout"),
+		QueryTimeout:   r.Form.Get("query_timeout"),
+		LLMBaseURL:     r.Form.Get("llm_base_url"),
+		LLMAPIKey:      r.Form.Get("llm_api_key"),
+		LLMModel:       r.Form.Get("llm_model"),
+		LLMTimeout:     r.Form.Get("llm_timeout"),
+		ReadOnlyMode:   r.Form.Get("read_only_mode") != "",
+		PageSize:       r.Form.Get("page_size"),
+		DefaultTheme:   r.Form.Get("default_theme"),
+		DefaultDensity: r.Form.Get("default_density"),
+	})
+}
+
+func runtimeSettingsFromInput(in runtimeSettingsInput) (RuntimeSettings, error) {
+	connect, err := parseOptionalDuration(in.ConnectTimeout, 10*time.Second, "connect_timeout")
 	if err != nil {
 		return RuntimeSettings{}, err
 	}
-	query, err := parseOptionalDuration(queryTimeout, 60*time.Second, "query_timeout")
+	query, err := parseOptionalDuration(in.QueryTimeout, 60*time.Second, "query_timeout")
 	if err != nil {
 		return RuntimeSettings{}, err
 	}
-	llm, err := parseOptionalDuration(llmTimeout, 45*time.Second, "llm_timeout")
+	llm, err := parseOptionalDuration(in.LLMTimeout, 45*time.Second, "llm_timeout")
 	if err != nil {
 		return RuntimeSettings{}, err
+	}
+	pageSize := 0
+	if raw := strings.TrimSpace(in.PageSize); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			return RuntimeSettings{}, fmt.Errorf("page_size must be a positive integer")
+		}
+		pageSize = n
 	}
 	return RuntimeSettings{
-		Dialect:        dialect,
+		Dialect:        in.Dialect,
 		ConnectTimeout: connect,
 		QueryTimeout:   query,
-		LLMBaseURL:     llmBaseURL,
-		LLMAPIKey:      llmAPIKey,
-		LLMModel:       llmModel,
+		LLMBaseURL:     in.LLMBaseURL,
+		LLMAPIKey:      in.LLMAPIKey,
+		LLMModel:       in.LLMModel,
 		LLMTimeout:     llm,
+		ReadOnlyMode:   in.ReadOnlyMode,
+		PageSize:       pageSize,
+		DefaultTheme:   in.DefaultTheme,
+		DefaultDensity: in.DefaultDensity,
 	}, nil
 }
 

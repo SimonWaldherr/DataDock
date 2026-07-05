@@ -1,5 +1,5 @@
 {{define "query"}}
-{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection)}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection "DefaultTheme" .DefaultTheme "DefaultDensity" .DefaultDensity "MaintenanceMode" .MaintenanceMode)}}
 
 <div class="page-hdr">
   <h1><i class="bi bi-terminal text-primary"></i>SQL Editor</h1>
@@ -28,6 +28,12 @@
         <button id="llmHealthBtn" class="btn btn-outline-secondary btn-sm" onclick="testLLMHealth()">
           <i class="bi bi-wifi me-1"></i>Test LLM
         </button>
+        <div class="dropdown">
+          <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+            <i class="bi bi-lightbulb me-1"></i>Example Prompts
+          </button>
+          <ul id="samplePromptMenu" class="dropdown-menu"></ul>
+        </div>
         <span id="llmStatus" class="small text-muted ms-1"></span>
       </div>
       <div id="llmAnswer" class="small"></div>
@@ -48,6 +54,12 @@
       <button class="btn btn-outline-secondary btn-sm" onclick="clearEditor()">
         <i class="bi bi-x-lg me-1"></i>Clear
       </button>
+      <div class="dropdown">
+        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+          <i class="bi bi-collection-play me-1"></i>Example Queries
+        </button>
+        <ul id="sampleQueryMenu" class="dropdown-menu"></ul>
+      </div>
       <button class="btn btn-outline-secondary btn-sm" onclick="shareQuery()">
         <i class="bi bi-link-45deg me-1"></i>Share
       </button>
@@ -142,6 +154,46 @@ var maxLocalQueryHistory = 20;
 var sqlEditor = null;
 var monacoBaseURL = 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.40.0/min';
 
+// Ready-to-run examples against the built-in demo dataset, so the editor and
+// the LLM assistant can be tried out immediately without inventing a query or
+// prompt, and without manually preparing any data first: sample queries load
+// the demo dataset automatically (once) if it isn't present yet.
+var sampleQueries = [
+  { label: 'Top customers by revenue', sql:
+    'SELECT c.name, SUM(o.total_amount) AS revenue\n' +
+    'FROM datadock_demo_customers c\n' +
+    'JOIN datadock_demo_orders o ON o.customer_id = c.id\n' +
+    'GROUP BY c.name\n' +
+    'ORDER BY revenue DESC' },
+  { label: 'Orders by status', sql:
+    'SELECT status, COUNT(*) AS order_count, SUM(total_amount) AS total_revenue\n' +
+    'FROM datadock_demo_orders\n' +
+    'GROUP BY status' },
+  { label: 'Daily revenue trend (30 days)', sql:
+    "SELECT metric_date, value\nFROM datadock_demo_metrics\nWHERE metric = 'daily_revenue'\nORDER BY metric_date" },
+  { label: 'Best-selling products', sql:
+    'SELECT p.name, SUM(oi.quantity) AS units_sold, SUM(oi.quantity * oi.unit_price) AS revenue\n' +
+    'FROM datadock_demo_order_items oi\n' +
+    'JOIN datadock_demo_products p ON p.id = oi.product_id\n' +
+    'GROUP BY p.name\n' +
+    'ORDER BY revenue DESC' },
+  { label: 'Open tickets by priority', sql:
+    "SELECT priority, COUNT(*) AS open_tickets\nFROM datadock_demo_tickets\nWHERE status <> 'closed'\nGROUP BY priority\nORDER BY open_tickets DESC" },
+  { label: 'Department budgets', sql:
+    'SELECT name, region, annual_budget\nFROM datadock_demo_departments\nORDER BY annual_budget DESC' },
+  { label: 'Project status overview', sql:
+    'SELECT status, COUNT(*) AS projects, SUM(budget) AS total_budget\nFROM datadock_demo_projects\nGROUP BY status' }
+];
+
+var samplePrompts = [
+  'Which customers generated the most revenue?',
+  'Show the daily revenue trend for the last 30 days',
+  'What are the best-selling products?',
+  'List all open support tickets sorted by priority',
+  'Which projects are blocked or over budget?',
+  'Summarize orders by sales channel'
+];
+
 // Hide the noscript form when JS is available.
 document.addEventListener('DOMContentLoaded', function () {
   var el = document.querySelector('noscript');
@@ -161,7 +213,94 @@ document.addEventListener('DOMContentLoaded', function () {
   });
   loadMonacoEditor();
   renderLocalQueryHistory();
+  renderSampleMenus();
 });
+
+function renderSampleMenus() {
+  var queryMenu = document.getElementById('sampleQueryMenu');
+  if (queryMenu) {
+    sampleQueries.forEach(function (item, idx) {
+      var li = document.createElement('li');
+      var a = document.createElement('a');
+      a.className = 'dropdown-item';
+      a.href = '#';
+      a.textContent = item.label;
+      a.addEventListener('click', function (e) {
+        e.preventDefault();
+        runSampleQuery(idx);
+      });
+      li.appendChild(a);
+      queryMenu.appendChild(li);
+    });
+  }
+
+  var promptMenu = document.getElementById('samplePromptMenu');
+  if (promptMenu) {
+    samplePrompts.forEach(function (prompt) {
+      var li = document.createElement('li');
+      var a = document.createElement('a');
+      a.className = 'dropdown-item';
+      a.href = '#';
+      a.textContent = prompt;
+      a.addEventListener('click', function (e) {
+        e.preventDefault();
+        document.getElementById('llmPrompt').value = prompt;
+        document.getElementById('llmPrompt').focus();
+      });
+      li.appendChild(a);
+      promptMenu.appendChild(li);
+    });
+  }
+}
+
+// runSampleQuery loads an example query into the editor and runs it. If the
+// demo tables it depends on don't exist yet, the demo dataset is imported
+// automatically once and the query is retried, so trying DataDock out never
+// requires any manual setup.
+function runSampleQuery(idx) {
+  var item = sampleQueries[idx];
+  if (!item) return;
+  setEditorValue(item.sql);
+  focusEditor();
+  runQueryWithDemoDataFallback(item.sql);
+}
+
+function runQueryWithDemoDataFallback(sql) {
+  var status = document.getElementById('statusMsg');
+  status.textContent = 'Running…';
+  fetch('/api/query', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sql: sql})
+  })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      if (data.error && isMissingObjectError(data.error)) {
+        status.textContent = 'Loading demo data…';
+        return fetch('/demo-data', {method: 'POST'})
+          .then(function () {
+            return fetch('/api/query', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({sql: sql})
+            }).then(function (r2) { return r2.json(); });
+          });
+      }
+      return data;
+    })
+    .then(renderResult)
+    .catch(function (err) { renderError(err.message || err.toString()); });
+}
+
+function isMissingObjectError(msg) {
+  msg = (msg || '').toLowerCase();
+  return msg.indexOf('not found') >= 0 ||
+    msg.indexOf('no such table') >= 0 ||
+    msg.indexOf("doesn't exist") >= 0 ||
+    msg.indexOf('does not exist') >= 0 ||
+    msg.indexOf('unknown table') >= 0 ||
+    msg.indexOf('invalid object name') >= 0;
+}
 
 function askLLM(action) {
   var prompt = document.getElementById('llmPrompt').value.trim();

@@ -4,7 +4,7 @@
 {{$values := .Values}}
 {{$isNew  := .IsNew}}
 {{$id     := .ID}}
-{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" $table "ActiveConnection" .ActiveConnection)}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" $table "ActiveConnection" .ActiveConnection "DefaultTheme" .DefaultTheme "DefaultDensity" .DefaultDensity "MaintenanceMode" .MaintenanceMode)}}
 
 <div class="page-hdr">
   <h1>

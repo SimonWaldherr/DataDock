@@ -5,7 +5,7 @@
 {{$dir   := .SortDir}}
 {{$page  := .Page}}
 {{$total := .TotalPages}}
-{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" $table "ActiveConnection" .ActiveConnection)}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" $table "ActiveConnection" .ActiveConnection "DefaultTheme" .DefaultTheme "DefaultDensity" .DefaultDensity "MaintenanceMode" .MaintenanceMode)}}
 
 <div class="page-hdr">
   <h1>{{if eq $meta.Kind "view"}}<i class="bi bi-eye text-primary"></i>{{else}}<i class="bi bi-table text-primary"></i>{{end}}{{$table}}

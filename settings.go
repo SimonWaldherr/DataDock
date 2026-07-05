@@ -5,12 +5,22 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const runtimeSettingsTable = "__datadock_settings"
 const managedConnectionsSettingKey = "managed_connections"
+
+const (
+	defaultPageSize  = 50
+	defaultUITheme   = "workbench"
+	defaultUIDensity = "comfortable"
+)
+
+var allowedUIThemes = []string{"workbench", "midnight", "forest", "contrast", "solaris", "xp", "classic2000", "kde"}
+var allowedUIDensities = []string{"comfortable", "compact"}
 
 type RuntimeSettings struct {
 	Dialect        string
@@ -20,6 +30,10 @@ type RuntimeSettings struct {
 	LLMAPIKey      string
 	LLMModel       string
 	LLMTimeout     time.Duration
+	ReadOnlyMode   bool
+	PageSize       int
+	DefaultTheme   string
+	DefaultDensity string
 }
 
 type RuntimeSettingsView struct {
@@ -32,6 +46,19 @@ type RuntimeSettingsView struct {
 	LLMConfigured    bool   `json:"llm_configured"`
 	LLMAPIKeySet     bool   `json:"llm_api_key_set"`
 	LLMAPIKeyDisplay string `json:"llm_api_key_display"`
+	ReadOnlyMode     bool   `json:"read_only_mode"`
+	PageSize         int    `json:"page_size"`
+	DefaultTheme     string `json:"default_theme"`
+	DefaultDensity   string `json:"default_density"`
+}
+
+func isAllowedValue(value string, allowed []string) bool {
+	for _, v := range allowed {
+		if v == value {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
@@ -57,6 +84,25 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 	if s.LLMTimeout == 0 {
 		s.LLMTimeout = 45 * time.Second
 	}
+	if s.PageSize < 0 {
+		return fmt.Errorf("page size must not be negative")
+	}
+	if s.PageSize == 0 {
+		s.PageSize = defaultPageSize
+	}
+	if s.PageSize > 1000 {
+		return fmt.Errorf("page size must not exceed 1000")
+	}
+	if strings.TrimSpace(s.DefaultTheme) == "" {
+		s.DefaultTheme = defaultUITheme
+	} else if !isAllowedValue(s.DefaultTheme, allowedUIThemes) {
+		return fmt.Errorf("unknown default theme %q", s.DefaultTheme)
+	}
+	if strings.TrimSpace(s.DefaultDensity) == "" {
+		s.DefaultDensity = defaultUIDensity
+	} else if !isAllowedValue(s.DefaultDensity, allowedUIDensities) {
+		return fmt.Errorf("unknown default density %q", s.DefaultDensity)
+	}
 
 	cfg := LLMConfig{
 		BaseURL: strings.TrimSpace(s.LLMBaseURL),
@@ -77,6 +123,10 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 	a.queryTimeout = s.QueryTimeout
 	a.llmConfig = cfg
 	a.llm = llm
+	a.readOnlyMode = s.ReadOnlyMode
+	a.pageSize = s.PageSize
+	a.defaultTheme = s.DefaultTheme
+	a.defaultDensity = s.DefaultDensity
 	return nil
 }
 
@@ -93,6 +143,10 @@ func (a *App) saveRuntimeSettings(ctx context.Context) error {
 		"llm_api_key":     s.LLMAPIKey,
 		"llm_model":       s.LLMModel,
 		"llm_timeout":     s.LLMTimeout.String(),
+		"read_only_mode":  strconv.FormatBool(s.ReadOnlyMode),
+		"page_size":       strconv.Itoa(s.PageSize),
+		"default_theme":   s.DefaultTheme,
+		"default_density": s.DefaultDensity,
 	}
 	for key, value := range values {
 		if err := a.saveSetting(ctx, key, value); err != nil {
@@ -242,6 +296,10 @@ func (a *App) currentRuntimeSettings() RuntimeSettings {
 		LLMAPIKey:      a.llmConfig.APIKey,
 		LLMModel:       a.llmConfig.Model,
 		LLMTimeout:     a.llmConfig.Timeout,
+		ReadOnlyMode:   a.readOnlyMode,
+		PageSize:       a.pageSize,
+		DefaultTheme:   a.defaultTheme,
+		DefaultDensity: a.defaultDensity,
 	}
 }
 
@@ -258,7 +316,44 @@ func (a *App) runtimeSettingsView() RuntimeSettingsView {
 		LLMConfigured:    a.llm != nil,
 		LLMAPIKeySet:     a.llmConfig.APIKey != "",
 		LLMAPIKeyDisplay: maskedSecret(a.llmConfig.APIKey),
+		ReadOnlyMode:     a.readOnlyMode,
+		PageSize:         a.pageSize,
+		DefaultTheme:     a.defaultTheme,
+		DefaultDensity:   a.defaultDensity,
 	}
+}
+
+func (a *App) currentReadOnlyMode() bool {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	return a.readOnlyMode
+}
+
+func (a *App) currentPageSize() int {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	if a.pageSize <= 0 {
+		return defaultPageSize
+	}
+	return a.pageSize
+}
+
+func (a *App) currentDefaultTheme() string {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	if a.defaultTheme == "" {
+		return defaultUITheme
+	}
+	return a.defaultTheme
+}
+
+func (a *App) currentDefaultDensity() string {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	if a.defaultDensity == "" {
+		return defaultUIDensity
+	}
+	return a.defaultDensity
 }
 
 func (a *App) llmClient() LLMClient {
@@ -304,6 +399,21 @@ func runtimeSettingsFromStoredValues(values map[string]string) (RuntimeSettings,
 	if err != nil {
 		return RuntimeSettings{}, fmt.Errorf("llm_timeout: %w", err)
 	}
+	pageSize := defaultPageSize
+	if raw := strings.TrimSpace(values["page_size"]); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			pageSize = n
+		}
+	}
+	readOnlyMode, _ := strconv.ParseBool(values["read_only_mode"])
+	defaultTheme := strings.TrimSpace(values["default_theme"])
+	if defaultTheme == "" {
+		defaultTheme = defaultUITheme
+	}
+	defaultDensity := strings.TrimSpace(values["default_density"])
+	if defaultDensity == "" {
+		defaultDensity = defaultUIDensity
+	}
 	return RuntimeSettings{
 		Dialect:        values["dialect"],
 		ConnectTimeout: connectTimeout,
@@ -312,6 +422,10 @@ func runtimeSettingsFromStoredValues(values map[string]string) (RuntimeSettings,
 		LLMAPIKey:      values["llm_api_key"],
 		LLMModel:       values["llm_model"],
 		LLMTimeout:     llmTimeout,
+		ReadOnlyMode:   readOnlyMode,
+		PageSize:       pageSize,
+		DefaultTheme:   defaultTheme,
+		DefaultDensity: defaultDensity,
 	}, nil
 }
 

@@ -21,6 +21,7 @@ administrator-managed shared connections or per-user credentials.
 | **Export** | Download whole tables/views or SQL query results as CSV, TSV, XLSX, JSON, or XML |
 | **Drop Table** | Delete any table with a one-click confirmation |
 | **SQL Editor** | Monaco-enhanced SQL editor with SQL syntax highlighting and textarea fallback; selected text can be executed with Run, export, Ctrl+Enter, or F5 |
+| **Example Queries & Prompts** | One-click sample SQL queries and natural-language prompts against the demo dataset, so the editor and LLM assistant can be tried immediately with zero setup; picking an example query auto-imports the demo dataset first if it isn't loaded yet |
 | **Local Query History** | Browser-local history for recently executed queries |
 | **Shareable Queries** | Copy a browser URL that restores the editor SQL from a compact hash |
 | **Quick Charts** | D3-powered first chart preview for numeric query results |
@@ -28,7 +29,9 @@ administrator-managed shared connections or per-user credentials.
 | **Session-scoped Active Connection** | Each browser session can use a different active connection |
 | **Table Migration** | Copy a table from one registered connection into another, with optional target table creation |
 | **LLM Assistant** | Optional OpenAI-compatible assistant for SQL generation, schema context preview, and natural-language explanations |
-| **Runtime Admin Settings** | Dialect, timeouts, and LLM provider settings can be changed from the Admin UI or API without YAML/JSON config files |
+| **Runtime Admin Settings** | Dialect, timeouts, LLM provider, page size, and default theme/density can be changed from the Admin UI or API without YAML/JSON config files |
+| **Maintenance Mode** | Admin toggle that blocks writes (record edits, DDL, imports, migrations, DML) server-wide while keeping read-only SQL available |
+| **Demo Dataset** | One-click demo data (departments/people/projects plus a small sales funnel and a 30-day metrics time series) with a sample scheduled job, and a one-click removal |
 | **File Persistence** | Optionally read/write a `.gob` file on disk |
 
 ## Current Scope
@@ -108,6 +111,19 @@ same settings are available for automation through:
 | `/api/admin/settings` | `GET` | Return the current runtime settings as JSON, with secrets masked |
 | `/api/admin/settings` | `POST` | Apply runtime settings from JSON |
 
+In addition to dialect/timeouts/LLM provider settings, Admin also controls:
+
+| Setting | Description |
+|---|---|
+| `page_size` | Rows per page in the datasheet view (default `50`, max `1000`) |
+| `default_theme` | Fallback UI theme for browsers without a saved preference (`workbench`, `midnight`, `forest`, `contrast`, `solaris`, `xp`, `classic2000`, `kde`) |
+| `default_density` | Fallback table density for browsers without a saved preference (`comfortable`, `compact`) |
+| `read_only_mode` | Maintenance mode: blocks record edits, table/DDL changes, imports, migrations, and non-`SELECT` SQL editor statements for every user until turned off |
+
+The Admin page also has a **Demo Data** section to load or remove the built-in
+demo dataset (`POST /demo-data`, `POST /demo-data/remove`) without needing an
+empty database.
+
 Example API update:
 
 ```bash
@@ -119,7 +135,11 @@ curl -X POST http://localhost:8080/api/admin/settings \
     "query_timeout": "90s",
     "llm_base_url": "",
     "llm_model": "",
-    "llm_timeout": "45s"
+    "llm_timeout": "45s",
+    "page_size": 50,
+    "default_theme": "workbench",
+    "default_density": "comfortable",
+    "read_only_mode": false
   }'
 ```
 
@@ -312,7 +332,15 @@ cmd/datadock/
 | `POST` | `/migrate` | Run table migration |
 | `GET` | `/create-table` | Table designer |
 | `POST` | `/create-table` | Create table |
+| `POST` | `/demo-data` | Load (or reset) the built-in demo dataset plus a sample scheduled job |
+| `POST` | `/demo-data/remove` | Drop every demo table and the sample demo job |
 | `GET/POST` | `/static/*` | Static assets |
+
+Every mutating route above (except `/connections`, `/connections/active`, and
+`/admin/settings`) is blocked while **maintenance mode** is enabled in Admin,
+returning `503 Service Unavailable`. `/query` and `/api/query` stay open for
+read-only statements (`SELECT`, `WITH`, `SHOW`, `EXPLAIN`) even in maintenance
+mode.
 
 ### JSON API
 

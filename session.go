@@ -37,6 +37,33 @@ func (a *App) withSession(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// requireWritable blocks a mutating handler while the admin has enabled
+// maintenance (read-only) mode, returning a clear error instead of silently
+// letting writes through or silently discarding them.
+func (a *App) requireWritable(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if a.currentReadOnlyMode() {
+			a.writeMaintenanceBlocked(w, r)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (a *App) writeMaintenanceBlocked(w http.ResponseWriter, r *http.Request) {
+	const detail = "DataDock is in read-only maintenance mode. Write operations are disabled by an administrator until maintenance mode is turned off in Admin settings."
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		a.writeProblem(w, r, http.StatusServiceUnavailable, "Maintenance mode", detail)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><title>Maintenance mode</title>` +
+		`<body style="font-family:system-ui,sans-serif;padding:3rem 1.5rem;max-width:640px;margin:0 auto;color:#111827">` +
+		`<h1 style="font-size:1.3rem">Maintenance mode</h1><p>` + detail + `</p>` +
+		`<p><a href="/admin">Go to Admin settings</a> &middot; <a href="javascript:history.back()">Go back</a></p></body>`))
+}
+
 func sessionIDFromRequest(r *http.Request) string {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil {

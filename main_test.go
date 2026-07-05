@@ -136,6 +136,11 @@ func TestDemoDataCreatesAllDemoTables(t *testing.T) {
 		"datadock_demo_events":      20,
 		"datadock_demo_invoices":    11,
 		"datadock_demo_tickets":     13,
+		"datadock_demo_customers":   10,
+		"datadock_demo_products":    10,
+		"datadock_demo_orders":      20,
+		"datadock_demo_order_items": 26,
+		"datadock_demo_metrics":     60,
 	}
 	for table, minRows := range expectedTables {
 		req := httptest.NewRequest(http.MethodGet, "/t/"+table, nil)
@@ -162,6 +167,93 @@ GROUP BY project_id`)
 	}
 	if len(rows) < 8 {
 		t.Fatalf("expected aggregate rows for demo projects, got %d", len(rows))
+	}
+
+	if _, err := app.nativeDB.Catalog().GetJob(demoJobName); err != nil {
+		t.Fatalf("expected seeded demo job %q, got error: %v", demoJobName, err)
+	}
+}
+
+func TestDemoDataRemoveDropsTablesAndJob(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/demo-data", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("demo import: expected 303, got %d: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/demo-data/remove", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("demo remove: expected 303, got %d: %s", w.Code, w.Body.String())
+	}
+
+	for _, table := range app.tableNames(context.Background()) {
+		if strings.HasPrefix(table, "datadock_demo_") {
+			t.Fatalf("expected no demo tables left, found %s", table)
+		}
+	}
+	if _, err := app.nativeDB.Catalog().GetJob(demoJobName); err == nil {
+		t.Fatalf("expected demo job %q to be removed", demoJobName)
+	}
+}
+
+func TestMaintenanceModeBlocksWrites(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	if _, err := app.sqlDB.Exec("CREATE TABLE people (id INT, name TEXT)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	if err := app.applyRuntimeSettings(RuntimeSettings{Dialect: "tinysql", ReadOnlyMode: true}); err != nil {
+		t.Fatalf("enable maintenance mode: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("name", "Blocked")
+	req := httptest.NewRequest(http.MethodPost, "/t/people/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected record creation to be blocked with 503, got %d: %s", w.Code, w.Body.String())
+	}
+
+	insertBody := `{"sql":"INSERT INTO people (id, name) VALUES (1, 'Blocked')"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(insertBody))
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected /api/query 200 with an error payload, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "maintenance mode") {
+		t.Fatalf("expected maintenance-mode error in query result, got: %s", w.Body.String())
+	}
+
+	selectBody := `{"sql":"SELECT * FROM people"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(selectBody))
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), `"error"`) {
+		t.Fatalf("expected read-only SELECT to succeed during maintenance mode, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if err := app.applyRuntimeSettings(RuntimeSettings{Dialect: "tinysql", ReadOnlyMode: false}); err != nil {
+		t.Fatalf("disable maintenance mode: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/t/people/new", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected record creation to succeed after disabling maintenance mode, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

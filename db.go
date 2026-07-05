@@ -30,6 +30,10 @@ type App struct {
 	conns          *ConnectionManager
 	connectTimeout time.Duration
 	queryTimeout   time.Duration
+	readOnlyMode   bool
+	pageSize       int
+	defaultTheme   string
+	defaultDensity string
 }
 
 // Column describes a single column returned by a query.
@@ -283,9 +287,6 @@ func (a *App) queryBackedMeta(ctx context.Context, name, kind string) (TableMeta
 	return meta, nil
 }
 
-// pageSize is the number of rows shown per page in the datasheet view.
-const pageSize = 50
-
 // tableRows returns a page of rows from a table.
 func (a *App) tableRows(ctx context.Context, name string, page int) ([]Column, [][]string, error) {
 	ctx, cancel := a.withQueryTimeout(ctx)
@@ -293,6 +294,7 @@ func (a *App) tableRows(ctx context.Context, name string, page int) ([]Column, [
 	if page < 1 {
 		page = 1
 	}
+	pageSize := a.currentPageSize()
 	offset := (page - 1) * pageSize
 
 	conn := a.activeConn(ctx)
@@ -460,6 +462,12 @@ func (a *App) executeSQL(ctx context.Context, query string) QueryResult { //noli
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
 	result := QueryResult{}
+
+	if !isResultQuerySQL(query) && a.currentReadOnlyMode() {
+		result.Err = "maintenance mode is active: only SELECT/WITH/SHOW/EXPLAIN queries are allowed"
+		result.Elapsed = time.Since(start)
+		return result
+	}
 
 	if isResultQuerySQL(query) {
 		cols, rows, err := a.queryRows(ctx, query)

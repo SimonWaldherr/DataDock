@@ -1,14 +1,72 @@
 {{define "admin"}}
-{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection)}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection "DefaultTheme" .DefaultTheme "DefaultDensity" .DefaultDensity "MaintenanceMode" .MaintenanceMode)}}
 
 <div class="page-hdr">
   <h1><i class="bi bi-speedometer2 text-primary"></i>Admin</h1>
+  <span class="badge {{if index .Status "ok"}}text-bg-success{{else}}text-bg-danger{{end}}">
+    <i class="bi bi-{{if index .Status "ok"}}check-circle{{else}}exclamation-triangle{{end}} me-1"></i>{{if index .Status "ok"}}Healthy{{else}}Error{{end}}
+  </span>
 </div>
 
 {{template "alert" .}}
 
 <div class="card">
   <div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-3">
+        <div class="metric">
+          <div class="small text-muted">Storage</div>
+          <div class="fs-5 fw-semibold">{{index .Status "storage_mode"}}</div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="metric">
+          <div class="small text-muted">Tables</div>
+          <div class="fs-5 fw-semibold">{{index .Status "tables"}}</div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="metric">
+          <div class="small text-muted">Scheduler</div>
+          <div class="fs-5 fw-semibold">{{if index .Status "scheduler_running"}}Running{{else}}Stopped{{end}}</div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="metric">
+          <div class="small text-muted">Managed Connections</div>
+          <div class="fs-5 fw-semibold">{{index .Status "managed_connections"}}</div>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="metric">
+          <div class="small text-muted d-flex justify-content-between">
+            <span>Memory</span>
+            <span>{{index .Status "memory_used_human"}} / {{index .Status "memory_limit_human"}}</span>
+          </div>
+          <div class="progress mt-2" style="height:6px">
+            <div class="progress-bar" role="progressbar" style="width:{{index .Status "memory_used_percent"}}%"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="metric">
+          <div class="small text-muted">Disk Used</div>
+          <div class="fs-5 fw-semibold">{{index .Status "disk_used_human"}}</div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="metric">
+          <div class="small text-muted">Cache Hit Rate</div>
+          <div class="fs-5 fw-semibold">{{index .Status "cache_hit_percent"}}%</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6 mb-3">Connection &amp; Workbench</h2>
     <form method="post" action="/admin/settings" class="row g-3">
       <div class="col-md-3">
         <label class="form-label small text-muted">Dialect</label>
@@ -23,9 +81,41 @@
         <input class="form-control form-control-sm" name="query_timeout" value="{{.Settings.QueryTimeout}}" placeholder="60s">
       </div>
       <div class="col-md-3">
-        <label class="form-label small text-muted">LLM Timeout</label>
-        <input class="form-control form-control-sm" name="llm_timeout" value="{{.Settings.LLMTimeout}}" placeholder="45s">
+        <label class="form-label small text-muted">Datasheet Page Size</label>
+        <input class="form-control form-control-sm" type="number" min="1" max="1000" name="page_size" value="{{.Settings.PageSize}}" placeholder="50">
       </div>
+      <div class="col-md-3">
+        <label class="form-label small text-muted">Default Theme</label>
+        <select class="form-select form-select-sm" name="default_theme">
+          <option value="workbench" {{if eq .Settings.DefaultTheme "workbench"}}selected{{end}}>Workbench</option>
+          <option value="midnight" {{if eq .Settings.DefaultTheme "midnight"}}selected{{end}}>Midnight</option>
+          <option value="forest" {{if eq .Settings.DefaultTheme "forest"}}selected{{end}}>Forest</option>
+          <option value="contrast" {{if eq .Settings.DefaultTheme "contrast"}}selected{{end}}>Contrast</option>
+          <option value="solaris" {{if eq .Settings.DefaultTheme "solaris"}}selected{{end}}>Solaris CDE</option>
+          <option value="xp" {{if eq .Settings.DefaultTheme "xp"}}selected{{end}}>Luna XP</option>
+          <option value="classic2000" {{if eq .Settings.DefaultTheme "classic2000"}}selected{{end}}>Classic 2000</option>
+          <option value="kde" {{if eq .Settings.DefaultTheme "kde"}}selected{{end}}>KDE</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small text-muted">Default Density</label>
+        <select class="form-select form-select-sm" name="default_density">
+          <option value="comfortable" {{if eq .Settings.DefaultDensity "comfortable"}}selected{{end}}>Comfort</option>
+          <option value="compact" {{if eq .Settings.DefaultDensity "compact"}}selected{{end}}>Compact</option>
+        </select>
+      </div>
+      <div class="col-md-3 d-flex align-items-end">
+        <div class="form-check form-switch">
+          <input class="form-check-input" type="checkbox" role="switch" id="readOnlyMode" name="read_only_mode" {{if .Settings.ReadOnlyMode}}checked{{end}}>
+          <label class="form-check-label small" for="readOnlyMode">Maintenance mode (read-only)</label>
+        </div>
+      </div>
+      <div class="col-12 small text-muted">
+        Default theme/density apply to browsers without a saved preference. Maintenance mode blocks record edits, table/DDL changes, imports, migrations, and DML from the SQL editor for every user until turned off here.
+      </div>
+
+      <div class="col-12"><hr class="my-1"></div>
+
       <div class="col-md-5">
         <label class="form-label small text-muted">OpenAI-compatible Base URL</label>
         <input class="form-control form-control-sm" name="llm_base_url" value="{{.Settings.LLMBaseURL}}" placeholder="http://127.0.0.1:1234/v1">
@@ -38,8 +128,9 @@
         <label class="form-label small text-muted">API Key</label>
         <input class="form-control form-control-sm" name="llm_api_key" type="password" placeholder="{{if .Settings.LLMAPIKeySet}}{{.Settings.LLMAPIKeyDisplay}}{{else}}optional{{end}}">
       </div>
-      <div class="col-md-1 d-flex align-items-end">
-        <button class="btn btn-primary btn-sm w-100" type="submit">Save</button>
+      <div class="col-md-3">
+        <label class="form-label small text-muted">LLM Timeout</label>
+        <input class="form-control form-control-sm" name="llm_timeout" value="{{.Settings.LLMTimeout}}" placeholder="45s">
       </div>
       <div class="col-12 small text-muted">
         LLM is {{if .Settings.LLMConfigured}}configured{{else}}disabled{{end}}. Leave Base URL or Model empty to run without any LLM server.
@@ -81,37 +172,28 @@
           </div>
         </div>
       </div>
+      <div class="col-12">
+        <button class="btn btn-primary btn-sm" type="submit">Save Settings</button>
+      </div>
     </form>
   </div>
 </div>
 
 <div class="card">
   <div class="card-body">
-    <div class="row g-3">
-      <div class="col-md-3">
-        <div class="metric">
-          <div class="small text-muted">Health</div>
-          <div class="fs-5 fw-semibold">{{if index .Status "ok"}}OK{{else}}Error{{end}}</div>
-        </div>
-      </div>
-      <div class="col-md-3">
-        <div class="metric">
-          <div class="small text-muted">Storage</div>
-          <div class="fs-5 fw-semibold">{{index .Status "storage_mode"}}</div>
-        </div>
-      </div>
-      <div class="col-md-3">
-        <div class="metric">
-          <div class="small text-muted">Tables</div>
-          <div class="fs-5 fw-semibold">{{index .Status "tables"}}</div>
-        </div>
-      </div>
-      <div class="col-md-3">
-        <div class="metric">
-          <div class="small text-muted">Scheduler</div>
-          <div class="fs-5 fw-semibold">{{if index .Status "scheduler_running"}}Running{{else}}Stopped{{end}}</div>
-        </div>
-      </div>
+    <h2 class="h6 mb-1">Demo Data</h2>
+    <p class="small text-muted mb-3">Load a ready-made demo dataset (departments, people, projects, a small sales funnel, and a 30-day metrics time series) to explore DataDock, or remove it again to reset. A sample scheduled job is registered alongside the demo data.</p>
+    <div class="toolbar">
+      <form method="post" action="/demo-data" class="d-inline">
+        <button class="btn btn-outline-primary btn-sm" type="submit">
+          <i class="bi bi-database-add me-1"></i>Load / Reset Demo Data
+        </button>
+      </form>
+      <form method="post" action="/demo-data/remove" class="d-inline" onsubmit="return confirm('Remove all datadock_demo_* tables and the demo job?');">
+        <button class="btn btn-outline-danger btn-sm" type="submit">
+          <i class="bi bi-trash3 me-1"></i>Remove Demo Data
+        </button>
+      </form>
     </div>
   </div>
 </div>
@@ -122,7 +204,7 @@
       <h2 class="h6 mb-0">Status JSON</h2>
       <button class="btn btn-outline-secondary btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('adminStatus').innerText)">Copy</button>
     </div>
-    <pre id="adminStatus" class="small mb-0" style="max-height:520px;overflow:auto">{{printf "%#v" .Status}}</pre>
+    <pre id="adminStatus" class="small mb-0" style="max-height:520px;overflow:auto">{{.StatusJSON}}</pre>
   </div>
 </div>
 
