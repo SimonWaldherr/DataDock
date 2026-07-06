@@ -121,11 +121,12 @@ name is derived from the filename and refreshed on update.
 
 ## Admin Settings
 
-Open **Admin** to edit runtime settings without touching any config file. Admin
-pages and Admin APIs are protected by HTTP Basic Auth when DataDock is started
-normally. Set `DATADOCK_ADMIN_PASSWORD` or `-admin-password` for a stable
-password; if omitted, DataDock generates a temporary password at startup and
-prints it to the server log.
+Open **Admin** to edit runtime settings without touching any config file. Admin,
+connection management, job management, demo-data admin actions, and Admin APIs
+are protected by HTTP Basic Auth when DataDock is started normally. Set
+`DATADOCK_ADMIN_PASSWORD` or `-admin-password` for a stable password; if omitted,
+DataDock generates a temporary password at startup and prints it to the server
+log. Passwords are hashed in process memory before request checks.
 
 The same settings are available for automation through:
 
@@ -352,16 +353,23 @@ cmd/datadock/
 | `POST` | `/api/query` | Execute SQL (JSON API) |
 | `POST` | `/api/export` | Download SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, XML, or GeoJSON |
 | `GET` | `/api/schema` | Return the compact active-connection schema snapshot used for LLM context |
-| `GET` | `/api/llm/health` | Test server-side connectivity to the configured LLM provider |
-| `GET` | `/connections` | Connection manager |
-| `POST` | `/connections` | Add a managed connection |
-| `POST` | `/connections/active` | Switch active connection |
+| `GET` | `/api/llm/health` | Test server-side connectivity to the configured LLM provider (Admin Basic Auth) |
+| `GET` | `/connections` | Connection manager (Admin Basic Auth) |
+| `POST` | `/connections` | Add a managed connection (Admin Basic Auth) |
+| `POST` | `/connections/active` | Switch active connection (Admin Basic Auth) |
+| `GET` | `/admin` | Admin status and runtime settings (Admin Basic Auth) |
+| `POST` | `/admin/settings` | Apply runtime settings from the Admin UI (Admin Basic Auth) |
+| `GET` | `/api/admin/status` | Admin status JSON (Admin Basic Auth) |
+| `GET/POST` | `/api/admin/settings` | Read or apply runtime settings as JSON (Admin Basic Auth) |
+| `GET` | `/jobs` | Job overview (Admin Basic Auth) |
+| `GET/POST` | `/api/jobs` | List or create jobs (Admin Basic Auth) |
+| `POST` | `/api/jobs/run` | Run a registered job manually (Admin Basic Auth) |
 | `GET` | `/migrate` | Table migration wizard |
 | `POST` | `/migrate` | Run table migration |
 | `GET` | `/create-table` | Table designer |
 | `POST` | `/create-table` | Create table |
-| `POST` | `/demo-data` | Load (or reset) the built-in demo dataset plus a sample scheduled job |
-| `POST` | `/demo-data/remove` | Drop every demo table and the sample demo job |
+| `POST` | `/demo-data` | Load (or reset) the built-in demo dataset plus a sample scheduled job (Admin Basic Auth) |
+| `POST` | `/demo-data/remove` | Drop every demo table and the sample demo job (Admin Basic Auth) |
 | `GET/POST` | `/static/*` | Static assets |
 
 Every mutating route above (except `/connections`, `/connections/active`, and

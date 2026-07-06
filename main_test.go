@@ -682,17 +682,43 @@ func TestAdminAndJobsPagesRender(t *testing.T) {
 func TestAdminRoutesRequireBasicAuth(t *testing.T) {
 	app := newTestApp(t)
 	app.setAdminAuth(AdminAuthConfig{Username: "root", Password: "secret"})
+	if app.adminAuth.Password != "" {
+		t.Fatal("admin password should not be retained in plaintext")
+	}
 	mux := http.NewServeMux()
 	app.registerRoutes(mux)
 
+	protected := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/admin"},
+		{http.MethodGet, "/connections"},
+		{http.MethodGet, "/jobs"},
+		{http.MethodGet, "/api/admin/status"},
+		{http.MethodGet, "/api/jobs"},
+	}
+	for _, tc := range protected {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s: expected unauthenticated request to return 401, got %d", tc.method, tc.path, rec.Code)
+		}
+		if got := rec.Header().Get("WWW-Authenticate"); !strings.Contains(got, "Basic") {
+			t.Fatalf("%s %s: expected Basic challenge, got %q", tc.method, tc.path, got)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("%s %s: expected no-store challenge, got %q", tc.method, tc.path, got)
+		}
+	}
+
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req.SetBasicAuth("root", "wrong")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected unauthenticated admin request to return 401, got %d", rec.Code)
-	}
-	if got := rec.Header().Get("WWW-Authenticate"); !strings.Contains(got, "Basic") {
-		t.Fatalf("expected Basic challenge, got %q", got)
+		t.Fatalf("expected invalid admin credentials to return 401, got %d", rec.Code)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/admin", nil)
@@ -701,13 +727,6 @@ func TestAdminRoutesRequireBasicAuth(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected authenticated admin request to return 200, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-
-	apiReq := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
-	apiRec := httptest.NewRecorder()
-	mux.ServeHTTP(apiRec, apiReq)
-	if apiRec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected unauthenticated admin API request to return 401, got %d", apiRec.Code)
 	}
 }
 
