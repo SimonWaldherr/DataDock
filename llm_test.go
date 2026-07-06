@@ -161,7 +161,7 @@ func TestAPILLMGenerateSQLCanRequestAdditionalContext(t *testing.T) {
 		t.Fatalf("create invoices: %v", err)
 	}
 	fake := &fakeLLMClient{texts: []string{
-		`{"action":"context","kind":"schema","tables":["invoices"],"explanation":"Need invoice columns."}`,
+		`{"action":"tool_call","tool":"datadock.schema.search","arguments":{"query":"invoice status amount","tables":["invoices"]},"explanation":"Need invoice columns."}`,
 		`{"action":"sql","sql":"SELECT status, SUM(amount) AS total_amount FROM invoices GROUP BY status","explanation":"Summarizes invoices by status."}`,
 	}}
 	app.llm = fake
@@ -178,8 +178,8 @@ func TestAPILLMGenerateSQLCanRequestAdditionalContext(t *testing.T) {
 	if len(fake.lastReqs) != 2 {
 		t.Fatalf("expected two LLM calls, got %d", len(fake.lastReqs))
 	}
-	if !strings.Contains(fake.lastReqs[1].Schema, "Additional requested RAG context") || !strings.Contains(fake.lastReqs[1].Schema, `"invoices"`) {
-		t.Fatalf("expected requested context in second call, got %s", fake.lastReqs[1].Schema)
+	if !strings.Contains(fake.lastReqs[1].Schema, "MCP tool result") || !strings.Contains(fake.lastReqs[1].Schema, `"tool":"datadock.schema.search"`) || !strings.Contains(fake.lastReqs[1].Schema, `"invoices"`) {
+		t.Fatalf("expected MCP tool result in second call, got %s", fake.lastReqs[1].Schema)
 	}
 	if !strings.Contains(w.Body.String(), "SUM(amount)") {
 		t.Fatalf("expected generated SQL response, got %s", w.Body.String())

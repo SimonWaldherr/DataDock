@@ -2796,7 +2796,7 @@ func (a *App) apiLLMHandler(w http.ResponseWriter, r *http.Request) {
 	var out string
 	var err error
 	if action == llmActionGenerateSQL {
-		out, err = a.completeSQLWithContextRequests(r.Context(), llm, req)
+		out, err = a.completeSQLWithToolCalls(r.Context(), llm, req)
 	} else {
 		out, err = llm.Complete(r.Context(), req)
 	}

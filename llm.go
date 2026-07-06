@@ -28,6 +28,7 @@ const (
 	maxRAGTables            = 8
 	maxLLMTopValues         = 8
 	maxLLMContextRequests   = 2
+	llmToolSchemaSearch     = "datadock.schema.search"
 )
 
 type LLMResultContext = resultutil.Summary
@@ -56,12 +57,19 @@ type LLMRequest struct {
 }
 
 type LLMSQLResponse struct {
-	Action      string   `json:"action"`
-	SQL         string   `json:"sql,omitempty"`
-	Explanation string   `json:"explanation,omitempty"`
-	FollowUp    string   `json:"follow_up,omitempty"`
-	Kind        string   `json:"kind,omitempty"`
-	Tables      []string `json:"tables,omitempty"`
+	Action      string           `json:"action"`
+	SQL         string           `json:"sql,omitempty"`
+	Explanation string           `json:"explanation,omitempty"`
+	FollowUp    string           `json:"follow_up,omitempty"`
+	Tool        string           `json:"tool,omitempty"`
+	Arguments   LLMToolArguments `json:"arguments,omitempty"`
+	Kind        string           `json:"kind,omitempty"`   // legacy alias for action=context
+	Tables      []string         `json:"tables,omitempty"` // legacy alias for action=context
+}
+
+type LLMToolArguments struct {
+	Query  string   `json:"query,omitempty"`
+	Tables []string `json:"tables,omitempty"`
 }
 
 type OpenAICompatibleClient struct {
@@ -193,10 +201,11 @@ func buildLLMMessagesForDisplay(req LLMRequest) []chatMessage {
 func buildLLMMessagesWithFormatting(req LLMRequest, formatSchema func(string) string, marshalResult func(any) ([]byte, error)) []chatMessage {
 	system := "You are DataDock's SQL assistant. Answer using only the provided RAG context. " +
 		"Follow the SQL dialect profile and active skill instructions exactly. " +
-		"Use only retrieved tables and columns. If more schema context is needed, request it before final SQL. If the request remains ambiguous, ask one concrete clarification. " +
+		"Use only retrieved tables and columns. If more schema context is needed, request a DataDock MCP-style tool call before final SQL. If the request remains ambiguous, ask one concrete clarification. " +
 		"Prefer safe, read-only SELECT queries unless the user explicitly asks for data changes. " +
+		"Available context tool: " + llmToolSchemaSearch + ` with arguments {"query":"search terms","tables":["optional_table"]}. ` +
 		"For SQL generation, return exactly one JSON object and no markdown or extra prose: " +
-		`{"action":"sql","sql":"SELECT ...","explanation":"..."}, {"action":"context","kind":"schema","tables":["table_name"],"explanation":"..."}, or {"action":"clarify","follow_up":"...","explanation":"..."}. ` +
+		`{"action":"sql","sql":"SELECT ...","explanation":"..."}, {"action":"tool_call","tool":"` + llmToolSchemaSearch + `","arguments":{"query":"...","tables":["table_name"]},"explanation":"..."}, or {"action":"clarify","follow_up":"...","explanation":"..."}. ` +
 		"Keep explanations concise and practical."
 
 	var user strings.Builder
@@ -339,12 +348,24 @@ func normalizeLLMSQLResponse(out LLMSQLResponse) LLMSQLResponse {
 	out.SQL = strings.TrimSpace(stripMarkdownCodeFence(out.SQL))
 	out.Explanation = strings.TrimSpace(out.Explanation)
 	out.FollowUp = strings.TrimSpace(out.FollowUp)
+	out.Tool = strings.TrimSpace(out.Tool)
+	out.Arguments.Query = strings.TrimSpace(out.Arguments.Query)
 	out.Kind = strings.ToLower(strings.TrimSpace(out.Kind))
-	if out.Action == "context" && out.Kind == "" {
-		out.Kind = "schema"
+	if out.Action == "context" {
+		out.Action = "tool_call"
+		if out.Tool == "" {
+			out.Tool = llmToolSchemaSearch
+		}
+		if out.Arguments.Query == "" && len(out.Tables) > 0 {
+			out.Arguments.Query = strings.Join(out.Tables, " ")
+		}
+		out.Arguments.Tables = append(out.Arguments.Tables, out.Tables...)
 	}
-	if len(out.Tables) > maxRAGTables {
-		out.Tables = out.Tables[:maxRAGTables]
+	if out.Action == "tool_call" && out.Tool == "" {
+		out.Tool = llmToolSchemaSearch
+	}
+	if len(out.Arguments.Tables) > maxRAGTables {
+		out.Arguments.Tables = out.Arguments.Tables[:maxRAGTables]
 	}
 	if out.Action == "" && out.SQL != "" {
 		out.Action = "sql"
@@ -361,12 +382,14 @@ func parseLooseLLMSQLResponse(text string) (LLMSQLResponse, bool) {
 	explanation, _ := looseJSONStringField(text, "explanation")
 	followUp, _ := looseJSONStringField(text, "follow_up")
 	kind, _ := looseJSONStringField(text, "kind")
+	tool, _ := looseJSONStringField(text, "tool")
 	return LLMSQLResponse{
 		Action:      action,
 		SQL:         sqlText,
 		Explanation: explanation,
 		FollowUp:    followUp,
 		Kind:        kind,
+		Tool:        tool,
 	}, true
 }
 
@@ -421,14 +444,14 @@ func (a *App) generateSQLFromPrompt(ctx context.Context, prompt string) (LLMSQLR
 		Prompt: prompt,
 		Schema: a.llmSchemaContext(ctx, llmActionGenerateSQL, prompt, "", ""),
 	}
-	out, err := a.completeSQLWithContextRequests(ctx, llm, req)
+	out, err := a.completeSQLWithToolCalls(ctx, llm, req)
 	if err != nil {
 		return LLMSQLResponse{}, err
 	}
 	return parseLLMSQLResponse(out), nil
 }
 
-func (a *App) completeSQLWithContextRequests(ctx context.Context, llm LLMClient, req LLMRequest) (string, error) {
+func (a *App) completeSQLWithToolCalls(ctx context.Context, llm LLMClient, req LLMRequest) (string, error) {
 	var out string
 	var err error
 	for i := 0; i <= maxLLMContextRequests; i++ {
@@ -437,39 +460,51 @@ func (a *App) completeSQLWithContextRequests(ctx context.Context, llm LLMClient,
 			return "", err
 		}
 		parsed := parseLLMSQLResponse(out)
-		if parsed.Action != "context" {
+		if parsed.Action != "tool_call" {
 			return out, nil
 		}
-		extra := a.requestedLLMContext(ctx, req, parsed)
+		extra := a.callLLMContextTool(ctx, req, parsed)
 		if strings.TrimSpace(extra) == "" {
-			return `{"action":"clarify","follow_up":"Which table or field should I inspect?","explanation":"The model requested additional context but did not name a retrievable table."}`, nil
+			return `{"action":"clarify","follow_up":"Which table or field should I inspect?","explanation":"The model requested a context tool DataDock could not satisfy."}`, nil
 		}
 		req.Schema = strings.TrimSpace(req.Schema) + "\n\n" + extra
 	}
-	return `{"action":"clarify","follow_up":"Which table or fields should I use?","explanation":"More schema context was needed than DataDock can safely fetch in one request."}`, nil
+	return `{"action":"clarify","follow_up":"Which table or fields should I use?","explanation":"More context tool calls were needed than DataDock can safely perform in one request."}`, nil
 }
 
-func (a *App) requestedLLMContext(ctx context.Context, req LLMRequest, parsed LLMSQLResponse) string {
+func (a *App) callLLMContextTool(ctx context.Context, req LLMRequest, parsed LLMSQLResponse) string {
+	if parsed.Tool != "" && parsed.Tool != llmToolSchemaSearch {
+		return ""
+	}
 	var terms []string
-	for _, table := range parsed.Tables {
+	for _, table := range parsed.Arguments.Tables {
 		table = strings.TrimSpace(table)
 		if table != "" {
 			terms = append(terms, table)
 		}
 	}
-	query := strings.Join(terms, " ")
+	query := strings.TrimSpace(parsed.Arguments.Query + " " + strings.Join(terms, " "))
 	if query == "" {
 		query = strings.TrimSpace(req.Prompt + " " + req.SQL)
 	}
 	if query == "" {
 		return ""
 	}
-	kind := parsed.Kind
-	if kind == "" {
-		kind = "schema"
-	}
 	snapshot := a.schemaSnapshotFor(ctx, req.Action, query, "", "")
-	return "Additional requested RAG context (" + kind + "):\n" + snapshot
+	result := struct {
+		Tool      string           `json:"tool"`
+		Arguments LLMToolArguments `json:"arguments"`
+		Result    json.RawMessage  `json:"result"`
+	}{
+		Tool:      llmToolSchemaSearch,
+		Arguments: parsed.Arguments,
+		Result:    json.RawMessage(snapshot),
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return "MCP tool result " + llmToolSchemaSearch + ":\n" + snapshot
+	}
+	return "MCP tool result:\n" + string(data)
 }
 
 func (a *App) explainLLMResults(ctx context.Context, prompt, sql string, result QueryResult) (string, error) {
