@@ -15,7 +15,7 @@ type MigrationSummary struct {
 	Rows        int
 }
 
-func (a *App) migrateTable(ctx context.Context, sourceID, targetID, sourceTable, targetTable string, createTarget bool) (MigrationSummary, error) {
+func (a *App) migrateTable(ctx context.Context, sessionID, sourceID, targetID, sourceTable, targetTable string, createTarget bool) (MigrationSummary, error) {
 	sourceID = strings.TrimSpace(sourceID)
 	targetID = strings.TrimSpace(targetID)
 	sourceTable = strings.TrimSpace(sourceTable)
@@ -33,8 +33,8 @@ func (a *App) migrateTable(ctx context.Context, sourceID, targetID, sourceTable,
 		return MigrationSummary{}, fmt.Errorf("target table may only contain letters, digits, and underscores")
 	}
 
-	source := a.conns.Get(sourceID)
-	target := a.conns.Get(targetID)
+	source := a.conns.GetFor(sessionID, sourceID)
+	target := a.conns.GetFor(sessionID, targetID)
 	if source == nil {
 		return MigrationSummary{}, fmt.Errorf("source connection %q not found", sourceID)
 	}

@@ -22,7 +22,7 @@ func TestMigrateTableSQLiteToTinySQL(t *testing.T) {
 		t.Fatalf("add source connection: %v", err)
 	}
 
-	summary, err := app.migrateTable(context.Background(), source.ID, defaultConnectionID, "people", "people_copy", true)
+	summary, err := app.migrateTable(context.Background(), "", source.ID, defaultConnectionID, "people", "people_copy", true)
 	if err != nil {
 		t.Fatalf("migrate table: %v", err)
 	}

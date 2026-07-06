@@ -14,30 +14,43 @@
       <textarea id="llmPrompt" class="form-control form-control-sm" rows="2"
                 placeholder="Ask in natural language, e.g. show the top customers by revenue"></textarea>
       <div class="toolbar">
-        <button id="llmSqlBtn" class="btn btn-outline-primary btn-sm" onclick="askLLM('generate_sql')">
-          <i class="bi bi-stars me-1"></i>Generate SQL
-        </button>
-        <button id="llmRunBtn" class="btn btn-primary btn-sm" onclick="askAndRunLLM()">
-          <i class="bi bi-lightning-charge-fill me-1"></i>Ask & Run
-        </button>
-        <button id="llmResultsBtn" class="btn btn-outline-secondary btn-sm" onclick="askLLM('explain_results')">
-          <i class="bi bi-card-text me-1"></i>Explain Result
-        </button>
-        <button id="llmErrorBtn" class="btn btn-outline-secondary btn-sm" onclick="askLLM('explain_error')">
-          <i class="bi bi-bug me-1"></i>Explain Error
-        </button>
-        <button id="llmHealthBtn" class="btn btn-outline-secondary btn-sm" onclick="testLLMHealth()">
-          <i class="bi bi-wifi me-1"></i>Test LLM
-        </button>
+        <div class="btn-group">
+          <button id="llmAskBtn" class="btn btn-primary btn-sm" onclick="runLLMAction()">
+            <i id="llmAskBtnIcon" class="bi bi-code-slash me-1"></i><span id="llmAskBtnLabel">Ask</span>
+          </button>
+          <button class="btn btn-primary btn-sm dropdown-toggle dropdown-toggle-split" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+            <span class="visually-hidden">Choose what the AI should do</span>
+          </button>
+          <ul class="dropdown-menu">
+            <li><button class="dropdown-item" type="button" onclick="setLLMMode('generate_sql')"><i class="bi bi-code-slash me-2"></i>Ask<div class="small text-muted">Write the query but don't run it yet — review before executing</div></button></li>
+            <li><button class="dropdown-item" type="button" onclick="setLLMMode('ask_and_run')"><i class="bi bi-lightning-charge-fill me-2"></i>Ask &amp; Run<div class="small text-muted">Generate SQL from your question and run it immediately</div></button></li>
+            <li><hr class="dropdown-divider"></li>
+            <li><button class="dropdown-item" type="button" onclick="setLLMMode('explain_results')"><i class="bi bi-card-text me-2"></i>Explain current result</button></li>
+            <li><button class="dropdown-item" type="button" onclick="setLLMMode('explain_error')"><i class="bi bi-bug me-2"></i>Explain last error</button></li>
+          </ul>
+        </div>
         <div class="dropdown">
           <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
             <i class="bi bi-lightbulb me-1"></i>Example Prompts
           </button>
           <ul id="samplePromptMenu" class="dropdown-menu"></ul>
         </div>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="llmDetailsBtn" onclick="toggleLLMDetails()" title="Show exactly what gets sent to the AI">
+          <i class="bi bi-eye me-1"></i>Details
+        </button>
         <span id="llmStatus" class="small text-muted ms-1" role="status" aria-live="polite"></span>
       </div>
       <div id="llmAnswer" class="small" aria-live="polite"></div>
+      <div id="llmDetails" class="d-none small border rounded p-2" style="background:var(--surface-soft)">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <strong><i class="bi bi-eye me-1"></i>What gets sent to the AI</strong>
+          <span>
+            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" onclick="refreshLLMPreview()"><i class="bi bi-arrow-repeat"></i> Refresh</button>
+            <button type="button" id="llmHealthBtn" class="btn btn-outline-secondary btn-sm py-0 px-1" onclick="testLLMHealth()"><i class="bi bi-wifi"></i> Test connection</button>
+          </span>
+        </div>
+        <div id="llmDetailsBody" class="text-muted">Loading preview…</div>
+      </div>
     </div>
   </div>
 </div>
@@ -56,8 +69,9 @@
               spellcheck="false">{{.SQL}}</textarea>
     <div id="monacoEditor" class="d-none" style="height:220px;border-radius:.4rem;overflow:hidden;border:1px solid #444" role="region" aria-label="SQL editor"></div>
     <div class="toolbar mt-2 mb-1">
-      <button id="runBtn" class="btn btn-primary btn-sm" onclick="runQuery()">
-        <i class="bi bi-play-fill me-1"></i>Run <kbd class="ms-1 opacity-75" style="font-size:.65rem">Ctrl+Enter</kbd>
+      <button id="runBtn" class="btn btn-primary btn-sm" onclick="handleRunButtonClick()">
+        <i id="runBtnIcon" class="bi bi-play-fill me-1"></i><span id="runBtnLabel">Run</span>
+        <kbd id="runBtnKbd" class="ms-1 opacity-75" style="font-size:.65rem">Ctrl+Enter</kbd>
       </button>
       <button class="btn btn-outline-secondary btn-sm" onclick="clearEditor()">
         <i class="bi bi-x-lg me-1"></i>Clear
@@ -71,6 +85,9 @@
       <button class="btn btn-outline-secondary btn-sm" onclick="shareQuery()">
         <i class="bi bi-link-45deg me-1"></i>Share
       </button>
+      <a class="btn btn-outline-secondary btn-sm" href="/history">
+        <i class="bi bi-clock-history me-1"></i>History
+      </a>
       <button class="btn btn-outline-secondary btn-sm" onclick="toggleSchemaPreview()">
         <i class="bi bi-diagram-3 me-1"></i>Schema
       </button>
@@ -101,27 +118,20 @@
       </select>
       <input id="logFilterInput" class="form-control form-control-sm query-log-filter d-none"
              placeholder="Filter logs" oninput="setLogFilter(this.value)" spellcheck="false">
-      <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('csv')">
-        <i class="bi bi-filetype-csv me-1"></i>CSV
-      </button>
-      <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('csv-excel')">
-        <i class="bi bi-file-earmark-excel me-1"></i>Excel CSV
-      </button>
-      <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('tsv')">
-        <i class="bi bi-table me-1"></i>TSV
-      </button>
-      <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('json')">
-        <i class="bi bi-filetype-json me-1"></i>JSON
-      </button>
-      <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('xml')">
-        <i class="bi bi-filetype-xml me-1"></i>XML
-      </button>
-      <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('geojson')">
-        <i class="bi bi-geo-alt me-1"></i>GeoJSON
-      </button>
-      <button class="btn btn-outline-secondary btn-sm" onclick="exportQuery('xlsx')">
-        <i class="bi bi-file-earmark-spreadsheet me-1"></i>XLSX
-      </button>
+      <div class="dropdown">
+        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+          <i class="bi bi-download me-1"></i>Export
+        </button>
+        <ul class="dropdown-menu">
+          <li><button class="dropdown-item" type="button" onclick="exportQuery('csv')"><i class="bi bi-filetype-csv me-2"></i>CSV</button></li>
+          <li><button class="dropdown-item" type="button" onclick="exportQuery('csv-excel')"><i class="bi bi-file-earmark-excel me-2"></i>Excel CSV</button></li>
+          <li><button class="dropdown-item" type="button" onclick="exportQuery('tsv')"><i class="bi bi-table me-2"></i>TSV</button></li>
+          <li><button class="dropdown-item" type="button" onclick="exportQuery('json')"><i class="bi bi-filetype-json me-2"></i>JSON</button></li>
+          <li><button class="dropdown-item" type="button" onclick="exportQuery('xml')"><i class="bi bi-filetype-xml me-2"></i>XML</button></li>
+          <li><button class="dropdown-item" type="button" onclick="exportQuery('geojson')"><i class="bi bi-geo-alt me-2"></i>GeoJSON</button></li>
+          <li><button class="dropdown-item" type="button" onclick="exportQuery('xlsx')"><i class="bi bi-file-earmark-spreadsheet me-2"></i>XLSX</button></li>
+        </ul>
+      </div>
       <span id="statusMsg" class="small text-muted ms-2" role="status" aria-live="polite"></span>
     </div>
   </div>
@@ -137,22 +147,7 @@
   </div>
 </div>
 
-<div class="row g-2 align-items-stretch">
-  <div class="col-lg-8">
-    <div id="chartArea"></div>
-  </div>
-  <div class="col-lg-4">
-    <div class="card h-100">
-      <div class="card-body py-2">
-        <div class="d-flex justify-content-between align-items-center mb-2">
-          <h2 class="h6 mb-0"><i class="bi bi-clock-history text-primary"></i> Local History</h2>
-          <button class="btn btn-outline-secondary btn-sm" onclick="clearLocalQueryHistory()">Clear</button>
-        </div>
-        <div id="queryHistory" class="small"></div>
-      </div>
-    </div>
-  </div>
-</div>
+<div id="chartArea"></div>
 
 <div id="resultArea" role="region" aria-label="Query result"></div>
 
@@ -194,7 +189,7 @@ var queryHistoryKey = 'datadock.queryHistory.v1';
 var queryTabsKey = 'datadock.queryTabs.v1';
 var queryTabsActiveKey = 'datadock.queryTabs.active.v1';
 var maxLocalQueryHistory = 20;
-var defaultResultWindowLimit = 500;
+var defaultResultWindowLimit = {{if .PageSize}}{{.PageSize}}{{else}}50{{end}};
 var sqlEditor = null;
 var monacoBaseURL = 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.40.0/min';
 var queryTabs = [];
@@ -279,8 +274,16 @@ document.addEventListener('DOMContentLoaded', function () {
   });
   ta.addEventListener('input', saveActiveQueryTabFromEditor);
   loadMonacoEditor();
-  renderLocalQueryHistory();
   renderSampleMenus();
+
+  var llmDebounce = null;
+  var llmPromptEl = document.getElementById('llmPrompt');
+  if (llmPromptEl) {
+    llmPromptEl.addEventListener('input', function () {
+      clearTimeout(llmDebounce);
+      llmDebounce = setTimeout(refreshLLMPreviewIfOpen, 400);
+    });
+  }
 });
 
 function initQueryTabs(initialSQL) {
@@ -505,7 +508,10 @@ function getQueryTabRuntime(id) {
       requestID: 0,
       statusText: '',
       resultData: null,
-      errorMessage: ''
+      errorMessage: '',
+      chartChoice: null,
+      chartSQL: null,
+      controller: null
     };
   }
   return queryTabRuntime[id];
@@ -743,25 +749,29 @@ function runQueryWithDemoDataFallback(tabID, sql) {
 function executeQueryForTab(tabID, sql, options) {
   options = options || {};
   var runtime = beginQueryRun(tabID, options.live ? 'Live refresh…' : (options.append ? 'Loading more…' : 'Running…'), !!options.append);
+  var controller = new AbortController();
+  runtime.controller = controller;
   var requestID = runtime.requestID;
   var offset = Math.max(0, Number(options.offset || 0));
   var limit = Math.max(1, Number(options.limit || defaultResultWindowLimit));
   fetch('/api/query', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({sql: sql, offset: offset, limit: limit})
+    body: JSON.stringify({sql: sql, offset: offset, limit: limit}),
+    signal: controller.signal
   })
     .then(function (r) { return r.json(); })
     .then(function (data) {
       if (!isCurrentQueryRequest(tabID, requestID)) return null;
       if (options.demoFallback && data.error && isMissingObjectError(data.error)) {
         setQueryTabStatus(tabID, 'Loading demo data…');
-        return fetch('/demo-data', {method: 'POST'})
+        return fetch('/demo-data', {method: 'POST', signal: controller.signal})
           .then(function () {
             return fetch('/api/query', {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({sql: sql, offset: offset, limit: limit})
+              body: JSON.stringify({sql: sql, offset: offset, limit: limit}),
+              signal: controller.signal
             }).then(function (r2) { return r2.json(); });
           });
       }
@@ -776,11 +786,86 @@ function executeQueryForTab(tabID, sql, options) {
     })
     .catch(function (err) {
       if (!isCurrentQueryRequest(tabID, requestID)) return;
+      if (err && err.name === 'AbortError') {
+        finishQueryStop(tabID);
+        return;
+      }
       finishQueryRun(tabID, {error: err.message || err.toString()}, sql, options);
       if (options.live) {
         scheduleLiveTab(tabID);
       }
     });
+}
+
+// stopQuery cancels the in-flight request for a tab (default: the active
+// tab) via AbortController. The fetch abort also cancels the request's
+// context on the server, so a genuinely long-running query is actually
+// interrupted there too, not just hidden in the UI. Stopping a live tab
+// also turns Live off, since "stop" while auto-refreshing means "stop
+// refreshing", not "skip just this one tick".
+function stopQuery(tabID) {
+  tabID = tabID || activeQueryTabID;
+  var runtime = getQueryTabRuntime(tabID);
+  if (runtime.controller) {
+    runtime.controller.abort();
+  }
+  stopLiveTab(tabID);
+  var tab = getQueryTab(tabID);
+  if (tab && tab.liveEnabled) {
+    tab.liveEnabled = false;
+    tab.updatedAt = new Date().toISOString();
+    persistQueryTabs();
+    if (tabID === activeQueryTabID) {
+      syncActiveTabControls();
+    }
+  }
+}
+
+function finishQueryStop(tabID) {
+  var runtime = getQueryTabRuntime(tabID);
+  runtime.running = false;
+  runtime.controller = null;
+  runtime.statusText = 'Stopped';
+  if (tabID === activeQueryTabID) {
+    document.getElementById('statusMsg').textContent = 'Stopped';
+    syncRunButton();
+  }
+  renderQueryTabs();
+}
+
+// The Run button doubles as Stop while a query is in flight, instead of
+// adding yet another permanent toolbar button — matches the Run/Stop toggle
+// pattern most SQL IDEs use.
+function handleRunButtonClick() {
+  var runtime = getQueryTabRuntime(activeQueryTabID);
+  if (runtime.running) {
+    stopQuery(activeQueryTabID);
+  } else {
+    runQuery();
+  }
+}
+
+function syncRunButton() {
+  var runtime = getQueryTabRuntime(activeQueryTabID);
+  var btn = document.getElementById('runBtn');
+  var icon = document.getElementById('runBtnIcon');
+  var label = document.getElementById('runBtnLabel');
+  var kbd = document.getElementById('runBtnKbd');
+  if (!btn) return;
+  btn.disabled = false;
+  if (runtime.running) {
+    btn.classList.remove('btn-primary');
+    btn.classList.add('btn-danger');
+    if (icon) icon.className = 'bi bi-stop-fill me-1';
+    if (label) label.textContent = 'Stop';
+    if (kbd) kbd.classList.add('d-none');
+  } else {
+    btn.classList.remove('btn-danger');
+    btn.classList.add('btn-primary');
+    if (icon) icon.className = 'bi bi-play-fill me-1';
+    if (label) label.textContent = 'Run';
+    if (kbd) kbd.classList.remove('d-none');
+  }
 }
 
 function isMissingObjectError(msg) {
@@ -820,6 +905,7 @@ function askLLM(action) {
   .then(function(resp) {
     setLLMButtons(false);
     llmStatus.textContent = '';
+    refreshLLMPreviewIfOpen();
     if (!resp.ok || resp.data.error) {
       llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">' + escHtml(resp.data.error || 'LLM request failed') + '</div>';
       return;
@@ -882,6 +968,7 @@ function askAndRunLLM() {
   .then(function(resp) {
     setLLMButtons(false);
     llmStatus.textContent = '';
+    refreshLLMPreviewIfOpen();
     if (!resp.ok || resp.data.error && resp.data.action !== 'error' && resp.data.action !== 'blocked') {
       llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">' + escHtml(resp.data.error || 'LLM request failed') + '</div>';
       return;
@@ -916,9 +1003,107 @@ function askAndRunLLM() {
 }
 
 function setLLMButtons(disabled) {
-  ['llmSqlBtn', 'llmRunBtn', 'llmResultsBtn', 'llmErrorBtn', 'llmHealthBtn'].forEach(function(id) {
-    document.getElementById(id).disabled = disabled;
+  ['llmAskBtn', 'llmHealthBtn'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.disabled = disabled;
   });
+}
+
+// ── AI panel: single "Ask"-style button with a mode dropdown, plus a
+// "Details" toggle that previews the exact system/user messages that would
+// be sent (via /api/llm/preview, built from the same code the real request
+// uses), so it's always accurate instead of a best-effort client guess.
+//
+// Default is "Ask" (generate_sql: writes the query, doesn't run it) rather
+// than "Ask & Run" — auto-executing LLM-generated SQL is the riskier action
+// (it could touch the wrong table or run something destructive-looking
+// unreviewed), so it must be an explicit choice, not the one-click default.
+
+var llmMode = 'generate_sql';
+var llmModeMeta = {
+  ask_and_run: {icon: 'bi-lightning-charge-fill', label: 'Ask & Run'},
+  generate_sql: {icon: 'bi-code-slash', label: 'Ask'},
+  explain_results: {icon: 'bi-card-text', label: 'Explain Result'},
+  explain_error: {icon: 'bi-bug', label: 'Explain Error'}
+};
+
+function setLLMMode(mode) {
+  llmMode = llmModeMeta[mode] ? mode : 'generate_sql';
+  var meta = llmModeMeta[llmMode];
+  document.getElementById('llmAskBtnLabel').textContent = meta.label;
+  document.getElementById('llmAskBtnIcon').className = 'bi ' + meta.icon + ' me-1';
+  refreshLLMPreviewIfOpen();
+}
+
+function runLLMAction() {
+  if (llmMode === 'ask_and_run') {
+    askAndRunLLM();
+  } else {
+    askLLM(llmMode);
+  }
+}
+
+function toggleLLMDetails() {
+  var panel = document.getElementById('llmDetails');
+  if (panel.classList.contains('d-none')) {
+    panel.classList.remove('d-none');
+    refreshLLMPreview();
+  } else {
+    panel.classList.add('d-none');
+  }
+}
+
+function refreshLLMPreviewIfOpen() {
+  var panel = document.getElementById('llmDetails');
+  if (panel && !panel.classList.contains('d-none')) {
+    refreshLLMPreview();
+  }
+}
+
+function currentLLMRequestPayload() {
+  var previewAction = llmMode === 'ask_and_run' ? 'generate_sql' : llmMode;
+  var payload = {
+    action: previewAction,
+    prompt: document.getElementById('llmPrompt').value.trim(),
+    sql: getEditorValue().trim()
+  };
+  if (llmMode === 'explain_error') {
+    payload.error = lastErrorMessage || '';
+  }
+  if (llmMode === 'explain_results' && lastResultData) {
+    payload.columns = lastResultData.columns || [];
+    payload.rows = lastResultData.rows || [];
+  }
+  return payload;
+}
+
+function refreshLLMPreview() {
+  var body = document.getElementById('llmDetailsBody');
+  body.textContent = 'Loading preview…';
+  fetch('/api/llm/preview', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(currentLLMRequestPayload())
+  })
+    .then(function (r) { return r.json().then(function (data) { return {ok: r.ok, data: data}; }); })
+    .then(function (resp) {
+      if (!resp.ok) {
+        body.innerHTML = '<div class="text-danger">' + escHtml(resp.data.error || 'Could not build a preview') + '</div>';
+        return;
+      }
+      var d = resp.data;
+      var statusLine = d.configured
+        ? ('Would be sent to <code>' + escHtml(d.baseURL || '') + '</code> using model <code>' + escHtml(d.model || '') + '</code> — ' + d.charCount + ' characters.')
+        : '<span class="text-warning">No LLM is configured yet (see Admin) — this is what would be sent once one is.</span>';
+      body.innerHTML = '<div class="mb-2">' + statusLine + '</div>' +
+        '<div class="fw-semibold small text-muted">System message</div>' +
+        '<pre class="p-2 rounded small" style="background:var(--code-bg);color:var(--code-ink);white-space:pre-wrap;max-height:160px;overflow:auto">' + escHtml(d.system || '') + '</pre>' +
+        '<div class="fw-semibold small text-muted">User message</div>' +
+        '<pre class="p-2 rounded small" style="background:var(--code-bg);color:var(--code-ink);white-space:pre-wrap;max-height:280px;overflow:auto">' + escHtml(d.userDisplay || d.user || '') + '</pre>';
+    })
+    .catch(function (err) {
+      body.innerHTML = '<div class="text-danger">' + escHtml(err.message || err) + '</div>';
+    });
 }
 
 function testLLMHealth() {
@@ -972,7 +1157,7 @@ function beginQueryRun(tabID, statusText, preserveOutput) {
       lastErrorMessage = '';
     }
     document.getElementById('statusMsg').textContent = runtime.statusText;
-    document.getElementById('runBtn').disabled = true;
+    syncRunButton();
     if (!preserveOutput) {
       document.getElementById('resultArea').innerHTML = '';
       document.getElementById('chartArea').innerHTML = '';
@@ -1003,6 +1188,13 @@ function finishQueryRun(tabID, data, sql, options) {
   runtime.resultData = mergeQueryWindow(previous, data, options);
   runtime.errorMessage = data && data.error ? data.error : '';
   runtime.statusText = queryStatusText(runtime.resultData || data);
+  // A genuinely new query invalidates any manual "Group by"/"Measure" chart
+  // choice from before (columns may differ); paging/live-refreshing the
+  // same query keeps it, so the user doesn't have to redo it every time.
+  if (runtime.chartSQL !== sql) {
+    runtime.chartChoice = null;
+    runtime.chartSQL = sql;
+  }
   saveQueryResultHistory(sql, data);
   if (tabID === activeQueryTabID) {
     renderActiveTabOutput();
@@ -1052,7 +1244,7 @@ function saveQueryResultHistory(sql, data) {
 function renderActiveTabOutput() {
   var runtime = getQueryTabRuntime(activeQueryTabID);
   var tab = getActiveQueryTab() || {};
-  document.getElementById('runBtn').disabled = !!runtime.running;
+  syncRunButton();
   if (runtime.running) {
     document.getElementById('statusMsg').textContent = runtime.statusText || 'Running…';
     if (runtime.resultData) {
@@ -1092,6 +1284,10 @@ function renderActiveTabOutput() {
 function clearQueryOutput(tabID) {
   tabID = tabID || activeQueryTabID;
   var runtime = getQueryTabRuntime(tabID);
+  if (runtime.controller) {
+    runtime.controller.abort();
+    runtime.controller = null;
+  }
   runtime.running = false;
   runtime.requestID = ++queryRequestSeq;
   runtime.statusText = '';
@@ -1104,7 +1300,7 @@ function clearQueryOutput(tabID) {
   lastResultData = null;
   lastErrorMessage = '';
   disposeActiveResultMap();
-  document.getElementById('runBtn').disabled = false;
+  syncRunButton();
   document.getElementById('resultArea').innerHTML = '';
   document.getElementById('chartArea').innerHTML = '';
   document.getElementById('statusMsg').textContent = '';
@@ -1220,8 +1416,10 @@ function restoreQueryFromHash() {
           syncActiveTabControls();
           renderQueryTabs();
           if (tab.liveEnabled) runLiveQueryTab(tab.id);
+          else if (state.autoRun) runQuery();
         }
       }
+      history.replaceState(null, '', window.location.pathname + window.location.search);
       return;
     }
     if (hash.indexOf('#q=') === 0) {
@@ -1350,7 +1548,7 @@ function renderErrorToPage(msg) {
   lastErrorMessage = msg;
   disposeActiveResultMap();
   document.getElementById('statusMsg').textContent = '';
-  document.getElementById('runBtn').disabled = false;
+  syncRunButton();
   document.getElementById('chartArea').innerHTML = '';
   document.getElementById('resultArea').innerHTML =
     '<div class="alert alert-danger mt-1 py-2"><i class="bi bi-exclamation-triangle-fill me-2"></i>' +
@@ -1364,7 +1562,7 @@ function renderResult(data) {
 function renderResultToPage(data) {
   var status = document.getElementById('statusMsg');
   var area = document.getElementById('resultArea');
-  document.getElementById('runBtn').disabled = false;
+  syncRunButton();
   disposeActiveResultMap();
 
   if (data.error) {
@@ -1438,7 +1636,7 @@ function renderResultToPage(data) {
     });
     html += '</tbody></table></div></div>';
     area.innerHTML = html;
-    renderQuickChart(data);
+    renderQuickChart(data, getQueryTabRuntime(activeQueryTabID).chartChoice);
   } else {
     lastResultData = null;
     lastErrorMessage = '';
@@ -1450,31 +1648,64 @@ function renderResultToPage(data) {
   }
 }
 
+// Same page-size choices, and the same Prev/Page N/Next markup (.pagination-bar),
+// as the plain table view — so paging through a query result feels identical
+// to paging through a table.
+var queryPageSizeOptions = [25, 50, 100, 250, 500, 1000];
+
 function renderResultWindowBar(data) {
   if (!data || !data.columns || !data.columns.length) return '';
   var rows = data.rows || [];
   var limit = data.limit || defaultResultWindowLimit;
+  var offset = data.offset || 0;
+  var page = Math.floor(offset / limit) + 1;
   var statementClass = data.statement_class ? ' · ' + data.statement_class.replace('_', ' ') : '';
-  var html = '<div class="d-flex align-items-center justify-content-between gap-2 mt-1 small text-muted">' +
-    '<div>' + rows.length + ' row(s) loaded' + (data.has_more ? ' · window size ' + limit : '') + statementClass + '</div>';
-  if (data.has_more) {
-    html += '<button type="button" class="btn btn-outline-secondary btn-sm" onclick="loadMoreQueryRows()">' +
-      '<i class="bi bi-plus-circle me-1"></i>Load more</button>';
+  var rangeText = rows.length ? ('rows ' + (offset + 1) + '–' + (offset + rows.length)) : '0 rows';
+
+  var html = '<nav class="pagination-bar mt-1">';
+  if (offset > 0) {
+    html += '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="goToQueryResultPage(-1)">' +
+      '<i class="bi bi-chevron-left"></i> Prev</button>';
   }
-  html += '</div>';
+  html += '<span class="text-muted small">Page ' + page + ' · ' + rangeText + statementClass + '</span>';
+  if (data.has_more) {
+    html += '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="goToQueryResultPage(1)">' +
+      'Next <i class="bi bi-chevron-right"></i></button>';
+  }
+  html += '<label class="d-flex align-items-center gap-1 small text-muted ms-auto mb-0">Rows per page' +
+    renderQueryPageSizeSelect(limit) + '</label>';
+  html += '</nav>';
   return html;
 }
 
-function loadMoreQueryRows() {
+function renderQueryPageSizeSelect(current) {
+  var html = '<select class="form-select form-select-sm" style="width:auto" onchange="changeQueryPageSize(this.value)">';
+  queryPageSizeOptions.forEach(function (n) {
+    html += '<option value="' + n + '"' + (n === current ? ' selected' : '') + '>' + n + '</option>';
+  });
+  html += '</select>';
+  return html;
+}
+
+// Replaces the current result window with the previous/next page, mirroring
+// the table view's Prev/Next pager instead of accumulating rows.
+function goToQueryResultPage(direction) {
   var tab = getActiveQueryTab();
   var runtime = getQueryTabRuntime(activeQueryTabID);
-  if (!tab || !runtime.resultData || runtime.running || !runtime.resultData.has_more) return;
-  var rows = runtime.resultData.rows || [];
-  executeQueryForTab(activeQueryTabID, tab.sql || currentSQL().trim(), {
-    append: true,
-    offset: rows.length,
-    limit: runtime.resultData.limit || defaultResultWindowLimit
-  });
+  if (!tab || !runtime.resultData || runtime.running) return;
+  var limit = runtime.resultData.limit || defaultResultWindowLimit;
+  var offset = Math.max(0, (runtime.resultData.offset || 0) + direction * limit);
+  executeQueryForTab(activeQueryTabID, tab.sql || currentSQL().trim(), {offset: offset, limit: limit});
+}
+
+function changeQueryPageSize(size) {
+  var tab = getActiveQueryTab();
+  if (!tab || runtimeIsBusy()) return;
+  executeQueryForTab(activeQueryTabID, tab.sql || currentSQL().trim(), {offset: 0, limit: Number(size)});
+}
+
+function runtimeIsBusy() {
+  return !!getQueryTabRuntime(activeQueryTabID).running;
 }
 
 function disposeActiveResultMap() {
@@ -2149,7 +2380,6 @@ function saveLocalQueryHistory(sql, rowCount, elapsedMs, errorText) {
   } catch (e) {
     return;
   }
-  renderLocalQueryHistory();
 }
 
 function loadLocalQueryHistory() {
@@ -2161,88 +2391,193 @@ function loadLocalQueryHistory() {
   }
 }
 
-function renderLocalQueryHistory() {
-  var target = document.getElementById('queryHistory');
-  if (!target) return;
-  var items = loadLocalQueryHistory();
-  if (items.length === 0) {
-    target.innerHTML = '<div class="text-muted">No local queries yet.</div>';
-    return;
-  }
-  var html = '<div class="list-group list-group-flush">';
-  items.forEach(function(item, idx) {
-    var label = item.sql.replace(/\s+/g, ' ').trim();
-    if (label.length > 92) label = label.slice(0, 92) + '...';
-    html += '<button type="button" class="list-group-item list-group-item-action px-0 py-2" onclick="restoreLocalQueryHistory(' + idx + ')">' +
-      '<span class="d-block text-truncate">' + escHtml(label) + '</span>' +
-      '<span class="text-muted">' + escHtml(formatHistoryTime(item.at)) + ' · ' + escHtml(item.rowCount || 0) + ' row(s) · ' + escHtml(item.elapsedMs || 0) + ' ms</span>' +
-      '</button>';
-  });
-  html += '</div>';
-  target.innerHTML = html;
-}
+// Quick Chart picks a sensible dimension/measure automatically, but keeps
+// the raw result data and the current choice around so the "Group by" /
+// "Measure" controls can re-aggregate and redraw without re-running the query.
+var quickChartMaxCategories = 20;
+var quickChartState = {data: null, choice: null};
 
-function restoreLocalQueryHistory(idx) {
-  var item = loadLocalQueryHistory()[idx];
-  if (!item) return;
-  setEditorValue(item.sql);
-  focusEditor();
-}
-
-function clearLocalQueryHistory() {
-  try { localStorage.removeItem(queryHistoryKey); } catch (e) {}
-  renderLocalQueryHistory();
-}
-
-function formatHistoryTime(value) {
-  var d = new Date(value);
-  if (isNaN(d.getTime())) return '';
-  return d.toLocaleString();
-}
-
-function renderQuickChart(data) {
+function renderQuickChart(data, choiceOverride) {
   var area = document.getElementById('chartArea');
-  area.innerHTML = '';
-  if (!window.d3 || !data || !data.columns || data.columns.length < 2 || !data.rows || data.rows.length === 0) {
+  if (!window.d3 || !data || !data.columns || data.columns.length < 1 || !data.rows || data.rows.length === 0) {
+    area.innerHTML = '';
+    quickChartState = {data: null, choice: null};
     return;
   }
-  var numericIdx = -1;
-  var timeIdx = -1;
-  data.columns.forEach(function(col, idx) {
-    if (timeIdx < 0 && /date|time|year|month|tag|datum/i.test(col || '')) {
-      var parseable = 0;
-      data.rows.forEach(function(row) {
-        if (parseChartDate(row[idx])) parseable++;
-      });
-      if (parseable >= Math.min(2, data.rows.length)) timeIdx = idx;
+  var profiles = profileQuickChartColumns(data);
+  var choice = choiceOverride || pickQuickChartDefaults(profiles, data.rows.length);
+  if (!choice) {
+    area.innerHTML = '';
+    quickChartState = {data: null, choice: null};
+    return;
+  }
+  quickChartState = {data: data, choice: choice};
+
+  var agg = aggregateQuickChart(data, choice);
+  var points = agg.points;
+  if (points.length === 0) {
+    area.innerHTML = '';
+    return;
+  }
+
+  var dimName = choice.dimIdx >= 0 ? data.columns[choice.dimIdx] : 'Row';
+  var measureName = choice.metricIdx >= 0 ? data.columns[choice.metricIdx] : 'Count of rows';
+  var subtitle = (choice.metricIdx >= 0 ? 'Sum of ' + measureName : measureName) + ' by ' + dimName;
+  if (agg.truncated > 0) {
+    subtitle += ' · top ' + points.length + ' of ' + (points.length + agg.truncated) + ' shown';
+  }
+
+  area.innerHTML = '<div class="card h-100"><div class="card-body py-2">' +
+    '<div class="d-flex justify-content-between align-items-start mb-2 gap-2 flex-wrap">' +
+    '<div><h2 class="h6 mb-0"><i class="bi bi-bar-chart text-primary"></i> Quick Chart</h2>' +
+    '<span class="small text-muted">' + escHtml(subtitle) + '</span></div>' +
+    renderQuickChartControls(profiles, choice) +
+    '</div><div id="quickChart"></div></div></div>';
+  wireQuickChartControls();
+  drawQuickChart(points, choice.isTimeDim);
+}
+
+// profileQuickChartColumns inspects every column once to learn how numeric,
+// date-like, distinct, and id-like it is, so the picker can reason about
+// which column is a useful grouping dimension vs. a measure vs. noise
+// (e.g. a primary key) without hardcoding "column 0 is always the label".
+function profileQuickChartColumns(data) {
+  var rows = data.rows || [];
+  return data.columns.map(function (name, idx) {
+    var seen = {};
+    var distinct = 0, numericCount = 0, dateCount = 0, nonEmpty = 0;
+    rows.forEach(function (row) {
+      var v = row[idx];
+      if (v === '' || v === null || v === undefined) return;
+      nonEmpty++;
+      if (!seen[v]) { seen[v] = true; distinct++; }
+      if (!isNaN(Number(v))) numericCount++;
+      if (parseChartDate(v)) dateCount++;
+    });
+    var numericRatio = nonEmpty ? numericCount / nonEmpty : 0;
+    var dateRatio = nonEmpty ? dateCount / nonEmpty : 0;
+    return {
+      idx: idx,
+      name: name,
+      distinct: distinct,
+      nonEmpty: nonEmpty,
+      numericRatio: numericRatio,
+      isIdLike: /(^|_)(id|uuid|guid)$/i.test(name || ''),
+      isDate: dateRatio >= 0.6 && /date|time|year|month|jahr|monat|tag|datum/i.test(name || ''),
+      isNumeric: nonEmpty > 0 && numericRatio >= 0.9,
+      isCategorical: nonEmpty > 0 && numericRatio < 0.9
+    };
+  });
+}
+
+// pickQuickChartDefaults chooses the most useful dimension/measure pair:
+// a time column beats a categorical one; among categorical columns the one
+// with the most repetition (lowest distinct/row ratio) wins, since that's
+// the column worth grouping by (e.g. a tenant/client/status column) rather
+// than a free-text column that's different on every row. When no numeric
+// measure exists, it falls back to counting rows per group — so a table
+// with only a repeated "Mandant" column still produces a meaningful chart
+// (rows per tenant) instead of nothing.
+function pickQuickChartDefaults(profiles, rowCount) {
+  var dateCol = profiles.filter(function (p) { return p.isDate; })[0];
+  var textCandidates = profiles.filter(function (p) { return p.isCategorical && p.distinct > 1; });
+  textCandidates.sort(function (a, b) {
+    if (a.isIdLike !== b.isIdLike) return a.isIdLike ? 1 : -1;
+    var ra = a.distinct / Math.max(1, rowCount), rb = b.distinct / Math.max(1, rowCount);
+    if (ra !== rb) return ra - rb;
+    return a.idx - b.idx;
+  });
+  var dimension = dateCol || textCandidates[0] || profiles[0];
+  if (!dimension) return null;
+
+  var numericCandidates = profiles.filter(function (p) {
+    return p.isNumeric && p.idx !== dimension.idx && !p.isIdLike;
+  });
+  numericCandidates.sort(function (a, b) { return b.numericRatio - a.numericRatio || a.idx - b.idx; });
+  var metric = numericCandidates[0] || null;
+
+  return {dimIdx: dimension.idx, metricIdx: metric ? metric.idx : -1, isTimeDim: !!dateCol && dimension === dateCol};
+}
+
+// aggregateQuickChart groups rows by the dimension column, summing the
+// measure column (or counting rows when there's no measure). This handles
+// both raw, ungrouped tables (many rows share the same dimension value) and
+// already-aggregated query results (one row per group) with the same code
+// path — grouping a table that's already unique per key is a no-op.
+function aggregateQuickChart(data, choice) {
+  var rows = data.rows || [];
+  var groups = {}, order = [];
+  rows.forEach(function (row, i) {
+    var raw = choice.dimIdx >= 0 ? row[choice.dimIdx] : 'Row ' + (i + 1);
+    var label = (raw === '' || raw === null || raw === undefined) ? '(empty)' : String(raw);
+    if (!groups[label]) {
+      groups[label] = {label: label, value: 0, count: 0, date: choice.isTimeDim ? parseChartDate(raw) : null};
+      order.push(label);
+    }
+    groups[label].count++;
+    if (choice.metricIdx >= 0) {
+      var v = Number(row[choice.metricIdx]);
+      if (!isNaN(v)) groups[label].value += v;
+    } else {
+      groups[label].value = groups[label].count;
     }
   });
-  for (var c = 1; c < data.columns.length; c++) {
-    if (c === timeIdx) continue;
-    var numericCount = 0;
-    data.rows.forEach(function(row) {
-      if (row[c] !== '' && !isNaN(Number(row[c]))) numericCount++;
-    });
-    if (numericCount > 0 && numericCount >= Math.ceil(data.rows.length * 0.6)) {
-      numericIdx = c;
-      break;
+  var points = order.map(function (label) { return groups[label]; });
+  var truncated = 0;
+  if (choice.isTimeDim) {
+    points = points.filter(function (p) { return p.date; }).sort(function (a, b) { return a.date - b.date; });
+  } else {
+    points.sort(function (a, b) { return b.value - a.value; });
+    if (points.length > quickChartMaxCategories) {
+      truncated = points.length - quickChartMaxCategories;
+      points = points.slice(0, quickChartMaxCategories);
     }
   }
-  if (numericIdx < 0) return;
-  var points = data.rows.slice(0, 30).map(function(row) {
-    return {
-      label: String(row[timeIdx >= 0 ? timeIdx : 0] || ''),
-      value: Number(row[numericIdx] || 0),
-      date: timeIdx >= 0 ? parseChartDate(row[timeIdx]) : null
+  return {points: points, truncated: truncated};
+}
+
+// renderQuickChartControls lets the user override the auto-picked
+// dimension/measure without re-running the query (e.g. group by a
+// different column, or switch from "count" to summing a numeric column).
+function renderQuickChartControls(profiles, choice) {
+  var dimOptions = profiles.map(function (p) {
+    return '<option value="' + p.idx + '"' + (p.idx === choice.dimIdx ? ' selected' : '') + '>' + escHtml(p.name) + '</option>';
+  }).join('');
+  var measureOptions = '<option value="-1"' + (choice.metricIdx < 0 ? ' selected' : '') + '>Count of rows</option>' +
+    profiles.filter(function (p) { return p.isNumeric; }).map(function (p) {
+      return '<option value="' + p.idx + '"' + (p.idx === choice.metricIdx ? ' selected' : '') + '>Sum of ' + escHtml(p.name) + '</option>';
+    }).join('');
+  return '<div class="d-flex gap-2 flex-wrap small">' +
+    '<label class="d-flex align-items-center gap-1 mb-0 text-muted">Group by' +
+    '<select class="form-select form-select-sm" id="qcDimSelect" style="width:auto">' + dimOptions + '</select></label>' +
+    '<label class="d-flex align-items-center gap-1 mb-0 text-muted">Measure' +
+    '<select class="form-select form-select-sm" id="qcMeasureSelect" style="width:auto">' + measureOptions + '</select></label>' +
+    '</div>';
+}
+
+function wireQuickChartControls() {
+  var dimSelect = document.getElementById('qcDimSelect');
+  var measureSelect = document.getElementById('qcMeasureSelect');
+  if (!dimSelect || !measureSelect) return;
+  var onChange = function () {
+    if (!quickChartState.data) return;
+    var dimIdx = Number(dimSelect.value);
+    var profiles = profileQuickChartColumns(quickChartState.data);
+    var dimProfile = profiles[dimIdx];
+    var choice = {
+      dimIdx: dimIdx,
+      metricIdx: Number(measureSelect.value),
+      isTimeDim: !!(dimProfile && dimProfile.isDate)
     };
-  }).filter(function(d) { return !isNaN(d.value); });
-  if (points.length === 0) return;
-  area.innerHTML = '<div class="card h-100"><div class="card-body py-2">' +
-    '<div class="d-flex justify-content-between align-items-center mb-2">' +
-    '<h2 class="h6 mb-0"><i class="bi bi-bar-chart text-primary"></i> Quick Chart</h2>' +
-    '<span class="small text-muted">' + escHtml(data.columns[timeIdx >= 0 ? timeIdx : 0]) + ' / ' + escHtml(data.columns[numericIdx]) + '</span>' +
-    '</div><div id="quickChart"></div></div></div>';
-  var width = Math.max(320, area.querySelector('.card-body').clientWidth - 12);
+    getQueryTabRuntime(activeQueryTabID).chartChoice = choice;
+    renderQuickChart(quickChartState.data, choice);
+  };
+  dimSelect.addEventListener('change', onChange);
+  measureSelect.addEventListener('change', onChange);
+}
+
+function drawQuickChart(points, isTimeDim) {
+  var width = Math.max(320, document.querySelector('#chartArea .card-body').clientWidth - 12);
   var height = 220;
   var margin = {top: 8, right: 12, bottom: 54, left: 54};
   var svg = d3.select('#quickChart').append('svg')
@@ -2255,8 +2590,7 @@ function renderQuickChart(data) {
   svg.append('g')
     .attr('transform', 'translate(' + margin.left + ',0)')
     .call(d3.axisLeft(y).ticks(5));
-  if (timeIdx >= 0 && points.filter(function(d) { return d.date; }).length >= 2) {
-    points = points.filter(function(d) { return d.date; }).sort(function(a, b) { return a.date - b.date; });
+  if (isTimeDim && points.length >= 2) {
     var xTime = d3.scaleTime()
       .domain(d3.extent(points, function(d) { return d.date; }))
       .range([margin.left, width - margin.right]);
@@ -2276,7 +2610,8 @@ function renderQuickChart(data) {
       .attr('cx', function(d) { return xTime(d.date); })
       .attr('cy', function(d) { return y(d.value); })
       .attr('r', 3)
-      .attr('fill', '#1565c0');
+      .attr('fill', '#1565c0')
+      .append('title').text(function(d) { return d.label + ': ' + d.value; });
   } else {
     var x = d3.scaleBand()
       .domain(points.map(function(d) { return d.label; }))
@@ -2296,7 +2631,8 @@ function renderQuickChart(data) {
       .attr('y', function(d) { return y(Math.max(0, d.value)); })
       .attr('width', x.bandwidth())
       .attr('height', function(d) { return Math.max(0, y(0) - y(Math.max(0, d.value))); })
-      .attr('fill', '#1565c0');
+      .attr('fill', '#1565c0')
+      .append('title').text(function(d) { return d.label + ': ' + d.value; });
   }
 }
 

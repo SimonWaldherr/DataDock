@@ -35,11 +35,16 @@ func TestSchemaSnapshotIncludesDialectAndSamples(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
+	// The snapshot sent to the LLM is always minified (no space after ':'),
+	// to avoid spending tokens on pretty-printing whitespace.
 	snapshot := app.schemaSnapshot(context.Background())
-	if !strings.Contains(snapshot, `"name": "PostgreSQL"`) {
+	if !strings.Contains(snapshot, `"name":"PostgreSQL"`) {
 		t.Fatalf("expected PostgreSQL dialect in snapshot: %s", snapshot)
 	}
-	if !strings.Contains(snapshot, `"CaseInsensitiveOp":`) && !strings.Contains(snapshot, `"case_insensitive_operator": "ILIKE"`) {
+	if strings.Contains(snapshot, "\n") || strings.Contains(snapshot, "  ") {
+		t.Fatalf("expected minified (no indentation) snapshot: %s", snapshot)
+	}
+	if !strings.Contains(snapshot, `"CaseInsensitiveOp":`) && !strings.Contains(snapshot, `"case_insensitive_operator":"ILIKE"`) {
 		t.Fatalf("expected dialect rules in snapshot: %s", snapshot)
 	}
 	if !strings.Contains(snapshot, `"Ada"`) {

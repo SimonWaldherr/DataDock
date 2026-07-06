@@ -63,6 +63,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	// Table datasheet view.
 	handle("GET /t/{table}", a.tableViewHandler)
 	handle("GET /t/{table}/export", a.exportTableHandler)
+	handle("GET /api/tables/{table}/script", a.apiTableScriptHandler)
 
 	// Record CRUD.
 	handle("GET /t/{table}/new", a.newRecordFormHandler)
@@ -75,8 +76,28 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("GET /connections", a.connectionsHandler)
 	handle("POST /connections", a.addConnectionHandler)
 	handle("POST /connections/active", a.setActiveConnectionHandler)
-	handle("GET /admin", a.adminHandler)
-	handle("POST /admin/settings", a.adminSettingsHandler)
+
+	// Admin area: gated by an admin password. With none set yet, every
+	// requireAdmin-wrapped route bounces to /admin/setup; afterwards it
+	// bounces to /admin/login until the session logs in.
+	handle("GET /admin", a.requireAdmin(a.adminHandler))
+	// Deliberately NOT wrapped in requireWritable: that would let turning on
+	// maintenance mode lock the admin out of ever turning it back off again
+	// through this same form (every subsequent POST would itself get
+	// blocked as a write while maintenance mode is on). requireWritable is
+	// for gating everyone else's data edits, not the admin's own settings.
+	handle("POST /admin/settings", a.requireAdmin(a.adminSettingsHandler))
+	handle("POST /admin/maintenance/toggle", a.requireAdmin(a.adminToggleMaintenanceHandler))
+	handle("POST /admin/change-password", a.requireAdmin(a.adminChangePasswordHandler))
+	handle("POST /admin/connections/persist", a.requireAdmin(a.requireWritable(a.adminPersistConnectionHandler)))
+	handle("POST /admin/connections/forget", a.requireAdmin(a.requireWritable(a.adminForgetConnectionHandler)))
+	handle("POST /admin/connections/default", a.requireAdmin(a.requireWritable(a.adminSetDefaultConnectionHandler)))
+	handle("GET /admin/setup", a.adminSetupHandler)
+	handle("POST /admin/setup", a.adminSetupSubmitHandler)
+	handle("GET /admin/login", a.adminLoginHandler)
+	handle("POST /admin/login", a.adminLoginSubmitHandler)
+	handle("POST /admin/logout", a.adminLogoutHandler)
+
 	handle("GET /jobs", a.jobsHandler)
 	handle("GET /migrate", a.migrationHandler)
 	handle("POST /migrate", a.requireWritable(a.runMigrationHandler))
@@ -84,6 +105,8 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /create-table", a.requireWritable(a.createTableHandler))
 	handle("GET /import", a.importFormHandler)
 	handle("POST /import", a.requireWritable(a.importFileHandler))
+	handle("GET /export", a.exportFormHandler)
+	handle("GET /history", a.historyHandler)
 	handle("POST /demo-data", a.requireWritable(a.demoDataHandler))
 	handle("POST /demo-data/remove", a.requireWritable(a.demoDataRemoveHandler))
 	handle("GET /guide", a.guideHandler)
@@ -97,16 +120,19 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /api/query", a.apiQueryHandler)
 	handle("POST /api/export", a.apiExportHandler)
 	handle("GET /api/schema", a.apiSchemaHandler)
-	handle("GET /api/admin/status", a.apiAdminStatusHandler)
-	handle("GET /api/admin/settings", a.apiAdminSettingsHandler)
-	handle("POST /api/admin/settings", a.apiAdminSettingsHandler)
+	handle("GET /api/catalog", a.apiCatalogHandler)
+	handle("GET /api/catalog/expand", a.apiCatalogExpandHandler)
+	handle("GET /api/admin/status", a.requireAdmin(a.apiAdminStatusHandler))
+	handle("GET /api/admin/settings", a.requireAdmin(a.apiAdminSettingsHandler))
+	handle("POST /api/admin/settings", a.requireAdmin(a.apiAdminSettingsHandler))
 	handle("GET /api/jobs", a.apiJobsHandler)
 	handle("POST /api/jobs", a.requireWritable(a.apiJobsHandler))
 	handle("POST /api/jobs/run", a.requireWritable(a.apiRunJobHandler))
 	handle("POST /api/import", a.requireWritable(a.apiImportHandler))
 	handle("POST /api/llm", a.apiLLMHandler)
-	handle("GET /api/llm/discover", a.apiLLMDiscoverHandler)
-	handle("POST /api/llm/autoconfig", a.apiLLMAutoConfigHandler)
+	handle("POST /api/llm/preview", a.apiLLMPreviewHandler)
+	handle("GET /api/llm/discover", a.requireAdmin(a.apiLLMDiscoverHandler))
+	handle("POST /api/llm/autoconfig", a.requireAdmin(a.apiLLMAutoConfigHandler))
 	handle("GET /api/llm/health", a.apiLLMHealthHandler)
 	handle("POST /api/llm/run", a.apiLLMRunHandler)
 }
@@ -120,10 +146,22 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data m
 	data["DefaultTheme"] = a.currentDefaultTheme()
 	data["DefaultDensity"] = a.currentDefaultDensity()
 	data["MaintenanceMode"] = a.currentReadOnlyMode()
+	if _, ok := data["PageSize"]; !ok {
+		data["PageSize"] = a.currentPageSize()
+	}
+	data["PageSizeOptions"] = pageSizeOptions
+	data["AdminAuthenticated"] = a.isAdminAuthenticated(sessionIDFromContext(r.Context()))
 	if a.conns != nil {
 		sessionID := sessionIDFromContext(r.Context())
 		data["Connections"] = a.conns.ListFor(sessionID)
-		data["ActiveConnection"] = a.activeConn(r.Context())
+		active := a.activeConn(r.Context())
+		data["ActiveConnection"] = active
+		// Managed SQL connections can span multiple databases/schemas/
+		// procedures on the server, which is too expensive to walk on every
+		// page render; the sidebar fetches /api/catalog asynchronously for
+		// those instead of the synchronous flat Tables/Views list used for
+		// the embedded tinySQL engine.
+		data["CatalogAsync"] = active != nil && !active.IsTinySQL()
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := a.tpl.ExecuteTemplate(w, name, data); err != nil {
@@ -502,6 +540,7 @@ func (a *App) tableViewHandler(w http.ResponseWriter, r *http.Request) {
 	if sortDir != "asc" && sortDir != "desc" {
 		sortDir = "asc"
 	}
+	pageSize := resolvePageSize(r.URL.Query().Get("pagesize"), a.currentPageSize())
 
 	meta, err := a.tableMeta(r.Context(), tableName)
 	if err != nil {
@@ -515,7 +554,7 @@ func (a *App) tableViewHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Build a sorted query if requested. Pass meta so the function can use the
 	// DB-sourced table name and validated column list.
-	cols, rows, err := a.tableRowsSorted(r, page, sort, sortDir, meta)
+	cols, rows, err := a.tableRowsSorted(r, page, sort, sortDir, pageSize, meta)
 	if err != nil {
 		if isMissingDBObjectError(err) {
 			a.renderObjectMissing(w, r, tableName, err)
@@ -525,7 +564,6 @@ func (a *App) tableViewHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pageSize := a.currentPageSize()
 	totalPages := 1
 	if meta.RowCount > pageSize {
 		totalPages = (meta.RowCount + pageSize - 1) / pageSize
@@ -540,7 +578,47 @@ func (a *App) tableViewHandler(w http.ResponseWriter, r *http.Request) {
 		"TotalPages": totalPages,
 		"Sort":       sort,
 		"SortDir":    sortDir,
+		"PageSize":   pageSize,
 	})
+}
+
+// pageSizeOptions is the shared list of selectable rows-per-page values,
+// offered identically by the table view and the SQL editor's result pager so
+// pagination feels the same throughout the app.
+var pageSizeOptions = []int{25, 50, 100, 250, 500, 1000}
+
+// resolvePageSize parses an optional "pagesize" query/JSON value, clamping it
+// to a sane range and falling back to fallback when raw is empty or invalid.
+func resolvePageSize(raw string, fallback int) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	if n > 1000 {
+		return 1000
+	}
+	return n
+}
+
+// apiTableScriptHandler returns ready-to-run SQL snippets for a table/view
+// (Select Top 1000 Rows / Script as INSERT / Script as UPDATE), used by the
+// sidebar's and table view's quick-action buttons.
+func (a *App) apiTableScriptHandler(w http.ResponseWriter, r *http.Request) {
+	tableName := r.PathValue("table")
+	meta, err := a.tableMeta(r.Context(), tableName)
+	if err != nil {
+		if isMissingDBObjectError(err) {
+			a.writeProblem(w, r, http.StatusNotFound, "Not found", err.Error())
+			return
+		}
+		a.serverError(w, err)
+		return
+	}
+	a.writeJSON(w, http.StatusOK, a.buildTableScript(r.Context(), meta))
 }
 
 // exportTableHandler streams a full table export as CSV or JSON.
@@ -568,11 +646,30 @@ func (a *App) exportTableHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) connectionsHandler(w http.ResponseWriter, r *http.Request) {
-	a.render(w, r, "connections", map[string]interface{}{})
+	a.render(w, r, "connections", map[string]interface{}{"Form": defaultConnectionForm()})
+}
+
+// defaultConnectionForm seeds the "Add Managed Connection" form with sane
+// defaults on first load (before any submission/failure has populated it).
+func defaultConnectionForm() map[string]interface{} {
+	return map[string]interface{}{
+		"kind":      "mssql",
+		"authmode":  "sql",
+		"encrypt":   "disable",
+		"sslmode":   "disable",
+		"trustCert": true,
+	}
 }
 
 func (a *App) importFormHandler(w http.ResponseWriter, r *http.Request) {
-	a.render(w, r, "import", map[string]interface{}{})
+	a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import"})
+}
+
+// historyHandler renders the dedicated local query history page. The
+// history itself lives in the browser's localStorage (never sent to the
+// server), so this just serves the shell page that reads it.
+func (a *App) historyHandler(w http.ResponseWriter, r *http.Request) {
+	a.render(w, r, "history", map[string]interface{}{})
 }
 
 func (a *App) guideHandler(w http.ResponseWriter, r *http.Request) {
@@ -609,6 +706,16 @@ func (a *App) adminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		settings.LLMAPIKey = a.currentLLMAPIKey()
 	}
 	if err == nil {
+		settings.Port = a.currentPort()
+		// This form never asks for the Admin password (that's its own form,
+		// handled by adminChangePasswordHandler) — without carrying it over,
+		// saving any other setting here would silently wipe it back to
+		// empty and disable Admin password protection.
+		settings.AdminPasswordHash = a.currentAdminPasswordHash()
+		// Maintenance mode has its own always-available toggle
+		// (adminToggleMaintenanceHandler); this form doesn't include that
+		// control, so keep whatever it's currently set to.
+		settings.ReadOnlyMode = a.currentReadOnlyMode()
 		err = a.applyRuntimeSettings(settings)
 	}
 	if err == nil {
@@ -639,37 +746,95 @@ func (a *App) addConnectionHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.Form.Get("id")
 	name := r.Form.Get("name")
 	kind := r.Form.Get("kind")
-	dsn := r.Form.Get("dsn")
-	saveConnection := r.Form.Get("save") != ""
-	setDefault := r.Form.Get("set_default") != ""
+	dsn := strings.TrimSpace(r.Form.Get("dsn"))
+
+	// Echo back everything the user typed so a failed attempt (e.g. a wrong
+	// password) doesn't force them to fill in the whole form again.
+	form := connectionFormEcho(r)
+	fail := func(message string) {
+		a.render(w, r, "connections", map[string]interface{}{"Error": message, "Form": form})
+	}
+
+	if dsn == "" && strings.TrimSpace(r.Form.Get("host")) != "" {
+		built, err := buildDSNFromFields(QuickConnectFields{
+			Kind:      kind,
+			Host:      r.Form.Get("host"),
+			Port:      r.Form.Get("port"),
+			Database:  r.Form.Get("database"),
+			User:      r.Form.Get("user"),
+			Password:  r.Form.Get("password"),
+			Instance:  r.Form.Get("instance"),
+			SSLMode:   r.Form.Get("sslmode"),
+			Encrypt:   r.Form.Get("encrypt"),
+			TrustCert: r.Form.Get("trust_cert") != "",
+			Params:    r.Form.Get("params"),
+			AuthMode:  r.Form.Get("authmode"),
+		})
+		if err != nil {
+			fail(err.Error())
+			return
+		}
+		dsn = built
+	}
 	ctx, cancel := a.withConnectTimeout(r.Context())
 	defer cancel()
 	conn, err := OpenManagedConnectionVerbose(ctx, id, name, kind, dsn, a.verboseLogger())
 	if err != nil {
-		a.render(w, r, "connections", map[string]interface{}{"Error": connectionErrorMessage(err, a.currentConnectTimeout())})
+		fail(connectionErrorMessage(err, a.currentConnectTimeout()))
 		return
 	}
+	// Owned by this session only: other concurrent users on the same running
+	// server neither see nor can switch to it until an admin explicitly
+	// shares it via "Save for everyone" (adminPersistConnectionHandler). Add
+	// itself disambiguates the ID against another session's same-named
+	// private connection, so this can't silently close/replace someone
+	// else's live DB.
+	conn.Owner = sessionIDFromContext(r.Context())
 	if err := a.conns.Add(conn); err != nil {
 		_ = conn.DB.Close()
-		a.render(w, r, "connections", map[string]interface{}{"Error": err.Error()})
+		fail(err.Error())
 		return
 	}
-	if setDefault {
-		if err := a.conns.SetDefault(conn.ID); err != nil {
-			a.render(w, r, "connections", map[string]interface{}{"Error": err.Error()})
-			return
-		}
-	}
 	_ = a.conns.SetActiveFor(sessionIDFromContext(r.Context()), conn.ID)
-	if saveConnection || setDefault {
-		if err := a.saveManagedConnections(r.Context()); err != nil {
-			a.render(w, r, "connections", map[string]interface{}{"Error": "Connection added but could not be saved: " + err.Error()})
-			return
-		}
-	}
+	// Deliberately does not persist to the server's shared settings here —
+	// this connection (and any credentials in its DSN) only lives in memory
+	// for this running process until an admin explicitly saves it via
+	// adminPersistConnectionHandler (POST /admin/connections/persist).
 	http.Redirect(w, r, "/connections", http.StatusSeeOther)
 }
 
+// connectionFormEcho captures the "Add Managed Connection" form fields so
+// they can be re-rendered into the form after a failed attempt (e.g. a bad
+// password or unreachable host), instead of forcing the user to retype
+// everything.
+func connectionFormEcho(r *http.Request) map[string]interface{} {
+	get := r.Form.Get
+	return map[string]interface{}{
+		"id":        get("id"),
+		"name":      get("name"),
+		"kind":      get("kind"),
+		"host":      get("host"),
+		"port":      get("port"),
+		"database":  get("database"),
+		"user":      get("user"),
+		"password":  get("password"),
+		"instance":  get("instance"),
+		"sslmode":   get("sslmode"),
+		"encrypt":   get("encrypt"),
+		"authmode":  get("authmode"),
+		"params":    get("params"),
+		"dsn":       get("dsn"),
+		"trustCert": get("trust_cert") != "",
+	}
+}
+
+// setActiveConnectionHandler is the unprivileged "Use" action: it only ever
+// changes this session's own active connection (SetActiveFor is
+// session-scoped and already rejects switching to a connection privately
+// owned by someone else). Changing the server-wide default for every
+// session is a separate, admin-gated action — see
+// adminSetDefaultConnectionHandler — precisely because it affects everyone,
+// not just the requester.
 func (a *App) setActiveConnectionHandler(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -678,16 +843,6 @@ func (a *App) setActiveConnectionHandler(w http.ResponseWriter, r *http.Request)
 	if err := a.conns.SetActiveFor(sessionIDFromContext(r.Context()), r.Form.Get("id")); err != nil {
 		a.render(w, r, "connections", map[string]interface{}{"Error": err.Error()})
 		return
-	}
-	if r.Form.Get("set_default") != "" {
-		if err := a.conns.SetDefault(r.Form.Get("id")); err != nil {
-			a.render(w, r, "connections", map[string]interface{}{"Error": err.Error()})
-			return
-		}
-		if err := a.saveManagedConnections(r.Context()); err != nil {
-			a.render(w, r, "connections", map[string]interface{}{"Error": "Default changed but could not be saved: " + err.Error()})
-			return
-		}
 	}
 	http.Redirect(w, r, "/connections", http.StatusSeeOther)
 }
@@ -708,14 +863,15 @@ func (a *App) runMigrationHandler(w http.ResponseWriter, r *http.Request) {
 	targetTable := r.Form.Get("target_table")
 	createTarget := r.Form.Get("create_target") == "on"
 
-	summary, err := a.migrateTable(r.Context(), sourceID, targetID, sourceTable, targetTable, createTarget)
+	sessionID := sessionIDFromContext(r.Context())
+	summary, err := a.migrateTable(r.Context(), sessionID, sourceID, targetID, sourceTable, targetTable, createTarget)
 	data := a.migrationPageData(r)
 	data["SelectedSourceID"] = sourceID
 	data["SelectedTargetID"] = targetID
 	data["SourceTable"] = sourceTable
 	data["TargetTable"] = targetTable
 	data["CreateTarget"] = createTarget
-	if source := a.conns.Get(sourceID); source != nil {
+	if source := a.conns.GetFor(sessionID, sourceID); source != nil {
 		data["SourceTables"] = a.tableNames(contextWithActiveConnection(r.Context(), source))
 	}
 	if err != nil {
@@ -748,7 +904,7 @@ func (a *App) migrationPageData(r *http.Request) map[string]interface{} {
 		"TargetTable":        strings.TrimSpace(r.URL.Query().Get("target_table")),
 		"MigrationMaxTables": maxRAGTables,
 	}
-	if source := a.conns.Get(sourceID); source != nil {
+	if source := a.conns.GetFor(sessionID, sourceID); source != nil {
 		ctx := contextWithActiveConnection(r.Context(), source)
 		data["SourceTables"] = a.tableNames(ctx)
 	}
@@ -758,11 +914,13 @@ func (a *App) migrationPageData(r *http.Request) map[string]interface{} {
 // tableRowsSorted fetches a page of rows, optionally sorted by a known column.
 // meta must already be validated (obtained from a.tableMeta). The SQL query is
 // built entirely from DB-sourced values (meta.Name, validated column names).
-func (a *App) tableRowsSorted(r *http.Request, page int, sortCol, dir string, meta TableMeta) ([]Column, [][]string, error) {
+func (a *App) tableRowsSorted(r *http.Request, page int, sortCol, dir string, pageSize int, meta TableMeta) ([]Column, [][]string, error) {
 	if page < 1 {
 		page = 1
 	}
-	pageSize := a.currentPageSize()
+	if pageSize <= 0 {
+		pageSize = a.currentPageSize()
+	}
 	offset := (page - 1) * pageSize
 
 	conn := a.activeConn(r.Context())
@@ -984,9 +1142,10 @@ func (a *App) deleteRecordHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/t/"+url.PathEscape(meta.Name), http.StatusSeeOther)
 }
 
-// createTableFormHandler renders the table-design wizard.
+// createTableFormHandler renders the New Table tab of the combined table
+// management page.
 func (a *App) createTableFormHandler(w http.ResponseWriter, r *http.Request) {
-	a.render(w, r, "create_table", map[string]interface{}{})
+	a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "create"})
 }
 
 // createTableHandler executes the CREATE TABLE DDL.
@@ -998,12 +1157,13 @@ func (a *App) createTableHandler(w http.ResponseWriter, r *http.Request) {
 
 	tableName := strings.TrimSpace(r.Form.Get("table_name"))
 	if tableName == "" {
-		a.render(w, r, "create_table", map[string]interface{}{"Error": "Table name is required."})
+		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "create", "Error": "Table name is required."})
 		return
 	}
 	if !isValidIdentifier(tableName) {
-		a.render(w, r, "create_table", map[string]interface{}{
-			"Error": "Table name may only contain letters, digits, and underscores.",
+		a.render(w, r, "manage_table", map[string]interface{}{
+			"ActiveTab": "create",
+			"Error":     "Table name may only contain letters, digits, and underscores.",
 		})
 		return
 	}
@@ -1016,7 +1176,7 @@ func (a *App) createTableHandler(w http.ResponseWriter, r *http.Request) {
 	colNames := r.Form["col_name"]
 	colTypes := r.Form["col_type"]
 	if len(colNames) == 0 {
-		a.render(w, r, "create_table", map[string]interface{}{"Error": "At least one column is required."})
+		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "create", "Error": "At least one column is required."})
 		return
 	}
 
@@ -1028,8 +1188,9 @@ func (a *App) createTableHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if !isValidIdentifier(name) {
-			a.render(w, r, "create_table", map[string]interface{}{
-				"Error": fmt.Sprintf("Column name %q may only contain letters, digits, and underscores.", name),
+			a.render(w, r, "manage_table", map[string]interface{}{
+				"ActiveTab": "create",
+				"Error":     fmt.Sprintf("Column name %q may only contain letters, digits, and underscores.", name),
 			})
 			return
 		}
@@ -1056,7 +1217,8 @@ func (a *App) createTableHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := a.withQueryTimeout(r.Context())
 	defer cancel()
 	if _, err := a.execConn(ctx, conn, "table.create", ddl); err != nil {
-		a.render(w, r, "create_table", map[string]interface{}{
+		a.render(w, r, "manage_table", map[string]interface{}{
+			"ActiveTab": "create",
 			"Error":     "Could not create table: " + err.Error(),
 			"TableName": safeTableName,
 		})
@@ -1067,17 +1229,17 @@ func (a *App) createTableHandler(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) importFileHandler(w http.ResponseWriter, r *http.Request) {
 	if conn := a.activeConn(r.Context()); conn != nil && !conn.IsTinySQL() {
-		a.render(w, r, "import", map[string]interface{}{"Error": "File import currently targets the local tinySQL DB only."})
+		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "File import currently targets the local tinySQL DB only."})
 		return
 	}
 	if err := r.ParseMultipartForm(16 << 20); err != nil {
-		a.render(w, r, "import", map[string]interface{}{"Error": "Could not read upload: " + err.Error()})
+		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "Could not read upload: " + err.Error()})
 		return
 	}
 	table := strings.TrimSpace(r.Form.Get("table"))
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		a.render(w, r, "import", map[string]interface{}{"Error": "Choose a file to import."})
+		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "Choose a file to import."})
 		return
 	}
 	defer file.Close()
@@ -1086,21 +1248,21 @@ func (a *App) importFileHandler(w http.ResponseWriter, r *http.Request) {
 		table = tableNameFromFilename(header.Filename)
 	}
 	if !isValidIdentifier(table) {
-		a.render(w, r, "import", map[string]interface{}{"Error": "Table name may only contain letters, digits, and underscores."})
+		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "Table name may only contain letters, digits, and underscores."})
 		return
 	}
 	table = sanitizeIdentifier(table)
 
 	content, err := io.ReadAll(io.LimitReader(file, 16<<20))
 	if err != nil {
-		a.render(w, r, "import", map[string]interface{}{"Error": "Could not read upload: " + err.Error()})
+		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "Could not read upload: " + err.Error()})
 		return
 	}
 	format := importFormatFromName(header.Filename, r.Form.Get("format"))
 	if format == "xlsx" {
 		content, err = xlsxToCSV(content)
 		if err != nil {
-			a.render(w, r, "import", map[string]interface{}{"Error": "Could not read XLSX file: " + err.Error()})
+			a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "Could not read XLSX file: " + err.Error()})
 			return
 		}
 		format = "csv"
@@ -1122,14 +1284,22 @@ func (a *App) importFileHandler(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := importContent(ctx, a.nativeDB, a.tenant, table, format, bytes.NewReader(content), opts)
 	if err != nil {
-		a.render(w, r, "import", map[string]interface{}{"Error": "Import failed: " + err.Error(), "TableName": table})
+		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "Import failed: " + err.Error(), "TableName": table})
 		return
 	}
-	a.render(w, r, "import", map[string]interface{}{
-		"Success": fmt.Sprintf("Imported %d rows into %s.", res.RowsInserted, table),
-		"Table":   table,
-		"Result":  res,
+	a.render(w, r, "manage_table", map[string]interface{}{
+		"ActiveTab": "import",
+		"Success":   fmt.Sprintf("Imported %d rows into %s.", res.RowsInserted, table),
+		"Table":     table,
+		"Result":    res,
 	})
+}
+
+// exportFormHandler renders the Export tab of the combined table management
+// page. The actual file streaming reuses the existing per-table
+// exportTableHandler at /t/{table}/export?format=X.
+func (a *App) exportFormHandler(w http.ResponseWriter, r *http.Request) {
+	a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "export"})
 }
 
 // demoJobName identifies the sample scheduled job seeded alongside demo data
@@ -1698,6 +1868,43 @@ func (a *App) apiSchemaHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(a.schemaSnapshot(r.Context())))
 }
 
+// apiCatalogHandler returns the full server-wide catalog tree (every
+// database/schema/table/view/procedure the active connection's credentials
+// can see) for the sidebar. Other databases on the same PostgreSQL server
+// come back with needsFetch=true and are populated on demand via
+// apiCatalogExpandHandler.
+func (a *App) apiCatalogHandler(w http.ResponseWriter, r *http.Request) {
+	tree, err := a.catalogTree(r.Context())
+	if err != nil {
+		a.writeProblem(w, r, http.StatusInternalServerError, "Could not load catalog", err.Error())
+		return
+	}
+	a.writeJSON(w, http.StatusOK, tree)
+}
+
+// apiCatalogExpandHandler lazily loads one database's schemas/tables/views
+// that apiCatalogHandler reported as needsFetch=true.
+func (a *App) apiCatalogExpandHandler(w http.ResponseWriter, r *http.Request) {
+	database := strings.TrimSpace(r.URL.Query().Get("database"))
+	if database == "" {
+		a.writeProblem(w, r, http.StatusBadRequest, "Missing database", "the database query parameter is required")
+		return
+	}
+	conn := a.activeConn(r.Context())
+	if conn == nil || conn.IsTinySQL() {
+		a.writeProblem(w, r, http.StatusBadRequest, "Not supported", "the active connection has a single database")
+		return
+	}
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	db, err := conn.ExpandCatalogDatabase(ctx, database)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusInternalServerError, "Could not load database", err.Error())
+		return
+	}
+	a.writeJSON(w, http.StatusOK, db)
+}
+
 func (a *App) apiAdminStatusHandler(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, a.adminStatus(r.Context()))
 }
@@ -1741,7 +1948,19 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			DefaultTheme:   body.DefaultTheme,
 			DefaultDensity: body.DefaultDensity,
 		})
+		if err == nil && strings.TrimSpace(body.LLMAPIKey) == "" {
+			// An empty key means "leave it alone", not "clear it" — matches
+			// the masked placeholder shown in the Admin UI, which never
+			// re-sends the real key.
+			settings.LLMAPIKey = a.currentLLMAPIKey()
+		}
 		if err == nil {
+			settings.Port = a.currentPort()
+			settings.AdminPasswordHash = a.currentAdminPasswordHash()
+			// Maintenance mode has its own always-available toggle
+			// (POST /admin/maintenance/toggle); this endpoint no longer
+			// changes it, so keep whatever it's currently set to.
+			settings.ReadOnlyMode = a.currentReadOnlyMode()
 			err = a.applyRuntimeSettings(settings)
 		}
 		if err == nil {
@@ -2503,19 +2722,8 @@ func (a *App) apiLLMHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var resultCtx *LLMResultContext
-	if len(body.Columns) > 0 || len(body.Rows) > 0 {
-		resultCtx = summarizeLLMResult(body.Columns, body.Rows)
-	}
-
-	out, err := llm.Complete(r.Context(), LLMRequest{
-		Action: action,
-		Prompt: prompt,
-		Schema: a.llmSchemaContext(r.Context(), action, prompt, sqlText, errorText),
-		SQL:    sqlText,
-		Error:  errorText,
-		Result: resultCtx,
-	})
+	req := a.buildLLMRequest(r.Context(), action, prompt, sqlText, errorText, body.Columns, body.Rows)
+	out, err := llm.Complete(r.Context(), req)
 	if err != nil {
 		a.writeProblem(w, r, http.StatusBadGateway, "LLM request failed", err.Error())
 		return
@@ -2533,6 +2741,82 @@ func (a *App) apiLLMHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.writeJSON(w, http.StatusOK, map[string]string{"text": out})
+}
+
+// buildLLMRequest assembles the LLMRequest (schema context + prompt/sql/
+// error/result) shared by apiLLMHandler and apiLLMPreviewHandler, so the
+// "what gets sent to the AI" preview is built from the exact same code path
+// as a real request.
+func (a *App) buildLLMRequest(ctx context.Context, action, prompt, sqlText, errorText string, columns []string, rows [][]string) LLMRequest {
+	var resultCtx *LLMResultContext
+	if len(columns) > 0 || len(rows) > 0 {
+		resultCtx = summarizeLLMResult(columns, rows)
+	}
+	return LLMRequest{
+		Action: action,
+		Prompt: prompt,
+		Schema: a.llmSchemaContext(ctx, action, prompt, sqlText, errorText),
+		SQL:    sqlText,
+		Error:  errorText,
+		Result: resultCtx,
+	}
+}
+
+// apiLLMPreviewHandler returns the exact system/user messages that would be
+// sent to the configured LLM for the given action/prompt/sql/error/result —
+// without actually calling the LLM. This powers the SQL editor's "Details"
+// panel so users can see (and trust) what data leaves the app.
+func (a *App) apiLLMPreviewHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Action  string     `json:"action"`
+		Prompt  string     `json:"prompt"`
+		SQL     string     `json:"sql"`
+		Error   string     `json:"error"`
+		Columns []string   `json:"columns"`
+		Rows    [][]string `json:"rows"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+		return
+	}
+	action := strings.TrimSpace(body.Action)
+	switch action {
+	case llmActionGenerateSQL, llmActionExplainResults, llmActionExplainError, llmActionAskRun:
+	default:
+		action = llmActionAskRun
+	}
+
+	req := a.buildLLMRequest(r.Context(), action,
+		strings.TrimSpace(body.Prompt), strings.TrimSpace(body.SQL), strings.TrimSpace(body.Error),
+		body.Columns, body.Rows)
+
+	// "system"/"user" are the ground truth — byte-for-byte what a real
+	// request would send (minified JSON and all) — so charCount reflects
+	// the actual payload size. "userDisplay" is a separate, pretty-printed
+	// rendering for the Details panel; it's never the value used to compute
+	// size or sent anywhere, just easier to read.
+	messages := buildLLMMessages(req)
+	displayMessages := buildLLMMessagesForDisplay(req)
+	system, user, userDisplay := "", "", ""
+	if len(messages) > 0 {
+		system = messages[0].Content
+	}
+	if len(messages) > 1 {
+		user = messages[1].Content
+	}
+	if len(displayMessages) > 1 {
+		userDisplay = displayMessages[1].Content
+	}
+	settings := a.runtimeSettingsView()
+	a.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"configured":  a.llmClient() != nil,
+		"model":       settings.LLMModel,
+		"baseURL":     settings.LLMBaseURL,
+		"system":      system,
+		"user":        user,
+		"userDisplay": userDisplay,
+		"charCount":   len(system) + len(user),
+	})
 }
 
 // apiLLMHealthHandler performs a tiny server-side completion request so admins

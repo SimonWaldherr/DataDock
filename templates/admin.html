@@ -3,9 +3,19 @@
 
 <div class="page-hdr">
   <h1><i class="bi bi-speedometer2 text-primary"></i>Admin</h1>
-  <span class="badge {{if index .Status "ok"}}text-bg-success{{else}}text-bg-danger{{end}}">
-    <i class="bi bi-{{if index .Status "ok"}}check-circle{{else}}exclamation-triangle{{end}} me-1"></i>{{if index .Status "ok"}}Healthy{{else}}Error{{end}}
-  </span>
+  <div class="d-flex align-items-center gap-2">
+    <span class="badge {{if index .Status "ok"}}text-bg-success{{else}}text-bg-danger{{end}}">
+      <i class="bi bi-{{if index .Status "ok"}}check-circle{{else}}exclamation-triangle{{end}} me-1"></i>{{if index .Status "ok"}}Healthy{{else}}Error{{end}}
+    </span>
+    {{if .Settings.ReadOnlyMode}}
+    <span class="badge text-bg-warning"><i class="bi bi-lock-fill me-1"></i>Read-only</span>
+    {{end}}
+    <a href="/connections" class="btn btn-sm btn-outline-secondary"><i class="bi bi-hdd-network me-1"></i>Connections</a>
+    <a href="/jobs" class="btn btn-sm btn-outline-secondary"><i class="bi bi-calendar2-check me-1"></i>Jobs</a>
+    <form method="post" action="/admin/logout" class="d-inline">
+      <button class="btn btn-sm btn-outline-secondary"><i class="bi bi-box-arrow-right me-1"></i>Log out</button>
+    </form>
+  </div>
 </div>
 
 {{template "alert" .}}
@@ -64,10 +74,39 @@
   </div>
 </div>
 
+<div class="card border-warning">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
+      <div>
+        <h2 class="h6 mb-1"><i class="bi bi-exclamation-triangle text-warning me-1"></i>Maintenance Mode</h2>
+        <p class="small text-muted mb-0" style="max-width:52ch">
+          Blocks record edits, table/DDL changes, imports, migrations, and SQL editor writes — for
+          <strong>every</strong> user — until turned off again. This toggle always works, even while
+          maintenance mode is already on.
+        </p>
+      </div>
+      <form method="post" action="/admin/maintenance/toggle" class="d-flex align-items-center gap-2 flex-shrink-0">
+        <span class="badge {{if .Settings.ReadOnlyMode}}text-bg-warning{{else}}text-bg-secondary{{end}}">
+          {{if .Settings.ReadOnlyMode}}Read-only{{else}}Writes enabled{{end}}
+        </span>
+        <button class="btn btn-sm {{if .Settings.ReadOnlyMode}}btn-warning{{else}}btn-outline-warning{{end}}" type="submit">
+          {{if .Settings.ReadOnlyMode}}<i class="bi bi-unlock me-1"></i>Turn off{{else}}<i class="bi bi-lock me-1"></i>Turn on{{end}}
+        </button>
+      </form>
+    </div>
+  </div>
+</div>
+
 <div class="card">
   <div class="card-body">
-    <h2 class="h6 mb-3">Connection &amp; Workbench</h2>
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h2 class="h6 mb-0">Settings</h2>
+      {{if .Settings.AdminPasswordSet}}
+      <span class="badge bg-light text-secondary border"><i class="bi bi-shield-lock me-1"></i>Password-protected</span>
+      {{end}}
+    </div>
     <form method="post" action="/admin/settings" class="row g-3">
+      <div class="col-12 admin-section-title">General</div>
       <div class="col-md-3">
         <label class="form-label small text-muted">Dialect</label>
         <input class="form-control form-control-sm" name="dialect" value="{{.Settings.Dialect}}" placeholder="tinysql">
@@ -84,6 +123,8 @@
         <label class="form-label small text-muted">Datasheet Page Size</label>
         <input class="form-control form-control-sm" type="number" min="1" max="1000" name="page_size" value="{{.Settings.PageSize}}" placeholder="50">
       </div>
+
+      <div class="col-12 admin-section-title mt-2">Appearance</div>
       <div class="col-md-3">
         <label class="form-label small text-muted">Default Theme</label>
         <select class="form-select form-select-sm" name="default_theme">
@@ -104,18 +145,11 @@
           <option value="compact" {{if eq .Settings.DefaultDensity "compact"}}selected{{end}}>Compact</option>
         </select>
       </div>
-      <div class="col-md-3 d-flex align-items-end">
-        <div class="form-check form-switch">
-          <input class="form-check-input" type="checkbox" role="switch" id="readOnlyMode" name="read_only_mode" {{if .Settings.ReadOnlyMode}}checked{{end}}>
-          <label class="form-check-label small" for="readOnlyMode">Maintenance mode (read-only)</label>
-        </div>
-      </div>
       <div class="col-12 small text-muted">
-        Default theme/density apply to browsers without a saved preference. Maintenance mode blocks record edits, table/DDL changes, imports, migrations, and DML from the SQL editor for every user until turned off here.
+        Default theme/density apply to browsers without a saved preference — anyone who's picked their own in Display still keeps it.
       </div>
 
-      <div class="col-12"><hr class="my-1"></div>
-
+      <div class="col-12 admin-section-title mt-2">AI / LLM</div>
       <div class="col-md-5">
         <label class="form-label small text-muted">OpenAI-compatible Base URL</label>
         <input class="form-control form-control-sm" name="llm_base_url" value="{{.Settings.LLMBaseURL}}" placeholder="http://127.0.0.1:1234/v1">
@@ -126,7 +160,8 @@
       </div>
       <div class="col-md-3">
         <label class="form-label small text-muted">API Key</label>
-        <input class="form-control form-control-sm" name="llm_api_key" type="password" placeholder="{{if .Settings.LLMAPIKeySet}}{{.Settings.LLMAPIKeyDisplay}}{{else}}optional{{end}}">
+        <input class="form-control form-control-sm" name="llm_api_key" type="password" autocomplete="new-password" placeholder="{{if .Settings.LLMAPIKeySet}}{{.Settings.LLMAPIKeyDisplay}}{{else}}optional{{end}}">
+        <div class="form-text">{{if .Settings.LLMAPIKeySet}}Leave empty to keep the current key.{{else}}Optional for local providers.{{end}}</div>
       </div>
       <div class="col-md-3">
         <label class="form-label small text-muted">LLM Timeout</label>
@@ -159,7 +194,7 @@
               <select id="llmAutoModel" class="form-select form-select-sm"></select>
             </div>
             <div class="col-md-2 d-flex gap-2">
-              <button class="btn btn-outline-secondary btn-sm flex-fill" type="button" onclick="detectLLMServers()">
+              <button id="llmDetectBtn" class="btn btn-outline-secondary btn-sm flex-fill" type="button" onclick="detectLLMServers()">
                 <i class="bi bi-search me-1"></i>Detect
               </button>
               <button class="btn btn-primary btn-sm flex-fill" type="button" onclick="applyLLMAutoConfig()">
@@ -174,6 +209,30 @@
       </div>
       <div class="col-12">
         <button class="btn btn-primary btn-sm" type="submit">Save Settings</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6 mb-3">Admin Password</h2>
+    <p class="small text-muted mb-3">Required to reach this page and to permanently save database connection credentials for everyone (Connections page).</p>
+    <form method="post" action="/admin/change-password" class="row g-2">
+      <div class="col-md-3">
+        <label class="form-label small">Current password</label>
+        <input type="password" class="form-control form-control-sm" name="current_password" required autocomplete="current-password">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small">New password</label>
+        <input type="password" class="form-control form-control-sm" name="new_password" minlength="8" required autocomplete="new-password">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small">Confirm new password</label>
+        <input type="password" class="form-control form-control-sm" name="new_password_confirm" minlength="8" required autocomplete="new-password">
+      </div>
+      <div class="col-md-3 d-flex align-items-end">
+        <button class="btn btn-outline-secondary btn-sm w-100" type="submit"><i class="bi bi-key me-1"></i>Change Password</button>
       </div>
     </form>
   </div>
@@ -200,21 +259,52 @@
 
 <div class="card">
   <div class="card-body">
-    <div class="d-flex justify-content-between align-items-center mb-2">
-      <h2 class="h6 mb-0">Status JSON</h2>
-      <button class="btn btn-outline-secondary btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('adminStatus').innerText)">Copy</button>
+    <div class="d-flex justify-content-between align-items-center">
+      <button type="button" class="btn btn-link btn-sm ps-0 text-decoration-none" id="statusJSONToggle" onclick="toggleStatusJSON()">
+        <i class="bi bi-chevron-right me-1" id="statusJSONCaret"></i><span class="h6 mb-0">Status JSON</span>
+      </button>
+      <button id="copyStatusBtn" class="btn btn-outline-secondary btn-sm d-none" onclick="copyAdminStatus(this)"><i class="bi bi-clipboard me-1"></i>Copy</button>
     </div>
-    <pre id="adminStatus" class="small mb-0" style="max-height:520px;overflow:auto">{{.StatusJSON}}</pre>
+    <div id="statusJSONBody" class="d-none mt-2">
+      <pre id="adminStatus" class="small mb-0" style="max-height:520px;overflow:auto">{{.StatusJSON}}</pre>
+    </div>
   </div>
 </div>
 
 <script>
+function toggleStatusJSON() {
+  var body = document.getElementById('statusJSONBody');
+  var caret = document.getElementById('statusJSONCaret');
+  var copyBtn = document.getElementById('copyStatusBtn');
+  var hidden = !body.classList.contains('d-none');
+  body.classList.toggle('d-none', hidden);
+  copyBtn.classList.toggle('d-none', hidden);
+  caret.className = hidden ? 'bi bi-chevron-right me-1' : 'bi bi-chevron-down me-1';
+}
+
+function copyAdminStatus(btn) {
+  var text = document.getElementById('adminStatus').innerText;
+  var restore = function () {
+    setTimeout(function () {
+      btn.innerHTML = '<i class="bi bi-clipboard me-1"></i>Copy';
+    }, 1500);
+  };
+  navigator.clipboard.writeText(text).then(function () {
+    btn.innerHTML = '<i class="bi bi-check2 me-1"></i>Copied!';
+    restore();
+  }, function () {
+    btn.innerHTML = '<i class="bi bi-x-lg me-1"></i>Could not copy';
+    restore();
+  });
+}
+
 var llmDetectedServers = [];
 
 function setLLMAutoStatus(text, kind) {
   var el = document.getElementById('llmAutoStatus');
   if (!el) return;
   el.className = 'small ' + (kind === 'error' ? 'text-danger' : kind === 'ok' ? 'text-success' : 'text-muted');
+  el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
   el.textContent = text || '';
 }
 
@@ -254,11 +344,14 @@ function renderLLMDetection(data) {
 }
 
 function detectLLMServers() {
+  var btn = document.getElementById('llmDetectBtn');
+  if (btn.disabled) return;
   var host = document.getElementById('llmAutoHost').value.trim();
   var port = document.getElementById('llmAutoPort').value.trim();
   var params = new URLSearchParams();
   if (host) params.set('host', host);
   if (port) params.set('port', port);
+  btn.disabled = true;
   setLLMAutoStatus('Detecting...', '');
   fetch('/api/llm/discover?' + params.toString())
     .then(function(resp) { return resp.json().then(function(data) { return { ok: resp.ok, data: data }; }); })
@@ -270,7 +363,8 @@ function detectLLMServers() {
       llmDetectedServers = [];
       renderLLMDetection({ servers: [] });
       setLLMAutoStatus(err.message || err.toString(), 'error');
-    });
+    })
+    .finally(function() { btn.disabled = false; });
 }
 
 function applyLLMAutoConfig() {

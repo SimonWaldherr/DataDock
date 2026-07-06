@@ -473,7 +473,8 @@
       display: flex;
       align-items: center;
       gap: .5rem;
-      margin: .06rem .55rem;
+      flex: 1 1 auto;
+      min-width: 0;
       padding: .48rem .58rem;
       color: var(--ink);
       text-decoration: none;
@@ -498,6 +499,168 @@
       padding: .5rem 1rem;
       font-size: .8rem;
       color: var(--muted);
+    }
+
+    /* ── Sidebar: collapsible Tables/Views groups (SSMS-style) ── */
+    .sidebar-group { margin-bottom: .35rem; }
+    .sidebar-group-header {
+      display: flex;
+      align-items: center;
+      gap: .4rem;
+      width: 100%;
+      margin: 0 .55rem;
+      padding: .3rem .3rem;
+      background: transparent;
+      border: none;
+      border-radius: 6px;
+      color: var(--muted);
+      font-size: .72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      cursor: pointer;
+    }
+    .sidebar-group-header:hover { background: var(--hover-bg); color: var(--ink); }
+    .sidebar-group-caret { transition: transform .12s; flex-shrink: 0; }
+    .sidebar-group-header.collapsed .sidebar-group-caret { transform: rotate(-90deg); }
+    .sidebar-group-count {
+      margin-left: auto;
+      background: var(--surface-strong);
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 0 .45rem;
+      font-size: .68rem;
+      font-weight: 600;
+    }
+    .sidebar-group-body[hidden] { display: none; }
+    /* Each nesting level (Database > Schema > Tables/Views/Procedures >
+       item) adds its own indent via this padding, cascading naturally
+       through however many levels are actually nested — no per-level JS
+       math needed, unlike an inline padding-left computed from a depth
+       number (which only indented the *header* row, never the leaf table
+       rows, and didn't stack for genuinely deep DB > schema > kind trees). */
+    .sidebar-group-body { padding-left: 12px; }
+    .table-row {
+      display: flex;
+      align-items: center;
+      gap: .15rem;
+      margin: .06rem .55rem;
+    }
+    .table-row[hidden] { display: none; }
+    .table-quick-actions {
+      display: none;
+      align-items: center;
+      gap: .1rem;
+      flex-shrink: 0;
+      padding-right: .2rem;
+    }
+    .table-row:hover .table-quick-actions,
+    .table-row:focus-within .table-quick-actions { display: flex; }
+    .qa-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      border-radius: 5px;
+      font-size: .78rem;
+      cursor: pointer;
+    }
+    .qa-btn:hover { background: var(--active-bg); color: var(--active-ink); }
+
+    /* ── Sidebar: collapse toggle, refresh, filter count, highlight ── */
+    .app-body { position: relative; }
+    .sidebar-collapse-btn {
+      position: absolute;
+      top: 10px;
+      left: calc(var(--sidebar-w) - 14px);
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      font-size: .75rem;
+      cursor: pointer;
+      z-index: 6;
+      transition: left .15s ease;
+      box-shadow: var(--shadow-soft);
+    }
+    .sidebar-collapse-btn:hover { background: var(--hover-bg); color: var(--ink); }
+    .app-body.sidebar-collapsed .sidebar {
+      width: 0;
+      min-width: 0;
+      overflow: hidden;
+      border-right: none;
+    }
+    .app-body.sidebar-collapsed .sidebar-collapse-btn {
+      left: 8px;
+    }
+    .app-body.sidebar-collapsed .sidebar-collapse-btn i {
+      transform: rotate(180deg);
+    }
+    .sidebar-icon-btn {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      width: 22px;
+      height: 22px;
+      border-radius: 5px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: .82rem;
+    }
+    .sidebar-icon-btn:hover { background: var(--hover-bg); color: var(--ink); }
+    .sidebar-icon-btn.is-loading i { animation: sidebar-spin .6s linear infinite; }
+    @keyframes sidebar-spin { to { transform: rotate(360deg); } }
+    .sidebar-search input { padding-right: 2.5rem; }
+    .sidebar-filter-count {
+      position: absolute;
+      right: .55rem;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: .68rem;
+      color: var(--muted);
+      pointer-events: none;
+    }
+    .table-link .tl-text mark, .table-link mark {
+      background: color-mix(in srgb, var(--brand) 35%, transparent);
+      color: inherit;
+      border-radius: 2px;
+      padding: 0 1px;
+    }
+    .sidebar-recent-title {
+      font-size: .68rem;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--muted);
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: .3rem;
+      margin: .3rem .55rem .1rem;
+    }
+    .admin-section-title {
+      font-size: .7rem;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--muted);
+      font-weight: 700;
+      padding-bottom: .25rem;
+      border-bottom: 1px solid var(--line);
+    }
+    .remove-recent-btn:hover { color: var(--brand-dark); }
+    @media (max-width: 900px) {
+      .sidebar-collapse-btn { display: none; }
     }
     .sidebar .sidebar-footer {
       margin-top: auto;
@@ -1376,6 +1539,7 @@
     <a class="btn-nav" href="/query" title="SQL Editor"><i class="bi bi-terminal"></i><span>SQL</span></a>
     <a class="btn-nav" href="/create-table" title="New Table"><i class="bi bi-plus-lg"></i><span>New Table</span></a>
     <a class="btn-nav" href="/import" title="Import File"><i class="bi bi-upload"></i><span>Import</span></a>
+    <a class="btn-nav" href="/export" title="Export Table"><i class="bi bi-download"></i><span>Export</span></a>
     <a class="btn-nav" href="/connections" title="Connections"><i class="bi bi-hdd-network"></i><span>Connections</span></a>
   </div>
 
@@ -1428,22 +1592,42 @@
 <div class="app-body">
 
   <!-- ── Sidebar ── -->
-  <nav class="sidebar" aria-label="Database objects">
-    <div class="section-title">Tables & Views</div>
+  <button type="button" id="sidebarCollapseBtn" class="sidebar-collapse-btn" title="Hide the Tables &amp; Views sidebar" aria-label="Hide sidebar" aria-expanded="true">
+    <i class="bi bi-chevron-left"></i>
+  </button>
+  <nav class="sidebar" aria-label="Database objects" id="appSidebar">
+    <div class="section-title d-flex align-items-center">
+      <span>Tables &amp; Views</span>
+      <button type="button" id="sidebarRefreshBtn" class="sidebar-icon-btn ms-auto" title="Refresh" aria-label="Refresh tables and views">
+        <i class="bi bi-arrow-repeat"></i>
+      </button>
+    </div>
     <div class="sidebar-tools">
       <div class="sidebar-search">
         <i class="bi bi-search"></i>
         <label class="visually-hidden" for="sidebarFilter">Filter database objects</label>
-        <input id="sidebarFilter" class="form-control form-control-sm" type="search" placeholder="Filter objects" autocomplete="off" aria-label="Filter database objects">
+        <input id="sidebarFilter" class="form-control form-control-sm" type="search" placeholder="Filter objects (/)" autocomplete="off" aria-label="Filter database objects">
+        <span id="sidebarFilterCount" class="sidebar-filter-count"></span>
       </div>
     </div>
+    <div id="sidebarRecentRoot"></div>
     {{$active := .ActiveTable}}
-    {{range .TableObjects}}
-    <a class="table-link {{if eq $active .Name}}active{{end}}" href="/t/{{.Name}}">
-      {{if eq .Kind "view"}}<i class="bi bi-eye"></i>{{else}}<i class="bi bi-table"></i>{{end}}{{.Name}}
-    </a>
+    {{if .CatalogAsync}}
+    <!-- Managed SQL connections can span multiple databases/schemas; the
+         nested Database > Schema > Tables/Views/Procedures tree is built by
+         app.js from GET /api/catalog instead of being rendered server-side. -->
+    <div id="catalogTreeRoot" class="sidebar-catalog-root" data-active-table="{{$active}}" data-dialect="{{with .ActiveConnection}}{{.Kind}}{{end}}">
+      <div class="sidebar-empty"><i class="bi bi-arrow-repeat me-1"></i>Loading catalog…</div>
+    </div>
     {{else}}
-    <div class="sidebar-empty">No tables or views yet.</div>
+    <div id="sidebarStaticRoot" data-active-table="{{$active}}">
+      {{if .TableObjects}}
+      {{template "sidebar_kind_group" (dict "Items" (tablesOnly .TableObjects) "Icon" "bi-table" "Label" "Tables" "GroupKey" "tables" "Active" $active "FullActions" true)}}
+      {{template "sidebar_kind_group" (dict "Items" (viewsOnly .TableObjects) "Icon" "bi-eye" "Label" "Views" "GroupKey" "views" "Active" $active "FullActions" false)}}
+      {{else}}
+      <div class="sidebar-empty">No tables or views yet.</div>
+      {{end}}
+    </div>
     {{end}}
     <div class="sidebar-footer">
       {{with .ActiveConnection}}<strong>{{.Name}}</strong><br>{{.Dialect.Name}}{{else}}Powered by <strong>tinySQL</strong>{{end}}
@@ -1474,6 +1658,46 @@
 {{if .Success}}
 <div class="alert alert-success d-flex align-items-center gap-2" role="alert">
   <i class="bi bi-check-circle-fill flex-shrink-0"></i><span>{{.Success}}</span>
+</div>
+{{end}}
+{{end}}
+
+{{/* sidebar_kind_group renders one collapsible sidebar folder (Tables or
+     Views) for the static tinySQL sidebar. Expects a dict with:
+       Items       []TableObject
+       Icon        string (bootstrap icon class)
+       Label       string
+       GroupKey    string (unique, used for the collapse-state storage key)
+       Active      string (currently open table name, for highlighting)
+       FullActions bool   (show Insert/Update quick actions, not just Top 1000)
+   Shared by both kinds so the markup only exists once. */}}
+{{define "sidebar_kind_group"}}
+{{if .Items}}
+<div class="sidebar-group" data-group="{{.GroupKey}}">
+  <button type="button" class="sidebar-group-header" data-group="{{.GroupKey}}" data-target="sg-{{.GroupKey}}" aria-expanded="true">
+    <i class="bi bi-chevron-down sidebar-group-caret"></i>
+    <span>{{.Label}}</span>
+    <span class="sidebar-group-count">{{len .Items}}</span>
+  </button>
+  <div class="sidebar-group-body" id="sg-{{.GroupKey}}">
+    {{$active := .Active}}
+    {{$icon := .Icon}}
+    {{$full := .FullActions}}
+    {{range .Items}}
+    <div class="table-row">
+      <a class="table-link {{if eq $active .Name}}active{{end}}" href="/t/{{.Name}}" data-name="{{.Name}}">
+        <i class="bi {{$icon}}"></i><span class="tl-text">{{.Name}}</span>
+      </a>
+      <span class="table-quick-actions">
+        <button type="button" class="qa-btn" title="Select Top 1000 Rows" onclick="event.preventDefault(); openTableScript('{{.Name}}', 'top')"><i class="bi bi-lightning-charge"></i></button>
+        {{if $full}}
+        <button type="button" class="qa-btn" title="Script as INSERT" onclick="event.preventDefault(); openTableScript('{{.Name}}', 'insert')"><i class="bi bi-plus-square"></i></button>
+        <button type="button" class="qa-btn" title="Script as UPDATE" onclick="event.preventDefault(); openTableScript('{{.Name}}', 'update')"><i class="bi bi-pencil-square"></i></button>
+        {{end}}
+      </span>
+    </div>
+    {{end}}
+  </div>
 </div>
 {{end}}
 {{end}}

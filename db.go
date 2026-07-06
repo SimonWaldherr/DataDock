@@ -18,29 +18,38 @@ import (
 
 // App holds the shared application state.
 type App struct {
-	nativeDB       *tinysql.DB
-	sqlDB          *sql.DB
-	tenant         string
-	tpl            *template.Template
-	settingsMu     sync.RWMutex
-	llm            LLMClient
-	llmConfig      LLMConfig
-	auditLog       bool
-	dialect        DialectProfile
-	conns          *ConnectionManager
-	connectTimeout time.Duration
-	queryTimeout   time.Duration
-	readOnlyMode   bool
-	pageSize       int
-	defaultTheme   string
-	defaultDensity string
-	verbose        *VerboseLogger
+	nativeDB          *tinysql.DB
+	sqlDB             *sql.DB
+	tenant            string
+	tpl               *template.Template
+	settingsMu        sync.RWMutex
+	llm               LLMClient
+	llmConfig         LLMConfig
+	auditLog          bool
+	dialect           DialectProfile
+	conns             *ConnectionManager
+	connectTimeout    time.Duration
+	queryTimeout      time.Duration
+	readOnlyMode      bool
+	pageSize          int
+	defaultTheme      string
+	defaultDensity    string
+	port              int
+	adminPasswordHash string
+	verbose           *VerboseLogger
+
+	// adminAuthMu/adminAuthedSessions track which sessions have logged into
+	// the Admin area, in memory only (a fresh process always requires a
+	// fresh login, which is the safer default for something gating
+	// credential storage).
+	adminAuthMu         sync.Mutex
+	adminAuthedSessions map[string]time.Time
 }
 
 // Column describes a single column returned by a query.
 type Column struct {
-	Name     string
-	TypeName string
+	Name     string `json:"name"`
+	TypeName string `json:"typeName"`
 }
 
 func (a *App) setVerboseLogger(verbose *VerboseLogger) {
@@ -141,6 +150,61 @@ type TableMeta struct {
 type TableObject struct {
 	Name string
 	Kind string
+}
+
+// ColumnDetail describes one column for the read-only "Structure" view:
+// richer than Column (name/type only), with nullability/default/primary-key
+// information used to render a proper structure table.
+type ColumnDetail struct {
+	Name     string `json:"name"`
+	TypeName string `json:"typeName"`
+	// Nullable is "yes", "no", or "unknown" (when the dialect doesn't expose
+	// this cheaply, e.g. tinySQL) — a tri-state rather than a bool so the UI
+	// doesn't overstate confidence by defaulting to "yes".
+	Nullable   string `json:"nullable"`
+	Default    string `json:"default,omitempty"`
+	PrimaryKey bool   `json:"primaryKey"`
+}
+
+// TableScript holds ready-to-run SQL snippets and metadata for a table/view,
+// generated server-side (so dialect-specific quoting/TOP-vs-LIMIT syntax and
+// DDL retrieval are handled once) for the sidebar's SSMS-style quick
+// actions: "Select Top 1000 Rows", "Script as INSERT/UPDATE", the read-only
+// "Structure" view, and a view's CREATE/ALTER definition.
+type TableScript struct {
+	Name       string         `json:"name"`
+	Kind       string         `json:"kind"`
+	HasID      bool           `json:"hasId"`
+	Columns    []Column       `json:"columns"`
+	SelectTop  string         `json:"selectTop"`
+	InsertTmpl string         `json:"insertTmpl,omitempty"`
+	UpdateTmpl string         `json:"updateTmpl,omitempty"`
+	Structure  []ColumnDetail `json:"structure,omitempty"`
+	CreateSQL  string         `json:"createSQL,omitempty"` // views only: the view's CREATE statement
+	AlterSQL   string         `json:"alterSQL,omitempty"`  // views only: an ALTER VIEW variant, when the dialect supports it
+	DDLError   string         `json:"ddlError,omitempty"`  // views only: why CreateSQL couldn't be fetched
+}
+
+// buildTableScript assembles the quick-action SQL snippets, structure, and
+// (for views) DDL for meta using the currently active connection's dialect.
+func (a *App) buildTableScript(ctx context.Context, meta TableMeta) TableScript {
+	conn := a.activeConn(ctx)
+	script := TableScript{Name: meta.Name, Kind: meta.Kind, HasID: meta.HasID, Columns: meta.Columns}
+	script.SelectTop = conn.selectPageSQL(meta.Name, "", "", 1000, 0)
+	script.Structure = conn.buildColumnStructure(ctx, meta)
+	if meta.Kind != "view" {
+		script.InsertTmpl = buildInsertTemplateSQL(conn, meta)
+		script.UpdateTmpl = buildUpdateTemplateSQL(conn, meta)
+	} else {
+		createSQL, err := conn.fetchViewDefinition(ctx, meta.Name)
+		if err != nil {
+			script.DDLError = err.Error()
+		} else {
+			script.CreateSQL = createSQL
+			script.AlterSQL = viewCreateToAlter(conn.Dialect.Name, createSQL)
+		}
+	}
+	return script
 }
 
 // QueryResult holds the result of an arbitrary SQL query.
@@ -750,7 +814,14 @@ func (c *DBConnection) tableObjects(ctx context.Context) ([]TableObject, error) 
 	case "MariaDB/MySQL":
 		query = "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type IN ('BASE TABLE','VIEW') ORDER BY table_name"
 	case "Microsoft SQL Server":
-		query = "SELECT table_schema + '.' + table_name AS name, table_type FROM information_schema.tables WHERE table_type IN ('BASE TABLE','VIEW') ORDER BY table_schema, table_name"
+		// sys.objects (not information_schema.tables) so is_ms_shipped can
+		// exclude SQL Server's own built-in tables/views
+		// (MSreplication_options, spt_fallback_*, spt_monitor, spt_values,
+		// ...), which otherwise show up as if they were part of the user's
+		// schema — including in the LLM's RAG context.
+		query = "SELECT s.name + '.' + o.name AS name, CASE WHEN o.type = 'V' THEN 'VIEW' ELSE 'BASE TABLE' END AS table_type " +
+			"FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id " +
+			"WHERE o.type IN ('U','V') AND o.is_ms_shipped = 0 ORDER BY s.name, o.name"
 	default:
 		query = "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') ORDER BY name"
 	}
@@ -801,7 +872,19 @@ func (c *DBConnection) tableMeta(ctx context.Context, name string) (TableMeta, e
 		}
 	}
 	if canonical == "" {
-		return TableMeta{}, fmt.Errorf("table %q not found", name)
+		// Not in this connection's default database/schema scope — this
+		// happens for a fully-qualified name from the multi-database catalog
+		// tree (e.g. "otherdb.dbo.orders" on SQL Server, or "otherdb.orders"
+		// on MySQL, both queryable cross-database on a single connection).
+		// Trust the caller-supplied qualified identifier instead of
+		// requiring exact tableObjects() membership, which only ever lists
+		// the connection's own default database.
+		if strings.Contains(name, ".") {
+			canonical = name
+			kind = c.probeObjectKind(ctx, name)
+		} else {
+			return TableMeta{}, fmt.Errorf("table %q not found", name)
+		}
 	}
 	query := c.selectPageSQL(canonical, "", "asc", 0, 0)
 	rows, err := c.queryContext(ctx, "metadata.table_meta", query)

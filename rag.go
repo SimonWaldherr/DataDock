@@ -9,20 +9,25 @@ import (
 )
 
 type LLMSkillProfile struct {
-	Name           string   `json:"name"`
-	Purpose        string   `json:"purpose"`
-	Instructions   []string `json:"instructions"`
-	OutputContract string   `json:"output_contract"`
+	Name         string   `json:"name"`
+	Purpose      string   `json:"purpose"`
+	Instructions []string `json:"instructions"`
 }
 
 type ragContextDoc struct {
 	Dialect       DialectProfile       `json:"dialect"`
 	Skill         LLMSkillProfile      `json:"skill"`
-	Retrieval     ragRetrievalDoc      `json:"retrieval"`
 	Tables        []ragTableDoc        `json:"tables"`
 	Relationships []ragRelationshipDoc `json:"relationships,omitempty"`
 }
 
+// ragRetrievalDoc records which tables the lexical RAG search picked and
+// why. selectRAGTables/selectRAGTableNames still return it for callers that
+// want to log/inspect the decision, but it's deliberately NOT a field on
+// ragContextDoc (so it's never sent to the LLM): the model doesn't need to
+// know how its context was assembled, only what's in it, and the tables[]
+// array above already lists exactly what was selected — shipping this too
+// would just be duplicated tokens.
 type ragRetrievalDoc struct {
 	Method         string   `json:"method"`
 	QueryTerms     []string `json:"query_terms,omitempty"`
@@ -67,7 +72,6 @@ func llmSkillForAction(action string) LLMSkillProfile {
 				"Use explicit JOIN syntax and qualify ambiguous columns.",
 				"Match the active dialect profile exactly.",
 			},
-			OutputContract: `Return JSON only: {"action":"sql","sql":"SELECT ...","explanation":"..."} or {"action":"clarify","follow_up":"...","explanation":"..."}.`,
 		}
 	case llmActionExplainResults:
 		return LLMSkillProfile{
@@ -79,7 +83,6 @@ func llmSkillForAction(action string) LLMSkillProfile {
 				"Keep the answer concise and practical.",
 				"Mention limitations when only a sample of rows is available.",
 			},
-			OutputContract: "Return concise plain text.",
 		}
 	case llmActionExplainError:
 		return LLMSkillProfile{
@@ -91,7 +94,6 @@ func llmSkillForAction(action string) LLMSkillProfile {
 				"If useful, suggest a corrected query.",
 				"Do not invent tables or columns that are absent from context.",
 			},
-			OutputContract: "Return concise plain text.",
 		}
 	default:
 		return LLMSkillProfile{
@@ -101,7 +103,6 @@ func llmSkillForAction(action string) LLMSkillProfile {
 				"Use retrieved context only.",
 				"Ask for clarification when context is insufficient.",
 			},
-			OutputContract: "Return the requested answer in the format required by the action.",
 		}
 	}
 }

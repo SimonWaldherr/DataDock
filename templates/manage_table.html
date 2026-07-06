@@ -1,0 +1,233 @@
+{{define "manage_table"}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection "DefaultTheme" .DefaultTheme "DefaultDensity" .DefaultDensity "MaintenanceMode" .MaintenanceMode)}}
+
+<div class="page-hdr">
+  <h1><i class="bi bi-table text-primary"></i>Manage Tables</h1>
+  <a href="/" class="btn btn-sm btn-outline-secondary">
+    <i class="bi bi-x me-1"></i>Close
+  </a>
+</div>
+
+{{template "alert" .}}
+
+<div class="card">
+  <div class="card-body">
+    <ul class="nav nav-tabs mb-3" id="manageTableTabs" role="tablist">
+      <li class="nav-item" role="presentation">
+        <button type="button" class="nav-link" data-tab="create" onclick="switchManageTab('create')">
+          <i class="bi bi-plus-square me-1"></i>New Table
+        </button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button type="button" class="nav-link" data-tab="import" onclick="switchManageTab('import')">
+          <i class="bi bi-upload me-1"></i>Import
+        </button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button type="button" class="nav-link" data-tab="export" onclick="switchManageTab('export')">
+          <i class="bi bi-download me-1"></i>Export
+        </button>
+      </li>
+    </ul>
+
+    <div id="manageTabCreate" class="manage-tab d-none">
+      <form method="post" action="/create-table" id="createForm">
+        <div class="mb-3">
+          <label class="form-label fw-semibold small">Table Name</label>
+          <input type="text" class="form-control form-control-sm"
+                 name="table_name" value="{{.TableName}}"
+                 placeholder="e.g. customers" required>
+          <div class="form-text text-muted">Lowercase letters, digits, and underscores recommended.</div>
+        </div>
+
+        <div class="mb-1">
+          <label class="form-label fw-semibold small d-block">
+            Columns
+            <span class="text-muted fw-normal">(an <strong>id INT</strong> column is added automatically)</span>
+          </label>
+        </div>
+
+        <div id="fieldList">
+          <div class="field-row mb-2">
+            <input type="text" class="form-control form-control-sm" name="col_name"
+                   placeholder="column name" required>
+            <select class="form-select form-select-sm type-sel" name="col_type">
+              <option value="TEXT" selected>TEXT</option>
+              <option value="INT">INT</option>
+              <option value="FLOAT">FLOAT</option>
+              <option value="BOOL">BOOL</option>
+            </select>
+            <button type="button" class="btn btn-outline-danger btn-sm btn-remove"
+                    onclick="removeField(this)" title="Remove column">
+              <i class="bi bi-dash"></i>
+            </button>
+          </div>
+        </div>
+
+        <button type="button" class="btn btn-outline-secondary btn-sm mb-3"
+                onclick="addField()">
+          <i class="bi bi-plus me-1"></i>Add Column
+        </button>
+
+        <div class="d-flex gap-2">
+          <button type="submit" class="btn btn-primary btn-sm">
+            <i class="bi bi-table me-1"></i>Create Table
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <div id="manageTabImport" class="manage-tab d-none">
+      <form method="post" action="/import" enctype="multipart/form-data" class="d-flex flex-column gap-3">
+        <div>
+          <label class="form-label small">Target Table</label>
+          <input class="form-control form-control-sm" name="table" value="{{.TableName}}" placeholder="derived from filename">
+          <div class="form-text">Leave empty to use the file name. Letters, digits, and underscores only.</div>
+        </div>
+        <div>
+          <label class="form-label small">File</label>
+          <input class="form-control form-control-sm" type="file" name="file" accept=".csv,.tsv,.json,.ndjson,.xlsx,.xml,.yaml,.yml,.geojson" required>
+        </div>
+        <div class="row g-2">
+          <div class="col-md-6">
+            <label class="form-label small">Format</label>
+            <select class="form-select form-select-sm" name="format">
+              <option value="auto" selected>Auto from extension</option>
+              <option value="csv">CSV</option>
+              <option value="tsv">TSV</option>
+              <option value="json">JSON / NDJSON</option>
+              <option value="xlsx">XLSX first sheet</option>
+              <option value="geojson">GeoJSON</option>
+            </select>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small">Header Row</label>
+            <select class="form-select form-select-sm" name="header_mode">
+              <option value="auto" selected>Auto detect</option>
+              <option value="present">Present</option>
+              <option value="absent">Absent</option>
+            </select>
+          </div>
+        </div>
+        <div class="toolbar">
+          <button class="btn btn-primary btn-sm" type="submit">
+            <i class="bi bi-upload me-1"></i>Import Table
+          </button>
+          <a href="/guide#import" class="btn btn-outline-secondary btn-sm">
+            <i class="bi bi-journal-text me-1"></i>Import Notes
+          </a>
+        </div>
+      </form>
+
+      {{with .Result}}
+      <div class="mt-3">
+        <h2 class="h6">Import Result</h2>
+        <div class="row g-2">
+          <div class="col-md-3"><div class="metric"><div class="small text-muted">Rows</div><div class="fs-5 fw-semibold">{{.RowsInserted}}</div></div></div>
+          <div class="col-md-3"><div class="metric"><div class="small text-muted">Skipped</div><div class="fs-5 fw-semibold">{{.RowsSkipped}}</div></div></div>
+          <div class="col-md-3"><div class="metric"><div class="small text-muted">Header</div><div class="fs-5 fw-semibold">{{if .HadHeader}}Yes{{else}}No{{end}}</div></div></div>
+          <div class="col-md-3"><div class="metric"><div class="small text-muted">Columns</div><div class="fs-5 fw-semibold">{{len .ColumnNames}}</div></div></div>
+        </div>
+        {{with $.Table}}<a href="/t/{{.}}" class="btn btn-primary btn-sm mt-3"><i class="bi bi-table me-1"></i>Open Table</a>{{end}}
+      </div>
+      {{end}}
+    </div>
+
+    <div id="manageTabExport" class="manage-tab d-none">
+      <div class="mb-3">
+        <label class="form-label small">Table or View</label>
+        <select id="exportTableSelect" class="form-select form-select-sm">
+          <option value="">Choose a table or view…</option>
+          {{range .TableObjects}}
+          <option value="{{.Name}}">{{.Name}}{{if eq .Kind "view"}} (view){{end}}</option>
+          {{end}}
+        </select>
+        <div class="form-text">Exports the entire table or view, not just the current query result.</div>
+      </div>
+      <div class="toolbar">
+        <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('csv')">
+          <i class="bi bi-filetype-csv me-1"></i>CSV
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('csv-excel')">
+          <i class="bi bi-file-earmark-excel me-1"></i>Excel CSV
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('tsv')">
+          <i class="bi bi-table me-1"></i>TSV
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('json')">
+          <i class="bi bi-filetype-json me-1"></i>JSON
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('xml')">
+          <i class="bi bi-filetype-xml me-1"></i>XML
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('geojson')">
+          <i class="bi bi-geo-alt me-1"></i>GeoJSON
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('xlsx')">
+          <i class="bi bi-file-earmark-spreadsheet me-1"></i>XLSX
+        </button>
+      </div>
+      <div id="exportStatus" class="small text-muted mt-2"></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+function switchManageTab(tab) {
+  ['create', 'import', 'export'].forEach(function(name) {
+    var panel = document.getElementById('manageTab' + name.charAt(0).toUpperCase() + name.slice(1));
+    if (panel) panel.classList.toggle('d-none', name !== tab);
+  });
+  document.querySelectorAll('#manageTableTabs .nav-link').forEach(function(btn) {
+    btn.classList.toggle('active', btn.getAttribute('data-tab') === tab);
+  });
+  try { localStorage.setItem('datadock.manageTable.activeTab', tab); } catch (e) {}
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+  var initial = {{if .ActiveTab}}'{{.ActiveTab}}'{{else}}''{{end}};
+  if (!initial) {
+    try { initial = localStorage.getItem('datadock.manageTable.activeTab') || ''; } catch (e) {}
+  }
+  switchManageTab(initial === 'import' || initial === 'export' ? initial : 'create');
+});
+
+function addField() {
+  var list = document.getElementById('fieldList');
+  var row = document.createElement('div');
+  row.className = 'field-row mb-2';
+  row.innerHTML =
+    '<input type="text" class="form-control form-control-sm" name="col_name" placeholder="column name" required>' +
+    '<select class="form-select form-select-sm type-sel" name="col_type">' +
+    '<option value="TEXT" selected>TEXT</option><option value="INT">INT</option>' +
+    '<option value="FLOAT">FLOAT</option><option value="BOOL">BOOL</option>' +
+    '</select>' +
+    '<button type="button" class="btn btn-outline-danger btn-sm btn-remove" onclick="removeField(this)" title="Remove column">' +
+    '<i class="bi bi-dash"></i></button>';
+  list.appendChild(row);
+  row.querySelector('input').focus();
+}
+
+function removeField(btn) {
+  var rows = document.querySelectorAll('#fieldList .field-row');
+  if (rows.length <= 1) return; // keep at least one
+  btn.closest('.field-row').remove();
+}
+
+function exportSelectedTable(format) {
+  var select = document.getElementById('exportTableSelect');
+  var table = select.value;
+  var status = document.getElementById('exportStatus');
+  if (!table) {
+    status.textContent = 'Choose a table or view first.';
+    select.focus();
+    return;
+  }
+  status.textContent = '';
+  window.location.href = '/t/' + encodeURIComponent(table) + '/export?format=' + encodeURIComponent(format);
+}
+</script>
+
+{{template "base_end" .}}
+{{end}}

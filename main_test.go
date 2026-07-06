@@ -411,14 +411,14 @@ func TestQueryEditor(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, want := range []string{
-		"Local History",
+		"/history",
 		"Quick Chart",
 		"Share",
 		"toggleSchemaPreview",
 		"fetch('/api/schema')",
 		"currentSQL()",
 		"monaco-editor",
-		"Test LLM",
+		"Test connection",
 		"F5",
 		"Excel CSV",
 		"GeoJSON",
@@ -429,6 +429,23 @@ func TestQueryEditor(t *testing.T) {
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected query editor to contain %q", want)
+		}
+	}
+}
+
+func TestHistoryPage(t *testing.T) {
+	app := newTestApp(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/history", nil)
+	w := httptest.NewRecorder()
+	app.historyHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{"Local History", "restoreLocalQueryHistory", "openSQLInEditor", "clearLocalQueryHistory"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected history page to contain %q", want)
 		}
 	}
 }
@@ -1047,6 +1064,87 @@ func TestSafeExportFilenameBase(t *testing.T) {
 		if got := safeExportFilenameBase(input); got != want {
 			t.Errorf("safeExportFilenameBase(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestRecoverMiddlewareReturnsCleanServerError(t *testing.T) {
+	panicking := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/panics", nil)
+
+	// The whole point of the middleware: a handler panic must not propagate
+	// out and crash the test/server process — recoverMiddleware must catch
+	// it and turn it into a normal 500 response.
+	recoverMiddleware(panicking).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 after recovered panic, got %d", rec.Code)
+	}
+}
+
+func TestRecoverMiddlewarePassesThroughNormalResponses(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+		_, _ = w.Write([]byte("teapot"))
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	recoverMiddleware(ok).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTeapot || rec.Body.String() != "teapot" {
+		t.Fatalf("expected untouched response to pass through, got %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestLoggingMiddlewareCapturesActualStatusCode(t *testing.T) {
+	notFound := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusNotFound)
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/missing", nil)
+
+	// loggingMiddleware must not alter the response itself — only observe
+	// it — regardless of what status the wrapped handler sends.
+	loggingMiddleware(notFound).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected logging middleware to pass through status 404, got %d", rec.Code)
+	}
+}
+
+func TestLoggingMiddlewareSkipsHealthzPath(t *testing.T) {
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+
+	loggingMiddleware(next).ServeHTTP(rec, req)
+
+	if !called {
+		t.Fatal("expected /healthz request to still reach the wrapped handler")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestHealthzHandlerReturnsOK(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+
+	healthzHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if rec.Body.String() != "ok" {
+		t.Fatalf("expected body %q, got %q", "ok", rec.Body.String())
 	}
 }
 

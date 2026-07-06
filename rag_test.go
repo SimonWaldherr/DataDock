@@ -22,9 +22,14 @@ func TestSchemaSnapshotForUsesSkillAndRAGSelection(t *testing.T) {
 		t.Fatalf("insert customer: %v", err)
 	}
 
+	// The RAG JSON sent to the LLM is always minified (no space after ':',
+	// no newlines) — token cost with zero benefit to the model otherwise.
 	snapshot := app.schemaSnapshotFor(context.Background(), llmActionGenerateSQL, "show customer email addresses by country", "", "")
-	if !strings.Contains(snapshot, `"name": "text_to_sql"`) {
+	if !strings.Contains(snapshot, `"name":"text_to_sql"`) {
 		t.Fatalf("expected text_to_sql skill in snapshot: %s", snapshot)
+	}
+	if strings.Contains(snapshot, "\n") || strings.Contains(snapshot, "  ") {
+		t.Fatalf("expected minified (no indentation) snapshot: %s", snapshot)
 	}
 	if !strings.Contains(snapshot, `"customers"`) {
 		t.Fatalf("expected customers table in retrieved context: %s", snapshot)
@@ -40,8 +45,18 @@ func TestSchemaSnapshotForUsesSkillAndRAGSelection(t *testing.T) {
 	if len(decoded.Tables) > maxRAGTables {
 		t.Fatalf("expected at most %d retrieved tables, got %d", maxRAGTables, len(decoded.Tables))
 	}
-	if !decoded.Retrieval.Truncated {
-		t.Fatalf("expected truncated retrieval for large schema: %#v", decoded.Retrieval)
+	if len(decoded.Tables) != maxRAGTables {
+		t.Fatalf("expected the 11-table schema to be truncated down to %d tables, got %d", maxRAGTables, len(decoded.Tables))
+	}
+	// Retrieval/debug metadata (which tables were considered, why, whether
+	// the result was truncated) is deliberately not sent to the LLM: the
+	// tables[] array above already says what was selected, and the model
+	// doesn't need to know how that selection was made.
+	if strings.Contains(snapshot, `"retrieval"`) {
+		t.Fatalf("retrieval metadata should not be part of what's sent to the LLM: %s", snapshot)
+	}
+	if strings.Contains(snapshot, `"output_contract"`) {
+		t.Fatalf("output_contract duplicates the system prompt and should not be sent: %s", snapshot)
 	}
 }
 

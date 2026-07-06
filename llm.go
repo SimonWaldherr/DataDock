@@ -167,7 +167,30 @@ type chatCompletionResponse struct {
 	} `json:"choices"`
 }
 
+// buildLLMMessages assembles the exact system/user messages sent to the
+// LLM. Any embedded JSON (the RAG schema context, the result sample) is
+// always minified: it's tokens the model has to pay for and whitespace adds
+// nothing to its ability to parse it. For a human-readable rendering of the
+// same content (e.g. the SQL editor's "Details" preview), use
+// buildLLMMessagesForDisplay instead — never the other way around, so what's
+// previewed can never drift from what's actually sent.
 func buildLLMMessages(req LLMRequest) []chatMessage {
+	identity := func(s string) string { return s }
+	return buildLLMMessagesWithFormatting(req, identity, json.Marshal)
+}
+
+// buildLLMMessagesForDisplay returns the same messages as buildLLMMessages
+// but with embedded JSON pretty-printed, for display only. req.Schema isn't
+// always pure JSON — for tinySQL connections it's prose with one or more
+// embedded {...} blocks (see tinySQLAgentContext) — so this scans for and
+// reformats each embedded JSON object individually rather than assuming the
+// whole string parses as one value.
+func buildLLMMessagesForDisplay(req LLMRequest) []chatMessage {
+	indent := func(v any) ([]byte, error) { return json.MarshalIndent(v, "", "  ") }
+	return buildLLMMessagesWithFormatting(req, prettyPrintEmbeddedJSON, indent)
+}
+
+func buildLLMMessagesWithFormatting(req LLMRequest, formatSchema func(string) string, marshalResult func(any) ([]byte, error)) []chatMessage {
 	system := "You are DataDock's SQL assistant. Use the provided RAG context only. " +
 		"Follow the SQL dialect rules in the schema context exactly. " +
 		"Follow the active skill instructions and output contract exactly. " +
@@ -180,7 +203,7 @@ func buildLLMMessages(req LLMRequest) []chatMessage {
 	user.WriteString("Action: ")
 	user.WriteString(req.Action)
 	user.WriteString("\n\nRAG context:\n")
-	user.WriteString(req.Schema)
+	user.WriteString(formatSchema(req.Schema))
 	user.WriteString("\n\nUser prompt:\n")
 	user.WriteString(trimForLLM(req.Prompt, maxLLMPromptChars))
 
@@ -193,7 +216,7 @@ func buildLLMMessages(req LLMRequest) []chatMessage {
 		user.WriteString(trimForLLM(req.Error, maxLLMPromptChars))
 	}
 	if req.Result != nil {
-		b, _ := json.Marshal(req.Result)
+		b, _ := marshalResult(req.Result)
 		user.WriteString("\n\nResult sample JSON:\n")
 		user.WriteString(trimForLLM(string(b), maxLLMPromptChars))
 	}
@@ -202,6 +225,79 @@ func buildLLMMessages(req LLMRequest) []chatMessage {
 		{Role: "system", Content: system},
 		{Role: "user", Content: user.String()},
 	}
+}
+
+// prettyPrintEmbeddedJSON scans s for top-level {...} objects and replaces
+// each one that's valid JSON with an indented rendering, leaving any
+// surrounding prose untouched. Used only for display (buildLLMMessagesForDisplay):
+// the RAG context is always minified JSON on its own, but the tinySQL agent
+// profile mixes prose with one or more embedded JSON objects, so a plain
+// "is the whole string JSON?" check isn't enough to make it readable.
+func prettyPrintEmbeddedJSON(s string) string {
+	var out strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] != '{' {
+			out.WriteByte(s[i])
+			i++
+			continue
+		}
+		end := matchingBraceEnd(s, i)
+		if end < 0 {
+			out.WriteByte(s[i])
+			i++
+			continue
+		}
+		var v any
+		candidate := s[i : end+1]
+		if err := json.Unmarshal([]byte(candidate), &v); err == nil {
+			if pretty, err := json.MarshalIndent(v, "", "  "); err == nil {
+				out.Write(pretty)
+				i = end + 1
+				continue
+			}
+		}
+		out.WriteByte(s[i])
+		i++
+	}
+	return out.String()
+}
+
+// matchingBraceEnd returns the index of the '}' that closes the '{' at
+// s[start], respecting braces that appear inside quoted string values, or -1
+// if s[start] isn't '{' or has no matching close.
+func matchingBraceEnd(s string, start int) int {
+	if start >= len(s) || s[start] != '{' {
+		return -1
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 func parseLLMSQLResponse(text string) LLMSQLResponse {
@@ -379,11 +475,10 @@ func (a *App) schemaSnapshotFor(ctx context.Context, action, prompt, sqlText, er
 		return a.emptySchemaSnapshot(ctx, action)
 	}
 
-	selected, retrieval := selectRAGTables(tables, prompt+" "+sqlText+" "+errorText)
+	selected, _ := selectRAGTables(tables, prompt+" "+sqlText+" "+errorText)
 	doc := ragContextDoc{
-		Dialect:   a.currentDialect(),
-		Skill:     llmSkillForAction(action),
-		Retrieval: retrieval,
+		Dialect: a.currentDialect(),
+		Skill:   llmSkillForAction(action),
 	}
 
 	for _, table := range tables {
@@ -436,7 +531,11 @@ func (a *App) schemaSnapshotFor(ctx context.Context, action, prompt, sqlText, er
 		}
 		doc.Tables = append(doc.Tables, t)
 	}
-	data, err := json.MarshalIndent(doc, "", "  ")
+	// Minified: this is what actually gets sent to the LLM as the RAG
+	// context, and pretty-printing whitespace is pure wasted tokens. The
+	// "Details" preview in the SQL editor re-indents a copy for display
+	// (see beautifyJSONForDisplay) without changing what's really sent.
+	data, err := json.Marshal(doc)
 	if err != nil {
 		return a.emptySchemaSnapshot(ctx, action)
 	}
@@ -464,7 +563,7 @@ func (a *App) tinySQLAgentContext(ctx context.Context, action string) string {
 	if err != nil || strings.TrimSpace(profile) == "" {
 		return ""
 	}
-	skill, err := json.MarshalIndent(llmSkillForAction(action), "", "  ")
+	skill, err := json.Marshal(llmSkillForAction(action))
 	if err != nil {
 		return profile
 	}
@@ -486,14 +585,6 @@ func (a *App) schemaSnapshotForSQLConnection(ctx context.Context, conn *DBConnec
 	doc := ragContextDoc{
 		Dialect: conn.Dialect,
 		Skill:   llmSkillForAction(action),
-		Retrieval: ragRetrievalDoc{
-			Method:         "lexical-table-column-rag",
-			QueryTerms:     tokenizeRAGQuery(prompt + " " + sqlText + " " + errorText),
-			SelectedTables: selectedNames,
-			TotalTables:    len(names),
-			MaxTables:      maxRAGTables,
-			Truncated:      len(names) > len(selectedNames),
-		},
 	}
 	for _, name := range selectedNames {
 		meta, err := conn.tableMeta(ctx, name)
@@ -510,7 +601,11 @@ func (a *App) schemaSnapshotForSQLConnection(ctx context.Context, conn *DBConnec
 		}
 		doc.Tables = append(doc.Tables, t)
 	}
-	data, err := json.MarshalIndent(doc, "", "  ")
+	// Minified: this is what actually gets sent to the LLM as the RAG
+	// context, and pretty-printing whitespace is pure wasted tokens. The
+	// "Details" preview in the SQL editor re-indents a copy for display
+	// (see beautifyJSONForDisplay) without changing what's really sent.
+	data, err := json.Marshal(doc)
 	if err != nil {
 		return a.emptySchemaSnapshot(ctx, action)
 	}
@@ -526,11 +621,12 @@ func (a *App) emptySchemaSnapshot(ctx context.Context, action string) string {
 		Dialect: dialect,
 		Skill:   llmSkillForAction(action),
 		Tables:  []ragTableDoc{},
-		Retrieval: ragRetrievalDoc{
-			Method: "lexical-table-column-rag",
-		},
 	}
-	data, err := json.MarshalIndent(doc, "", "  ")
+	// Minified: this is what actually gets sent to the LLM as the RAG
+	// context, and pretty-printing whitespace is pure wasted tokens. The
+	// "Details" preview in the SQL editor re-indents a copy for display
+	// (see beautifyJSONForDisplay) without changing what's really sent.
+	data, err := json.Marshal(doc)
 	if err != nil {
 		return `{"dialect":{"name":"tinySQL"},"tables":[]}`
 	}

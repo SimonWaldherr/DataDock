@@ -1,10 +1,11 @@
 {{define "table_view"}}
-{{$table := .Table}}
-{{$meta  := .Meta}}
-{{$sort  := .Sort}}
-{{$dir   := .SortDir}}
-{{$page  := .Page}}
-{{$total := .TotalPages}}
+{{$table    := .Table}}
+{{$meta     := .Meta}}
+{{$sort     := .Sort}}
+{{$dir      := .SortDir}}
+{{$page     := .Page}}
+{{$total    := .TotalPages}}
+{{$pageSize := .PageSize}}
 {{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" $table "ActiveConnection" .ActiveConnection "DefaultTheme" .DefaultTheme "DefaultDensity" .DefaultDensity "MaintenanceMode" .MaintenanceMode)}}
 
 <div class="page-hdr">
@@ -47,6 +48,43 @@
   </div>
 </div>
 
+<div class="toolbar mb-2">
+  <span class="text-muted small me-1">Generate query:</span>
+  <button type="button" class="btn btn-sm btn-outline-secondary" onclick="openTableScript('{{$table}}', 'top')" title="Open a SELECT TOP 1000 query in the SQL editor">
+    <i class="bi bi-lightning-charge me-1"></i>Top 1000 Rows
+  </button>
+  {{if ne $meta.Kind "view"}}
+  <button type="button" class="btn btn-sm btn-outline-secondary" onclick="openTableScript('{{$table}}', 'insert')" title="Open an editable INSERT statement in the SQL editor">
+    <i class="bi bi-plus-square me-1"></i>Script as INSERT
+  </button>
+  <button type="button" class="btn btn-sm btn-outline-secondary" onclick="openTableScript('{{$table}}', 'update')" title="Open an editable UPDATE statement in the SQL editor">
+    <i class="bi bi-pencil-square me-1"></i>Script as UPDATE
+  </button>
+  {{end}}
+  <button type="button" class="btn btn-sm btn-outline-secondary" id="structureToggleBtn" onclick="toggleTableStructure('{{$table}}')" title="Show column structure">
+    <i class="bi bi-list-columns me-1"></i>Structure
+  </button>
+  {{if eq $meta.Kind "view"}}
+  <button type="button" class="btn btn-sm btn-outline-secondary" id="definitionToggleBtn" onclick="toggleViewDefinition('{{$table}}')" title="Show the view's CREATE/ALTER statement">
+    <i class="bi bi-code-square me-1"></i>Definition
+  </button>
+  {{end}}
+</div>
+
+<div id="structurePanel" class="card mb-2 d-none">
+  <div class="card-body py-2">
+    <div class="small text-muted">Loading structure…</div>
+  </div>
+</div>
+
+{{if eq $meta.Kind "view"}}
+<div id="definitionPanel" class="card mb-2 d-none">
+  <div class="card-body py-2">
+    <div class="small text-muted">Loading definition…</div>
+  </div>
+</div>
+{{end}}
+
 {{template "alert" .}}
 
 {{if eq $meta.Kind "view"}}
@@ -70,7 +108,7 @@
           <th>
             {{$newDir := "asc"}}
             {{if and (eq $sort $col.Name) (eq $dir "asc")}}{{$newDir = "desc"}}{{end}}
-            <a href="/t/{{$table}}?sort={{$col.Name}}&dir={{$newDir}}&page=1">
+            <a href="/t/{{$table}}?sort={{$col.Name}}&dir={{$newDir}}&page=1&pagesize={{$pageSize}}">
               {{$col.Name}}
               {{if eq $sort $col.Name}}
                 {{if eq $dir "asc"}}<i class="bi bi-sort-up"></i>
@@ -125,21 +163,29 @@
 </div>
 
 <!-- Pagination -->
-{{if gt $total 1}}
 <nav class="pagination-bar">
+  {{if gt $total 1}}
   {{if gt $page 1}}
-  <a href="/t/{{$table}}?page={{sub $page 1}}&sort={{$sort}}&dir={{$dir}}" class="btn btn-sm btn-outline-secondary">
+  <a href="/t/{{$table}}?page={{sub $page 1}}&sort={{$sort}}&dir={{$dir}}&pagesize={{$pageSize}}" class="btn btn-sm btn-outline-secondary">
     <i class="bi bi-chevron-left"></i> Prev
   </a>
   {{end}}
   <span class="text-muted small">Page {{$page}} / {{$total}}</span>
   {{if lt $page $total}}
-  <a href="/t/{{$table}}?page={{add $page 1}}&sort={{$sort}}&dir={{$dir}}" class="btn btn-sm btn-outline-secondary">
+  <a href="/t/{{$table}}?page={{add $page 1}}&sort={{$sort}}&dir={{$dir}}&pagesize={{$pageSize}}" class="btn btn-sm btn-outline-secondary">
     Next <i class="bi bi-chevron-right"></i>
   </a>
   {{end}}
+  {{end}}
+  <label class="d-flex align-items-center gap-1 small text-muted ms-auto mb-0">
+    Rows per page
+    <select class="form-select form-select-sm" style="width:auto" onchange="changeTablePageSize(this.value)">
+      {{range .PageSizeOptions}}
+      <option value="{{.}}" {{if eq . $pageSize}}selected{{end}}>{{.}}</option>
+      {{end}}
+    </select>
+  </label>
 </nav>
-{{end}}
 
 <!-- Hidden drop form -->
 {{if ne $meta.Kind "view"}}<form id="dropForm" method="post" action="/drop-table/{{$table}}" class="d-none"></form>{{end}}
@@ -149,6 +195,95 @@ function confirmDrop(name) {
   if (confirm('Drop table "' + name + '"? This cannot be undone.')) {
     document.getElementById('dropForm').submit();
   }
+}
+
+function changeTablePageSize(size) {
+  var url = new URL(window.location.href);
+  url.searchParams.set('pagesize', size);
+  url.searchParams.set('page', '1');
+  window.location.href = url.toString();
+}
+
+var tableScriptCache = null;
+
+function loadTableScript(tableName) {
+  if (tableScriptCache) return Promise.resolve(tableScriptCache);
+  return fetch('/api/tables/' + encodeURIComponent(tableName) + '/script')
+    .then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function (script) {
+      tableScriptCache = script;
+      return script;
+    });
+}
+
+function escHtmlTV(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function toggleTableStructure(tableName) {
+  var panel = document.getElementById('structurePanel');
+  if (!panel.classList.contains('d-none')) {
+    panel.classList.add('d-none');
+    return;
+  }
+  panel.classList.remove('d-none');
+  var body = panel.querySelector('.card-body');
+  body.innerHTML = '<div class="small text-muted">Loading structure…</div>';
+  loadTableScript(tableName).then(function (script) {
+    var cols = script.structure || [];
+    if (cols.length === 0) {
+      body.innerHTML = '<div class="small text-muted">No column details available.</div>';
+      return;
+    }
+    var html = '<div class="table-responsive"><table class="table table-sm mb-0">' +
+      '<thead><tr><th>Column</th><th>Type</th><th>Nullable</th><th>Default</th><th>Key</th></tr></thead><tbody>';
+    cols.forEach(function (c) {
+      var nullableLabel = c.nullable === 'yes' ? 'YES' : (c.nullable === 'no' ? 'NO' : '—');
+      html += '<tr><td>' + escHtmlTV(c.name) + '</td><td>' + escHtmlTV(c.typeName) + '</td>' +
+        '<td>' + nullableLabel + '</td>' +
+        '<td>' + (c.default ? '<code>' + escHtmlTV(c.default) + '</code>' : '<span class="text-muted">—</span>') + '</td>' +
+        '<td>' + (c.primaryKey ? '<span class="badge text-bg-primary">PK</span>' : '') + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+    body.innerHTML = html;
+  }).catch(function (err) {
+    body.innerHTML = '<div class="small text-danger">Could not load structure: ' + escHtmlTV(err.message || err) + '</div>';
+  });
+}
+
+function toggleViewDefinition(tableName) {
+  var panel = document.getElementById('definitionPanel');
+  if (!panel.classList.contains('d-none')) {
+    panel.classList.add('d-none');
+    return;
+  }
+  panel.classList.remove('d-none');
+  var body = panel.querySelector('.card-body');
+  body.innerHTML = '<div class="small text-muted">Loading definition…</div>';
+  loadTableScript(tableName).then(function (script) {
+    if (script.ddlError) {
+      body.innerHTML = '<div class="small text-muted">' + escHtmlTV(script.ddlError) + '</div>';
+      return;
+    }
+    var html = '<div class="small text-muted mb-1">CREATE VIEW</div>' +
+      '<pre class="p-2 rounded" style="background:var(--code-bg);color:var(--code-ink);white-space:pre-wrap">' + escHtmlTV(script.createSQL) + '</pre>' +
+      '<button type="button" class="btn btn-sm btn-outline-secondary mb-2" onclick="openSQLInEditor(' + JSON.stringify(script.createSQL) + ', ' + JSON.stringify('Definition · ' + tableName) + ', false)">' +
+      '<i class="bi bi-box-arrow-up-right me-1"></i>Open in SQL Editor</button>';
+    if (script.alterSQL) {
+      html += '<div class="small text-muted mb-1 mt-2">ALTER VIEW</div>' +
+        '<pre class="p-2 rounded" style="background:var(--code-bg);color:var(--code-ink);white-space:pre-wrap">' + escHtmlTV(script.alterSQL) + '</pre>' +
+        '<button type="button" class="btn btn-sm btn-outline-secondary" onclick="openSQLInEditor(' + JSON.stringify(script.alterSQL) + ', ' + JSON.stringify('Alter · ' + tableName) + ', false)">' +
+        '<i class="bi bi-box-arrow-up-right me-1"></i>Open in SQL Editor</button>';
+    }
+    body.innerHTML = html;
+  }).catch(function (err) {
+    body.innerHTML = '<div class="small text-danger">Could not load definition: ' + escHtmlTV(err.message || err) + '</div>';
+  });
 }
 </script>
 
