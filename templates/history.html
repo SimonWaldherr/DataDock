@@ -1,0 +1,85 @@
+{{define "history"}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection "DefaultTheme" .DefaultTheme "DefaultDensity" .DefaultDensity "MaintenanceMode" .MaintenanceMode)}}
+
+<div class="page-hdr">
+  <h1><i class="bi bi-clock-history text-primary"></i>Local History</h1>
+  <a href="/query" class="btn btn-sm btn-outline-secondary">
+    <i class="bi bi-terminal me-1"></i>Back to SQL Editor
+  </a>
+</div>
+
+<div class="card">
+  <div class="card-body py-2">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <span class="small text-muted">Queries you've run recently, kept in this browser only.</span>
+      <button class="btn btn-outline-secondary btn-sm" onclick="clearLocalQueryHistory()">Clear</button>
+    </div>
+    <div id="queryHistory" class="small"></div>
+  </div>
+</div>
+
+<script>
+var queryHistoryKey = 'datadock.queryHistory.v1';
+
+document.addEventListener('DOMContentLoaded', function () {
+  renderLocalQueryHistory();
+});
+
+function loadLocalQueryHistory() {
+  try {
+    var raw = localStorage.getItem(queryHistoryKey);
+    return raw ? JSON.parse(raw) || [] : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function renderLocalQueryHistory() {
+  var target = document.getElementById('queryHistory');
+  if (!target) return;
+  var items = loadLocalQueryHistory();
+  if (items.length === 0) {
+    target.innerHTML = '<div class="text-muted">No local queries yet.</div>';
+    return;
+  }
+  var html = '<div class="list-group list-group-flush">';
+  items.forEach(function(item, idx) {
+    var label = item.sql.replace(/\s+/g, ' ').trim();
+    if (label.length > 160) label = label.slice(0, 160) + '...';
+    html += '<button type="button" class="list-group-item list-group-item-action px-0 py-2" onclick="restoreLocalQueryHistory(' + idx + ')">' +
+      '<span class="d-block text-truncate">' + escHtml(label) + '</span>' +
+      '<span class="text-muted">' + escHtml(formatHistoryTime(item.at)) + ' · ' +
+      (item.error ? '<span class="text-danger">' + escHtml(item.error) + '</span>' : escHtml(item.rowCount || 0) + ' row(s) · ' + escHtml(item.elapsedMs || 0) + ' ms') +
+      '</span>' +
+      '</button>';
+  });
+  html += '</div>';
+  target.innerHTML = html;
+}
+
+function restoreLocalQueryHistory(idx) {
+  var item = loadLocalQueryHistory()[idx];
+  if (!item) return;
+  openSQLInEditor(item.sql, '', false);
+}
+
+function clearLocalQueryHistory() {
+  try { localStorage.removeItem(queryHistoryKey); } catch (e) {}
+  renderLocalQueryHistory();
+}
+
+function formatHistoryTime(value) {
+  var d = new Date(value);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleString();
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+</script>
+
+{{template "base_end" .}}
+{{end}}

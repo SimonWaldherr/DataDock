@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -23,8 +25,17 @@ import (
 //go:embed templates static
 var webFS embed.FS
 
+// autoPortRangeLow and autoPortRangeHigh bound the automatic free-port scan
+// used when neither -addr, -port, nor a stored setting picks a port.
+const (
+	autoPortRangeLow  = 8000
+	autoPortRangeHigh = 8100
+)
+
 func main() {
-	addr := flag.String("addr", ":8080", "HTTP listen address")
+	addr := flag.String("addr", "", "HTTP listen address (host:port); when set, takes precedence over -port and any stored port setting")
+	port := flag.Int("port", 0, fmt.Sprintf("HTTP listen port; 0 = use the stored setting or auto-detect a free port between %d and %d", autoPortRangeLow, autoPortRangeHigh))
+	findFreePortFlag := flag.Bool("find-free-port", false, fmt.Sprintf("print a free TCP port between %d and %d and exit (tooling helper)", autoPortRangeLow, autoPortRangeHigh))
 	dbFile := flag.String("db", "datadock.db", "Database file path (empty or :memory: for in-memory)")
 	tenant := flag.String("tenant", "default", "Tenant / schema name")
 	sqlDialect := flag.String("dialect", envDefault("DATADOCK_SQL_DIALECT", "tinysql"), "SQL dialect profile for LLM guidance (tinysql, sqlite, postgres, mysql, mariadb, mssql)")
@@ -38,9 +49,17 @@ func main() {
 	watchDir := flag.String("watch-dir", envDefault("DATADOCK_WATCH_DIR", ""), "Optional directory to auto-import supported files into tinySQL tables")
 	watchInterval := flag.Duration("watch-interval", envDurationDefault("DATADOCK_WATCH_INTERVAL", 3*time.Second), "Polling interval for -watch-dir auto-import")
 	auditPath := flag.String("audit-log", envDefault("DATADOCK_AUDIT_LOG", ""), "Optional path for a tamper-evident tinySQL audit log")
-	adminUser := flag.String("admin-user", envDefault("DATADOCK_ADMIN_USER", "admin"), "Username for HTTP Basic authentication on Admin pages and Admin APIs")
-	adminPassword := flag.String("admin-password", envDefault("DATADOCK_ADMIN_PASSWORD", ""), "Password for HTTP Basic authentication on Admin pages and Admin APIs; generated at startup when empty")
 	flag.Parse()
+
+	if *findFreePortFlag {
+		p, err := findFreePort(autoPortRangeLow, autoPortRangeHigh)
+		if err != nil {
+			log.Fatalf("find free port: %v", err)
+		}
+		fmt.Println(p)
+		return
+	}
+
 	verbose := NewVerboseLogger(*verboseMode)
 	if verbose.Enabled() {
 		verbose.Log(VerboseEvent{System: "datadock", Operation: "verbose_enabled", Target: "stdout", Preview: "redacted communication logging enabled"})
@@ -100,22 +119,6 @@ func main() {
 
 	app := newApp(nativeDB, sqlDB, *tenant, tpl)
 	app.setVerboseLogger(verbose)
-	adminUserName := strings.TrimSpace(*adminUser)
-	if adminUserName == "" {
-		adminUserName = "admin"
-	}
-	adminPass := *adminPassword
-	if adminPass == "" {
-		generated, err := newGeneratedAdminPassword()
-		if err != nil {
-			log.Fatalf("generate admin password: %v", err)
-		}
-		adminPass = generated
-		log.Printf("Admin Basic Auth enabled with generated credentials: user=%q password=%q", adminUserName, adminPass)
-	} else {
-		log.Printf("Admin Basic Auth enabled for user %q", adminUserName)
-	}
-	app.setAdminAuth(AdminAuthConfig{Username: adminUserName, Password: adminPass})
 	settings := RuntimeSettings{
 		Dialect:        *sqlDialect,
 		ConnectTimeout: *connectTimeout,
@@ -124,12 +127,29 @@ func main() {
 		LLMAPIKey:      *llmAPIKey,
 		LLMModel:       *llmModel,
 		LLMTimeout:     *llmTimeout,
+		Port:           *port,
 	}
 	if stored, ok, err := app.loadRuntimeSettings(context.Background()); err != nil {
 		log.Fatalf("load settings: %v", err)
 	} else if ok {
 		settings = mergeRuntimeSettingsWithExplicitFlags(stored, settings)
 	}
+
+	// Resolve the port to listen on, unless -addr gives an explicit host:port
+	// that takes full precedence. Precedence otherwise: -port flag > stored
+	// setting > auto-detected free port in the configured range.
+	listenAddr := strings.TrimSpace(*addr)
+	if listenAddr == "" {
+		if !flagWasSet("port") && (settings.Port <= 0 || !isPortFree(settings.Port)) {
+			p, err := findFreePort(autoPortRangeLow, autoPortRangeHigh)
+			if err != nil {
+				log.Fatalf("find free port: %v", err)
+			}
+			settings.Port = p
+		}
+		listenAddr = fmt.Sprintf(":%d", settings.Port)
+	}
+
 	if err := app.applyRuntimeSettings(settings); err != nil {
 		log.Fatalf("settings: %v", err)
 	}
@@ -154,15 +174,47 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	// Unauthenticated and deliberately outside app.registerRoutes (no
+	// session cookie, no DB/template rendering): a liveness/readiness probe
+	// for process supervisors (systemd, Docker, Kubernetes) must stay cheap
+	// and must not depend on anything that could itself be degraded.
+	mux.HandleFunc("GET /healthz", healthzHandler)
 	app.registerRoutes(mux)
 	mux.Handle("GET /static/", http.FileServer(http.FS(webFS)))
 
-	handler := securityHeaders(mux)
-	log.Printf("DataDock listening on %s  (db: %s, tenant: %s, dialect: %s)", *addr, dbLabel(*dbFile), *tenant, app.currentDialect().Name)
+	// Middleware order (outermost first): every request is logged exactly
+	// once with its final status, including ones recovered from a panic;
+	// recoverMiddleware sits between logging and the actual routes so a
+	// panic becomes a clean 500 the access log can still see, instead of
+	// net/http's default behavior of just aborting the connection.
+	handler := loggingMiddleware(recoverMiddleware(securityHeaders(mux)))
+	log.Printf("DataDock listening on %s  (db: %s, tenant: %s, dialect: %s)", listenAddr, dbLabel(*dbFile), *tenant, app.currentDialect().Name)
 	srv := &http.Server{
-		Addr:              *addr,
-		Handler:           handler,
+		Addr:    listenAddr,
+		Handler: handler,
+		// ReadHeaderTimeout guards against Slowloris-style attacks that
+		// trickle in request headers to hold a connection open; it's the
+		// one blanket deadline that's always safe regardless of how long a
+		// particular request body/response takes.
 		ReadHeaderTimeout: 10 * time.Second,
+		// ReadTimeout bounds how long reading the full request (headers +
+		// body) may take, so a slow/malicious client can't tie up a
+		// connection indefinitely while uploading. 2 minutes comfortably
+		// covers the largest supported import upload (16 MiB, see
+		// importFileHandler) even on a slow link.
+		ReadTimeout: 2 * time.Minute,
+		// IdleTimeout closes keep-alive connections that sit idle between
+		// requests, bounding the number of sockets a client can pin open
+		// for free.
+		IdleTimeout: 2 * time.Minute,
+		// WriteTimeout is deliberately left unset. Query/LLM/connect
+		// timeouts are already enforced per-request via context deadlines
+		// derived from the admin-configurable settings (see
+		// withQueryTimeout/withConnectTimeout and llmConfig.Timeout), and
+		// full-table CSV/XLSX exports stream an unbounded number of rows —
+		// a fixed server-wide write deadline would silently truncate a
+		// legitimately large export instead of only catching the
+		// stuck-connection case it's meant to guard against.
 	}
 	serverErr := make(chan error, 1)
 	go func() {
@@ -174,8 +226,13 @@ func main() {
 
 	select {
 	case <-signalCtx.Done():
+		log.Printf("shutdown signal received, draining in-flight requests")
 		watchCancel()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Generous relative to ReadTimeout/IdleTimeout above: this is the
+		// grace period for requests already in flight (e.g. a large export
+		// or a slow LLM call) to finish before the process exits, not a
+		// per-request limit.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("http shutdown: %v", err)
@@ -185,6 +242,80 @@ func main() {
 			log.Printf("http server: %v", err)
 		}
 	}
+}
+
+// healthzHandler is a minimal liveness probe: if the process can accept a
+// connection and return 200, it's up. It deliberately does not touch the
+// database or render templates, so it stays meaningful even if those are
+// the thing that's actually broken.
+func healthzHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
+}
+
+// statusRecorder wraps a ResponseWriter to capture the status code that was
+// actually sent, so logging middleware can report it after the handler has
+// already written the response. It passes through Flush so handlers that
+// stream a response (e.g. a large export) still work if wrapped.
+type statusRecorder struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (s *statusRecorder) WriteHeader(status int) {
+	if !s.wroteHeader {
+		s.status = status
+		s.wroteHeader = true
+	}
+	s.ResponseWriter.WriteHeader(status)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if !s.wroteHeader {
+		s.WriteHeader(http.StatusOK)
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// loggingMiddleware writes one access-log line per request (method, path,
+// status, duration, client address) after the handler completes. It skips
+// /healthz to avoid drowning the log in probe traffic from process
+// supervisors that poll every few seconds.
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		log.Printf("%s %s %d %s %s", r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Millisecond), r.RemoteAddr)
+	})
+}
+
+// recoverMiddleware turns a panic anywhere in the handler chain into a
+// logged stack trace and a clean 500 response, instead of net/http's
+// default of logging to stderr and abruptly closing the connection. This is
+// a safety net, not a substitute for fixing the underlying bug.
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("panic serving %s %s: %v\n%s", r.Method, r.URL.Path, err, debug.Stack())
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // openNativeDB loads a file-backed DB or creates a new in-memory one.
@@ -200,6 +331,27 @@ func openNativeDB(filePath string) (*tinysql.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+// isPortFree reports whether a TCP port is currently available to bind on
+// all interfaces.
+func isPortFree(port int) bool {
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false
+	}
+	_ = ln.Close()
+	return true
+}
+
+// findFreePort scans [lo, hi] and returns the first port that can be bound.
+func findFreePort(lo, hi int) (int, error) {
+	for p := lo; p <= hi; p++ {
+		if isPortFree(p) {
+			return p, nil
+		}
+	}
+	return 0, fmt.Errorf("no free port available in range %d-%d", lo, hi)
 }
 
 // dbLabel returns a human-readable label for the database location.
@@ -269,6 +421,9 @@ func mergeRuntimeSettingsWithExplicitFlags(stored, flags RuntimeSettings) Runtim
 	if flagWasSet("llm-timeout") {
 		merged.LLMTimeout = flags.LLMTimeout
 	}
+	if flagWasSet("port") {
+		merged.Port = flags.Port
+	}
 	return merged
 }
 
@@ -310,6 +465,41 @@ func parseTemplates() (*template.Template, error) {
 			return m, nil
 		},
 		"not": func(b bool) bool { return !b },
+		// tablesOnly/viewsOnly split a mixed []TableObject (as injected into
+		// every render() call) so the sidebar template can render the two
+		// kind groups from one shared "sidebar_kind_group" partial instead
+		// of duplicating the markup per kind.
+		"tablesOnly": func(objects []TableObject) []TableObject {
+			out := make([]TableObject, 0, len(objects))
+			for _, o := range objects {
+				if !strings.EqualFold(o.Kind, "view") {
+					out = append(out, o)
+				}
+			}
+			return out
+		},
+		"viewsOnly": func(objects []TableObject) []TableObject {
+			out := make([]TableObject, 0, len(objects))
+			for _, o := range objects {
+				if strings.EqualFold(o.Kind, "view") {
+					out = append(out, o)
+				}
+			}
+			return out
+		},
+		// inputType maps a column's database type name to an HTML5 input
+		// type, purely for client-side keyboard/validation affordance (the
+		// form still posts a plain string either way, so this can't change
+		// what gets written). Anything not recognized falls back to "text".
+		"inputType": func(typeName string) string {
+			switch strings.ToUpper(strings.SplitN(strings.TrimSpace(typeName), "(", 2)[0]) {
+			case "INT", "INTEGER", "SMALLINT", "BIGINT", "TINYINT", "MEDIUMINT",
+				"FLOAT", "DOUBLE", "REAL", "DECIMAL", "NUMERIC", "MONEY":
+				return "number"
+			default:
+				return "text"
+			}
+		},
 	}).ParseFS(webFS, "templates/*.html")
 }
 

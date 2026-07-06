@@ -30,7 +30,8 @@
             {{$col.Name}}
             <span class="text-muted fw-normal">{{$col.TypeName}}</span>
           </label>
-          <input type="text" class="form-control form-control-sm"
+          <input type="{{inputType $col.TypeName}}" class="form-control form-control-sm"
+                 {{if eq (inputType $col.TypeName) "number"}}step="any"{{end}}
                  name="{{$col.Name}}"
                  value="{{index $values $col.Name}}"
                  placeholder="{{$col.TypeName}}">

@@ -81,6 +81,23 @@ func newTestApp(t *testing.T) *App {
 	return newApp(nativeDB, sqlDB, tenant, tpl)
 }
 
+func setupAdminSession(t *testing.T, mux *http.ServeMux) *http.Cookie {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/admin/setup", strings.NewReader(
+		url.Values{"password": {"secret123"}, "password_confirm": {"secret123"}, "next": {"/admin"}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("admin setup: expected 303, got %d: %s", rec.Code, rec.Body.String())
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("admin setup did not set a session cookie")
+	}
+	return cookies[0]
+}
+
 func TestIndexRedirectsToFirstTable(t *testing.T) {
 	app := newTestApp(t)
 
@@ -121,9 +138,11 @@ func TestDemoDataCreatesAllDemoTables(t *testing.T) {
 	app := newTestApp(t)
 	mux := http.NewServeMux()
 	app.registerRoutes(mux)
+	adminCookie := setupAdminSession(t, mux)
 
 	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/demo-data", nil)
+		req.AddCookie(adminCookie)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
 		if w.Code != http.StatusSeeOther {
@@ -189,8 +208,10 @@ func TestDemoDataRemoveDropsTablesAndJob(t *testing.T) {
 	app := newTestApp(t)
 	mux := http.NewServeMux()
 	app.registerRoutes(mux)
+	adminCookie := setupAdminSession(t, mux)
 
 	req := httptest.NewRequest(http.MethodPost, "/demo-data", nil)
+	req.AddCookie(adminCookie)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusSeeOther {
@@ -198,6 +219,7 @@ func TestDemoDataRemoveDropsTablesAndJob(t *testing.T) {
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/demo-data/remove", nil)
+	req.AddCookie(adminCookie)
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusSeeOther {
@@ -411,14 +433,14 @@ func TestQueryEditor(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, want := range []string{
-		"Local History",
+		"/history",
 		"Quick Chart",
 		"Share",
 		"toggleSchemaPreview",
 		"fetch('/api/schema')",
 		"currentSQL()",
 		"monaco-editor",
-		"Test LLM",
+		"Test connection",
 		"F5",
 		"Excel CSV",
 		"GeoJSON",
@@ -429,6 +451,23 @@ func TestQueryEditor(t *testing.T) {
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected query editor to contain %q", want)
+		}
+	}
+}
+
+func TestHistoryPage(t *testing.T) {
+	app := newTestApp(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/history", nil)
+	w := httptest.NewRecorder()
+	app.historyHandler(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{"Local History", "restoreLocalQueryHistory", "openSQLInEditor", "clearLocalQueryHistory"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected history page to contain %q", want)
 		}
 	}
 }
@@ -679,54 +718,57 @@ func TestAdminAndJobsPagesRender(t *testing.T) {
 	}
 }
 
-func TestAdminRoutesRequireBasicAuth(t *testing.T) {
+func TestAdminRoutesRequireAdminSession(t *testing.T) {
 	app := newTestApp(t)
-	app.setAdminAuth(AdminAuthConfig{Username: "root", Password: "secret"})
-	if app.adminAuth.Password != "" {
-		t.Fatal("admin password should not be retained in plaintext")
-	}
 	mux := http.NewServeMux()
 	app.registerRoutes(mux)
 
-	protected := []struct {
-		method string
-		path   string
-	}{
-		{http.MethodGet, "/admin"},
-		{http.MethodGet, "/connections"},
-		{http.MethodGet, "/jobs"},
-		{http.MethodGet, "/api/admin/status"},
-		{http.MethodGet, "/api/jobs"},
-	}
-	for _, tc := range protected {
-		req := httptest.NewRequest(tc.method, tc.path, nil)
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("%s %s: expected unauthenticated request to return 401, got %d", tc.method, tc.path, rec.Code)
-		}
-		if got := rec.Header().Get("WWW-Authenticate"); !strings.Contains(got, "Basic") {
-			t.Fatalf("%s %s: expected Basic challenge, got %q", tc.method, tc.path, got)
-		}
-		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
-			t.Fatalf("%s %s: expected no-store challenge, got %q", tc.method, tc.path, got)
-		}
-	}
-
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
-	req.SetBasicAuth("root", "wrong")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected invalid admin credentials to return 401, got %d", rec.Code)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected first admin visit to redirect to setup, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "/admin/setup") {
+		t.Fatalf("expected setup redirect, got %q", loc)
+	}
+
+	apiReq := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	apiRec := httptest.NewRecorder()
+	mux.ServeHTTP(apiRec, apiReq)
+	if apiRec.Code != http.StatusPreconditionRequired {
+		t.Fatalf("expected API request before setup to return 428, got %d", apiRec.Code)
+	}
+
+	setupReq := httptest.NewRequest(http.MethodPost, "/admin/setup", strings.NewReader(
+		url.Values{"password": {"secret123"}, "password_confirm": {"secret123"}, "next": {"/admin"}}.Encode()))
+	setupReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	setupRec := httptest.NewRecorder()
+	mux.ServeHTTP(setupRec, setupReq)
+	if setupRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected setup submit redirect, got %d; body: %s", setupRec.Code, setupRec.Body.String())
+	}
+	if app.currentAdminPasswordHash() == "" || strings.Contains(app.currentAdminPasswordHash(), "secret123") {
+		t.Fatal("admin password should be stored as a hash")
+	}
+	cookies := setupRec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("expected setup response to set a session cookie")
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/admin", nil)
-	req.SetBasicAuth("root", "secret")
+	req.AddCookie(cookies[0])
 	rec = httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected authenticated admin request to return 200, got %d; body: %s", rec.Code, rec.Body.String())
+		t.Fatalf("expected admin session request to return 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	noCookieReq := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	noCookieRec := httptest.NewRecorder()
+	mux.ServeHTTP(noCookieRec, noCookieReq)
+	if noCookieRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected API request without admin session to return 401, got %d", noCookieRec.Code)
 	}
 }
 
@@ -1098,6 +1140,87 @@ func TestSafeExportFilenameBase(t *testing.T) {
 		if got := safeExportFilenameBase(input); got != want {
 			t.Errorf("safeExportFilenameBase(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestRecoverMiddlewareReturnsCleanServerError(t *testing.T) {
+	panicking := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/panics", nil)
+
+	// The whole point of the middleware: a handler panic must not propagate
+	// out and crash the test/server process — recoverMiddleware must catch
+	// it and turn it into a normal 500 response.
+	recoverMiddleware(panicking).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 after recovered panic, got %d", rec.Code)
+	}
+}
+
+func TestRecoverMiddlewarePassesThroughNormalResponses(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+		_, _ = w.Write([]byte("teapot"))
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	recoverMiddleware(ok).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTeapot || rec.Body.String() != "teapot" {
+		t.Fatalf("expected untouched response to pass through, got %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestLoggingMiddlewareCapturesActualStatusCode(t *testing.T) {
+	notFound := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusNotFound)
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/missing", nil)
+
+	// loggingMiddleware must not alter the response itself — only observe
+	// it — regardless of what status the wrapped handler sends.
+	loggingMiddleware(notFound).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected logging middleware to pass through status 404, got %d", rec.Code)
+	}
+}
+
+func TestLoggingMiddlewareSkipsHealthzPath(t *testing.T) {
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+
+	loggingMiddleware(next).ServeHTTP(rec, req)
+
+	if !called {
+		t.Fatal("expected /healthz request to still reach the wrapped handler")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestHealthzHandlerReturnsOK(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+
+	healthzHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if rec.Body.String() != "ok" {
+		t.Fatalf("expected body %q, got %q", "ok", rec.Body.String())
 	}
 }
 

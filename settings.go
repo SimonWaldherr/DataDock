@@ -23,17 +23,19 @@ var allowedUIThemes = []string{"workbench", "midnight", "forest", "contrast", "s
 var allowedUIDensities = []string{"comfortable", "compact"}
 
 type RuntimeSettings struct {
-	Dialect        string
-	ConnectTimeout time.Duration
-	QueryTimeout   time.Duration
-	LLMBaseURL     string
-	LLMAPIKey      string
-	LLMModel       string
-	LLMTimeout     time.Duration
-	ReadOnlyMode   bool
-	PageSize       int
-	DefaultTheme   string
-	DefaultDensity string
+	Dialect           string
+	ConnectTimeout    time.Duration
+	QueryTimeout      time.Duration
+	LLMBaseURL        string
+	LLMAPIKey         string
+	LLMModel          string
+	LLMTimeout        time.Duration
+	ReadOnlyMode      bool
+	PageSize          int
+	DefaultTheme      string
+	DefaultDensity    string
+	Port              int
+	AdminPasswordHash string
 }
 
 type RuntimeSettingsView struct {
@@ -50,6 +52,8 @@ type RuntimeSettingsView struct {
 	PageSize         int    `json:"page_size"`
 	DefaultTheme     string `json:"default_theme"`
 	DefaultDensity   string `json:"default_density"`
+	Port             int    `json:"port"`
+	AdminPasswordSet bool   `json:"admin_password_set"`
 }
 
 func isAllowedValue(value string, allowed []string) bool {
@@ -103,6 +107,9 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 	} else if !isAllowedValue(s.DefaultDensity, allowedUIDensities) {
 		return fmt.Errorf("unknown default density %q", s.DefaultDensity)
 	}
+	if s.Port < 0 || s.Port > 65535 {
+		return fmt.Errorf("port must be between 0 and 65535")
+	}
 
 	cfg := LLMConfig{
 		BaseURL: strings.TrimSpace(s.LLMBaseURL),
@@ -128,6 +135,8 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 	a.pageSize = s.PageSize
 	a.defaultTheme = s.DefaultTheme
 	a.defaultDensity = s.DefaultDensity
+	a.port = s.Port
+	a.adminPasswordHash = s.AdminPasswordHash
 	return nil
 }
 
@@ -137,17 +146,19 @@ func (a *App) saveRuntimeSettings(ctx context.Context) error {
 	}
 	s := a.currentRuntimeSettings()
 	values := map[string]string{
-		"dialect":         s.Dialect,
-		"connect_timeout": s.ConnectTimeout.String(),
-		"query_timeout":   s.QueryTimeout.String(),
-		"llm_base_url":    s.LLMBaseURL,
-		"llm_api_key":     s.LLMAPIKey,
-		"llm_model":       s.LLMModel,
-		"llm_timeout":     s.LLMTimeout.String(),
-		"read_only_mode":  strconv.FormatBool(s.ReadOnlyMode),
-		"page_size":       strconv.Itoa(s.PageSize),
-		"default_theme":   s.DefaultTheme,
-		"default_density": s.DefaultDensity,
+		"dialect":             s.Dialect,
+		"connect_timeout":     s.ConnectTimeout.String(),
+		"query_timeout":       s.QueryTimeout.String(),
+		"llm_base_url":        s.LLMBaseURL,
+		"llm_api_key":         s.LLMAPIKey,
+		"llm_model":           s.LLMModel,
+		"llm_timeout":         s.LLMTimeout.String(),
+		"read_only_mode":      strconv.FormatBool(s.ReadOnlyMode),
+		"page_size":           strconv.Itoa(s.PageSize),
+		"default_theme":       s.DefaultTheme,
+		"default_density":     s.DefaultDensity,
+		"port":                strconv.Itoa(s.Port),
+		"admin_password_hash": s.AdminPasswordHash,
 	}
 	for key, value := range values {
 		if err := a.saveSetting(ctx, key, value); err != nil {
@@ -252,6 +263,11 @@ func (a *App) openManagedConnectionConfigs(ctx context.Context, configs []Manage
 			_ = conn.DB.Close()
 			return err
 		}
+		// These configs came from the settings store or an operator-set env
+		// var, not an interactive form submission, so they're already
+		// "persisted" in the sense that matters: saving settings again
+		// (e.g. via SetDefault below) must keep including them.
+		a.conns.MarkPersisted(conn.ID)
 		if cfg.Default {
 			if err := a.conns.SetDefault(conn.ID); err != nil {
 				return err
@@ -302,17 +318,19 @@ func (a *App) currentRuntimeSettings() RuntimeSettings {
 	a.settingsMu.RLock()
 	defer a.settingsMu.RUnlock()
 	return RuntimeSettings{
-		Dialect:        a.dialect.Name,
-		ConnectTimeout: a.connectTimeout,
-		QueryTimeout:   a.queryTimeout,
-		LLMBaseURL:     a.llmConfig.BaseURL,
-		LLMAPIKey:      a.llmConfig.APIKey,
-		LLMModel:       a.llmConfig.Model,
-		LLMTimeout:     a.llmConfig.Timeout,
-		ReadOnlyMode:   a.readOnlyMode,
-		PageSize:       a.pageSize,
-		DefaultTheme:   a.defaultTheme,
-		DefaultDensity: a.defaultDensity,
+		Dialect:           a.dialect.Name,
+		ConnectTimeout:    a.connectTimeout,
+		QueryTimeout:      a.queryTimeout,
+		LLMBaseURL:        a.llmConfig.BaseURL,
+		LLMAPIKey:         a.llmConfig.APIKey,
+		LLMModel:          a.llmConfig.Model,
+		LLMTimeout:        a.llmConfig.Timeout,
+		ReadOnlyMode:      a.readOnlyMode,
+		PageSize:          a.pageSize,
+		DefaultTheme:      a.defaultTheme,
+		DefaultDensity:    a.defaultDensity,
+		Port:              a.port,
+		AdminPasswordHash: a.adminPasswordHash,
 	}
 }
 
@@ -333,7 +351,25 @@ func (a *App) runtimeSettingsView() RuntimeSettingsView {
 		PageSize:         a.pageSize,
 		DefaultTheme:     a.defaultTheme,
 		DefaultDensity:   a.defaultDensity,
+		Port:             a.port,
+		AdminPasswordSet: strings.TrimSpace(a.adminPasswordHash) != "",
 	}
+}
+
+func (a *App) currentPort() int {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	return a.port
+}
+
+func (a *App) currentAdminPasswordHash() string {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	return a.adminPasswordHash
+}
+
+func (a *App) adminPasswordIsSet() bool {
+	return strings.TrimSpace(a.currentAdminPasswordHash()) != ""
 }
 
 func (a *App) currentReadOnlyMode() bool {
@@ -427,18 +463,26 @@ func runtimeSettingsFromStoredValues(values map[string]string) (RuntimeSettings,
 	if defaultDensity == "" {
 		defaultDensity = defaultUIDensity
 	}
+	port := 0
+	if raw := strings.TrimSpace(values["port"]); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 65535 {
+			port = n
+		}
+	}
 	return RuntimeSettings{
-		Dialect:        values["dialect"],
-		ConnectTimeout: connectTimeout,
-		QueryTimeout:   queryTimeout,
-		LLMBaseURL:     values["llm_base_url"],
-		LLMAPIKey:      values["llm_api_key"],
-		LLMModel:       values["llm_model"],
-		LLMTimeout:     llmTimeout,
-		ReadOnlyMode:   readOnlyMode,
-		PageSize:       pageSize,
-		DefaultTheme:   defaultTheme,
-		DefaultDensity: defaultDensity,
+		Dialect:           values["dialect"],
+		ConnectTimeout:    connectTimeout,
+		QueryTimeout:      queryTimeout,
+		LLMBaseURL:        values["llm_base_url"],
+		LLMAPIKey:         values["llm_api_key"],
+		LLMModel:          values["llm_model"],
+		LLMTimeout:        llmTimeout,
+		ReadOnlyMode:      readOnlyMode,
+		PageSize:          pageSize,
+		DefaultTheme:      defaultTheme,
+		DefaultDensity:    defaultDensity,
+		Port:              port,
+		AdminPasswordHash: values["admin_password_hash"],
 	}, nil
 }
 

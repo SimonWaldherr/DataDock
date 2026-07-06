@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -13,7 +15,7 @@ import (
 
 	tinysql "github.com/SimonWaldherr/tinySQL"
 
-	_ "github.com/go-sql-driver/mysql"
+	mysqldriver "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	_ "github.com/microsoft/go-mssqldb"
 	_ "modernc.org/sqlite"
@@ -30,6 +32,33 @@ type DBConnection struct {
 	DB      *sql.DB
 	Native  *tinysql.DB
 	Verbose *VerboseLogger
+
+	// Owner is the ID of the session that created this connection. An empty
+	// Owner means the connection is shared/global (the built-in tinySQL
+	// connection, anything loaded from server settings or env vars at
+	// startup, and anything an admin has persisted). A non-empty Owner
+	// restricts visibility to that one session, so concurrent users on the
+	// same running server don't see or use each other's ad hoc connections
+	// until an admin explicitly shares one (see MarkPersisted).
+	Owner string
+
+	// crossDB caches secondary *sql.DB handles to OTHER databases on the same
+	// server (same host/user/credentials, different database name), used to
+	// browse the full server catalog for dialects that can't cross databases
+	// within a single connection (PostgreSQL). Lazily populated.
+	crossDBMu sync.Mutex
+	crossDB   map[string]*sql.DB
+}
+
+// closeCrossDB closes any secondary cross-database connections opened for
+// server-wide catalog browsing.
+func (c *DBConnection) closeCrossDB() {
+	c.crossDBMu.Lock()
+	defer c.crossDBMu.Unlock()
+	for _, db := range c.crossDB {
+		_ = db.Close()
+	}
+	c.crossDB = nil
 }
 
 type ConnectionInfo struct {
@@ -40,6 +69,14 @@ type ConnectionInfo struct {
 	DSNDisplay string
 	Active     bool
 	Default    bool
+	// Persisted is true when this connection's credentials are written to
+	// the server's shared settings (survives restarts, visible to every
+	// session) rather than only held in memory for the current process.
+	Persisted bool
+	// Private is true when this connection is only visible to the session
+	// that created it (Owner != ""). Only shared (non-private) connections
+	// can be made the server-wide default; see SetDefault.
+	Private bool
 }
 
 func (c *DBConnection) verboseTarget() string {
@@ -100,6 +137,11 @@ type ConnectionManager struct {
 	defaultID       string
 	activeBySession map[string]string
 	conns           map[string]*DBConnection
+	// persisted marks which connection IDs are written to the server's
+	// shared settings; everything else only lives in memory for this
+	// process and disappears on restart. Only an admin-gated action sets
+	// this (see adminPersistConnectionHandler in admin_auth.go).
+	persisted map[string]bool
 }
 
 func NewConnectionManager(defaultConn *DBConnection) *ConnectionManager {
@@ -108,8 +150,72 @@ func NewConnectionManager(defaultConn *DBConnection) *ConnectionManager {
 		defaultID:       defaultConn.ID,
 		activeBySession: make(map[string]string),
 		conns:           map[string]*DBConnection{defaultConn.ID: defaultConn},
+		persisted:       make(map[string]bool),
 	}
 	return m
+}
+
+// MarkPersisted flags an existing connection as one whose credentials should
+// be included in StoredConfigs() (and thus written to the server's shared
+// settings the next time saveManagedConnections runs). This is also the
+// point where a session-private connection becomes shared/global: it's only
+// reachable via adminPersistConnectionHandler, which is admin-gated, so
+// "persist" doubles as "share with everyone" by admin decision.
+func (m *ConnectionManager) MarkPersisted(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if conn := m.conns[id]; conn != nil {
+		m.persisted[id] = true
+		conn.Owner = ""
+	}
+}
+
+// UnmarkPersisted stops a connection from being included in StoredConfigs();
+// it does not by itself remove the connection from the running process (see
+// Remove for that).
+func (m *ConnectionManager) UnmarkPersisted(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.persisted, id)
+}
+
+func (m *ConnectionManager) IsPersisted(id string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.persisted[id]
+}
+
+// Remove closes and fully drops a managed connection from the running
+// process (used by "Forget", which is a real delete, not just "stop
+// persisting"). The built-in tinySQL connection can't be removed.
+func (m *ConnectionManager) Remove(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if id == defaultConnectionID {
+		return fmt.Errorf("cannot remove the built-in tinySQL connection")
+	}
+	conn := m.conns[id]
+	if conn == nil {
+		return fmt.Errorf("connection %q not found", id)
+	}
+	if conn.DB != nil {
+		_ = conn.DB.Close()
+	}
+	conn.closeCrossDB()
+	delete(m.conns, id)
+	delete(m.persisted, id)
+	if m.active == id {
+		m.active = defaultConnectionID
+	}
+	if m.defaultID == id {
+		m.defaultID = defaultConnectionID
+	}
+	for sessionID, activeID := range m.activeBySession {
+		if activeID == id {
+			delete(m.activeBySession, sessionID)
+		}
+	}
+	return nil
 }
 
 func (m *ConnectionManager) Active() *DBConnection {
@@ -135,17 +241,82 @@ func (m *ConnectionManager) Get(id string) *DBConnection {
 	return m.conns[strings.TrimSpace(id)]
 }
 
+// visibleTo reports whether conn is visible to sessionID: shared (no Owner)
+// or privately owned by this exact session.
+func (c *DBConnection) visibleTo(sessionID string) bool {
+	return c != nil && (c.Owner == "" || c.Owner == sessionID)
+}
+
+// GetFor looks up a connection the same way Get does, but returns nil if the
+// connection is privately owned by a different session — used anywhere a
+// session-supplied ID (form field, query param) selects a connection, so one
+// session can't reach another session's in-memory-only connection by
+// guessing or replaying its ID.
+func (m *ConnectionManager) GetFor(sessionID, id string) *DBConnection {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	conn := m.conns[strings.TrimSpace(id)]
+	if !conn.visibleTo(sessionID) {
+		return nil
+	}
+	return conn
+}
+
+// Add inserts conn into the store, keyed by conn.ID. If conn is privately
+// owned (conn.Owner != "") and that ID collides with a connection owned by
+// someone else, conn.ID is transparently disambiguated first — this and the
+// collision check run under the same lock as the insert, so two concurrent
+// Add calls for the same ID from two different sessions can't race past the
+// check and have one silently close/replace the other's live *sql.DB. A
+// second Add for a connection this session already owns (or a shared one)
+// still overwrites/replaces it as before — that's an intentional "update"
+// path, not a bug.
 func (m *ConnectionManager) Add(conn *DBConnection) error {
 	if strings.TrimSpace(conn.ID) == "" {
 		return fmt.Errorf("connection id is required")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if conn.Owner != "" {
+		conn.ID = m.disambiguateIDLocked(conn.Owner, conn.ID)
+	}
 	if old := m.conns[conn.ID]; old != nil && old.DB != nil && old.ID != defaultConnectionID {
 		_ = old.DB.Close()
+		old.closeCrossDB()
 	}
 	m.conns[conn.ID] = conn
 	return nil
+}
+
+// disambiguateIDLocked returns id unchanged unless it's already taken by a
+// connection privately owned by a different session, in which case it
+// returns a deterministic, disambiguated variant (so resubmitting the same
+// form from the same session reuses the same suffixed ID instead of piling
+// up duplicates every time). Two sessions independently naming a connection
+// "prod-mssql" must not collide and silently close/replace each other's
+// live *sql.DB, since each is only supposed to be visible to its own
+// session until an admin shares it. Must be called with m.mu held.
+func (m *ConnectionManager) disambiguateIDLocked(sessionID, id string) string {
+	if existing := m.conns[id]; existing == nil || existing.visibleTo(sessionID) {
+		return id
+	}
+	suffix := shortSessionSuffix(sessionID)
+	candidate := id + "-" + suffix
+	for i := 2; ; i++ {
+		if existing := m.conns[candidate]; existing == nil || existing.visibleTo(sessionID) {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s-%s-%d", id, suffix, i)
+	}
+}
+
+// shortSessionSuffix derives a short, non-reversible tag from a session ID
+// for disambiguating connection IDs, without exposing any part of the
+// actual session cookie value in URLs/HTML.
+func shortSessionSuffix(sessionID string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(sessionID))
+	return fmt.Sprintf("%06x", h.Sum32()&0xffffff)
 }
 
 func (m *ConnectionManager) SetActive(id string) error {
@@ -158,11 +329,24 @@ func (m *ConnectionManager) SetActive(id string) error {
 	return nil
 }
 
+// SetDefault changes the server-wide fallback connection used for any
+// session that hasn't picked its own active connection. This is
+// deliberately restricted to shared connections (Owner == ""): letting a
+// session-private connection become the global default would make every
+// other session silently start using it — the exact same leak the Owner
+// model exists to prevent — without ever going through the explicit,
+// admin-only "share" step (MarkPersisted). Callers must be admin-gated
+// (see adminSetDefaultConnectionHandler); this method only enforces the
+// shared-connection precondition.
 func (m *ConnectionManager) SetDefault(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.conns[id] == nil {
+	conn := m.conns[id]
+	if conn == nil {
 		return fmt.Errorf("connection %q not found", id)
+	}
+	if conn.Owner != "" {
+		return fmt.Errorf("connection %q is private to one session; share it first before making it the default for everyone", id)
 	}
 	m.defaultID = id
 	m.active = id
@@ -172,7 +356,8 @@ func (m *ConnectionManager) SetDefault(id string) error {
 func (m *ConnectionManager) SetActiveFor(sessionID, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.conns[id] == nil {
+	conn := m.conns[id]
+	if !conn.visibleTo(sessionID) {
 		return fmt.Errorf("connection %q not found", id)
 	}
 	if strings.TrimSpace(sessionID) == "" {
@@ -199,6 +384,9 @@ func (m *ConnectionManager) ListFor(sessionID string) []ConnectionInfo {
 	}
 	out := make([]ConnectionInfo, 0, len(m.conns))
 	for _, c := range m.conns {
+		if !c.visibleTo(sessionID) {
+			continue
+		}
 		out = append(out, ConnectionInfo{
 			ID:         c.ID,
 			Name:       c.Name,
@@ -207,6 +395,8 @@ func (m *ConnectionManager) ListFor(sessionID string) []ConnectionInfo {
 			DSNDisplay: maskedDSN(c.DSN),
 			Active:     c.ID == activeID,
 			Default:    c.ID == defaultID,
+			Persisted:  m.persisted[c.ID],
+			Private:    c.Owner != "",
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -227,6 +417,9 @@ func (m *ConnectionManager) StoredConfigs() []ManagedConnectionConfig {
 	out := make([]ManagedConnectionConfig, 0, len(m.conns))
 	for _, c := range m.conns {
 		if c == nil || c.ID == defaultConnectionID || strings.TrimSpace(c.DSN) == "" {
+			continue
+		}
+		if !m.persisted[c.ID] {
 			continue
 		}
 		out = append(out, ManagedConnectionConfig{
@@ -325,6 +518,147 @@ func OpenManagedConnectionVerbose(ctx context.Context, id, name, kind, dsn strin
 	return &DBConnection{ID: id, Name: name, Kind: kind, DSN: dsn, Dialect: dialect, DB: db, Verbose: verbose}, nil
 }
 
+// QuickConnectFields carries the discrete host/port/user/password fields
+// from the "Quick Connect" form so callers don't need to hand-craft a DSN
+// string (and get its escaping/quoting rules right) themselves. This is
+// especially valuable for SQL Server, whose native DSN syntax (URL form or
+// ADO key=value form, instance names, encryption flags) trips up most users
+// who just have a host, port, database, and credentials.
+type QuickConnectFields struct {
+	Kind      string
+	Host      string
+	Port      string
+	Database  string
+	User      string
+	Password  string
+	Instance  string // SQL Server named instance, e.g. "SQLEXPRESS"
+	SSLMode   string // PostgreSQL sslmode, e.g. "disable", "require"
+	Encrypt   string // SQL Server encrypt setting, e.g. "disable", "true"
+	TrustCert bool   // SQL Server TrustServerCertificate
+	Params    string // extra driver-specific query parameters (MySQL)
+	AuthMode  string // SQL Server auth mode: "sql" (default), "windows-current", "windows-account"
+}
+
+// mssqlAuthMode normalizes the requested SQL Server authentication mode,
+// defaulting to plain SQL Server authentication (username/password).
+func mssqlAuthMode(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "windows-current":
+		return "windows-current"
+	case "windows-account":
+		return "windows-account"
+	default:
+		return "sql"
+	}
+}
+
+// buildDSNFromFields turns QuickConnectFields into a driver-ready DSN,
+// applying sane per-database defaults (standard port, useful TLS/encoding
+// defaults for local and self-signed setups) and properly escaping
+// usernames/passwords so special characters don't break the connection
+// string.
+func buildDSNFromFields(f QuickConnectFields) (string, error) {
+	host := strings.TrimSpace(f.Host)
+	if host == "" {
+		return "", fmt.Errorf("host is required")
+	}
+	user := strings.TrimSpace(f.User)
+	database := strings.TrimSpace(f.Database)
+
+	switch strings.ToLower(strings.TrimSpace(f.Kind)) {
+	case "mssql", "sqlserver":
+		port := strings.TrimSpace(f.Port)
+		if port == "" {
+			port = "1433"
+		}
+		u := &url.URL{Scheme: "sqlserver", Host: host + ":" + port}
+		switch mssqlAuthMode(f.AuthMode) {
+		case "windows-current":
+			// Leave u.User unset: go-mssqldb's winsspi/ntlm integrated-auth
+			// provider then authenticates as the OS user running DataDock.
+			if user != "" || f.Password != "" {
+				return "", fmt.Errorf("Windows authentication (current user) does not take a username or password; clear those fields or switch authentication mode")
+			}
+		case "windows-account":
+			if !strings.Contains(user, `\`) {
+				return "", fmt.Errorf(`Windows authentication needs a "DOMAIN\username" user name`)
+			}
+			u.User = url.UserPassword(user, f.Password)
+		default: // "sql": plain SQL Server authentication
+			if user == "" {
+				return "", fmt.Errorf("user is required for SQL Server authentication")
+			}
+			u.User = url.UserPassword(user, f.Password)
+		}
+		if instance := strings.TrimSpace(f.Instance); instance != "" {
+			u.Path = "/" + instance
+		}
+		q := url.Values{}
+		if database != "" {
+			q.Set("database", database)
+		}
+		encrypt := strings.TrimSpace(f.Encrypt)
+		if encrypt == "" {
+			encrypt = "disable"
+		}
+		q.Set("encrypt", encrypt)
+		if f.TrustCert {
+			q.Set("TrustServerCertificate", "true")
+		}
+		u.RawQuery = q.Encode()
+		return u.String(), nil
+
+	case "postgres", "postgresql":
+		port := strings.TrimSpace(f.Port)
+		if port == "" {
+			port = "5432"
+		}
+		u := &url.URL{Scheme: "postgres", Host: host + ":" + port, Path: "/" + database}
+		if user != "" {
+			u.User = url.UserPassword(user, f.Password)
+		}
+		mode := strings.TrimSpace(f.SSLMode)
+		if mode == "" {
+			mode = "disable"
+		}
+		q := url.Values{}
+		q.Set("sslmode", mode)
+		u.RawQuery = q.Encode()
+		return u.String(), nil
+
+	case "mysql", "mariadb":
+		port := strings.TrimSpace(f.Port)
+		if port == "" {
+			port = "3306"
+		}
+		cfg := mysqldriver.NewConfig()
+		cfg.User = user
+		cfg.Passwd = f.Password
+		cfg.Net = "tcp"
+		cfg.Addr = host + ":" + port
+		cfg.DBName = database
+		cfg.ParseTime = true
+		dsn := cfg.FormatDSN()
+		if params := strings.TrimSpace(f.Params); params != "" {
+			sep := "&"
+			if !strings.Contains(dsn, "?") {
+				sep = "?"
+			}
+			dsn += sep + params
+		}
+		return dsn, nil
+
+	case "sqlite":
+		if database == "" {
+			return "", fmt.Errorf("database (file path) is required for SQLite")
+		}
+		return database, nil
+
+	default:
+		return "", fmt.Errorf("quick connect does not support %q; use the raw DSN field instead", f.Kind)
+	}
+}
+
 func parseConnectionDSN(kind, dsn string) (normalizedKind, driverName, connStr string, dialect DialectProfile) {
 	lowerKind := strings.ToLower(strings.TrimSpace(kind))
 	lowerDSN := strings.ToLower(strings.TrimSpace(dsn))
@@ -364,9 +698,33 @@ func detectConnectionKind(dsn string) string {
 		return "mssql"
 	case strings.HasPrefix(lower, "sqlite://"), strings.HasSuffix(lower, ".db"), strings.HasSuffix(lower, ".sqlite"), strings.HasSuffix(lower, ".sqlite3"), lower == ":memory:":
 		return "sqlite"
+	// ADO/ODBC-style connection strings (e.g. pasted from SQL Server
+	// Management Studio or the Azure Portal) don't carry a URL prefix, so
+	// they need to be recognized by their characteristic keywords instead.
+	case looksLikeADOConnectionString(lower):
+		return "mssql"
+	// libpq keyword/value connection strings ("host=... dbname=... user=...").
+	case strings.Contains(lower, "dbname="):
+		return "postgres"
 	default:
 		return "sqlite"
 	}
+}
+
+// looksLikeADOConnectionString reports whether dsn (already lower-cased)
+// resembles a SQL Server ADO/ODBC connection string such as
+// "Server=host;Database=db;User Id=user;Password=pass;" or
+// "Data Source=host;Initial Catalog=db;Integrated Security=true;".
+func looksLikeADOConnectionString(lowerDSN string) bool {
+	hasServer := strings.Contains(lowerDSN, "server=") || strings.Contains(lowerDSN, "data source=") || strings.Contains(lowerDSN, "addr=")
+	if !hasServer {
+		return false
+	}
+	return strings.Contains(lowerDSN, "user id=") ||
+		strings.Contains(lowerDSN, "uid=") ||
+		strings.Contains(lowerDSN, "initial catalog=") ||
+		strings.Contains(lowerDSN, "integrated security=") ||
+		strings.Contains(lowerDSN, "trustservercertificate=")
 }
 
 func sanitizeConnectionID(s string) string {
@@ -522,6 +880,48 @@ func (c *DBConnection) Placeholder(pos int) string {
 
 func (c *DBConnection) IsTinySQL() bool {
 	return c.Native != nil
+}
+
+// buildInsertTemplateSQL renders an editable "Script as INSERT" snippet for
+// meta, SSMS-style: column names with <placeholder> values so the user only
+// has to fill in the blanks. The "id" column is assumed to be generated by
+// the database and is omitted.
+func buildInsertTemplateSQL(c *DBConnection, meta TableMeta) string {
+	var names, placeholders []string
+	for _, col := range meta.Columns {
+		if strings.EqualFold(col.Name, "id") {
+			continue
+		}
+		names = append(names, c.QuoteIdent(col.Name))
+		placeholders = append(placeholders, "<"+col.Name+">")
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("INSERT INTO %s (%s)\nVALUES (%s);", c.QuoteIdent(meta.Name), strings.Join(names, ", "), strings.Join(placeholders, ", "))
+}
+
+// buildUpdateTemplateSQL renders an editable "Script as UPDATE" snippet for
+// meta. When the table has an "id" column it's used for the WHERE clause;
+// otherwise a generic <condition> placeholder is left for the user to fill in.
+func buildUpdateTemplateSQL(c *DBConnection, meta TableMeta) string {
+	var sets []string
+	whereCol := ""
+	for _, col := range meta.Columns {
+		if strings.EqualFold(col.Name, "id") {
+			whereCol = col.Name
+			continue
+		}
+		sets = append(sets, fmt.Sprintf("%s = <%s>", c.QuoteIdent(col.Name), col.Name))
+	}
+	if len(sets) == 0 {
+		return ""
+	}
+	where := "<condition>"
+	if whereCol != "" {
+		where = fmt.Sprintf("%s = <%s>", c.QuoteIdent(whereCol), whereCol)
+	}
+	return fmt.Sprintf("UPDATE %s\nSET %s\nWHERE %s;", c.QuoteIdent(meta.Name), strings.Join(sets, ",\n    "), where)
 }
 
 func (c *DBConnection) sampleColumnValues(ctx context.Context, table, column string, limit int) []string {

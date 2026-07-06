@@ -17,10 +17,12 @@
           <th>Kind</th>
           <th>Dialect</th>
           <th>DSN</th>
+          <th>Storage</th>
           <th class="text-end">Actions</th>
         </tr>
       </thead>
       <tbody>
+        {{$admin := .AdminAuthenticated}}
         {{range .Connections}}
         <tr>
           <td>
@@ -30,6 +32,19 @@
           <td>{{.Kind}}</td>
           <td>{{.Dialect}}</td>
           <td><span class="text-muted small">{{if .DSNDisplay}}{{.DSNDisplay}}{{else}}embedded{{end}}</span></td>
+          <td>
+            {{if eq .ID "default"}}
+            <span class="text-muted small">built-in</span>
+            {{else if .Persisted}}
+            <span class="badge bg-light text-secondary border" title="Credentials are saved on the server for everyone, and survive a restart.">
+              <i class="bi bi-hdd-fill me-1"></i>Saved for everyone
+            </span>
+            {{else}}
+            <span class="badge bg-light text-secondary border" title="Only kept in memory for this running server process. Not written to disk, not visible after a restart.">
+              <i class="bi bi-clock-history me-1"></i>This session only
+            </span>
+            {{end}}
+          </td>
           <td class="text-end">
             {{if .Active}}
             <span class="badge text-bg-success">Active</span>
@@ -41,12 +56,30 @@
             {{end}}
             {{if .Default}}
             <span class="badge bg-light text-secondary border ms-1">Default</span>
-            {{else if ne .ID "default"}}
-            <form method="post" action="/connections/active" class="d-inline">
+            {{else if and $admin (ne .ID "default") (not .Private)}}
+            <form method="post" action="/admin/connections/default" class="d-inline" onsubmit="return confirm('Make {{.Name}} the default connection for everyone who opens DataDock without picking one?');">
               <input type="hidden" name="id" value="{{.ID}}">
-              <input type="hidden" name="set_default" value="1">
-              <button class="btn btn-sm btn-outline-secondary">Default</button>
+              <button class="btn btn-sm btn-outline-secondary" title="Make this the default for everyone">Default</button>
             </form>
+            {{end}}
+            {{if ne .ID "default"}}
+              {{if $admin}}
+                {{if .Persisted}}
+                <form method="post" action="/admin/connections/forget" class="d-inline" onsubmit="return confirm('Forget the saved connection {{.Name}}? This deletes it from the server’s stored settings and closes it right now.');">
+                  <input type="hidden" name="id" value="{{.ID}}">
+                  <button class="btn btn-sm btn-outline-danger ms-1" title="Delete this saved connection"><i class="bi bi-trash3"></i></button>
+                </form>
+                {{else}}
+                <form method="post" action="/admin/connections/persist" class="d-inline" onsubmit="return confirm('Save {{.Name}} (including its credentials) on the server, visible to everyone who uses this DataDock instance? This survives restarts.');">
+                  <input type="hidden" name="id" value="{{.ID}}">
+                  <button class="btn btn-sm btn-outline-warning ms-1" title="Save this connection permanently for everyone"><i class="bi bi-hdd-fill"></i></button>
+                </form>
+                {{end}}
+              {{else if not .Persisted}}
+                <a href="/admin/login?next=%2Fconnections" class="btn btn-sm btn-outline-secondary ms-1" title="Log in to Admin to save this connection permanently">
+                  <i class="bi bi-shield-lock"></i>
+                </a>
+              {{end}}
             {{end}}
           </td>
         </tr>
@@ -58,43 +91,115 @@
 
 <div class="card">
   <div class="card-body">
-    <h2 class="h6 mb-3">Add Managed Connection</h2>
-    <form method="post" action="/connections" class="row g-2">
-      <div class="col-md-2">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h2 class="h6 mb-0">Add Managed Connection</h2>
+      <div class="btn-group btn-group-sm" role="group" aria-label="Connection input mode">
+        <button type="button" class="btn btn-outline-primary active" id="modeQuickBtn">Quick Connect</button>
+        <button type="button" class="btn btn-outline-primary" id="modeAdvancedBtn">Raw DSN</button>
+      </div>
+    </div>
+
+    <form method="post" action="/connections" class="row g-2" id="connectionForm">
+      <div class="col-md-3">
         <label class="form-label small">ID</label>
-        <input class="form-control form-control-sm" name="id" placeholder="prod-pg" required>
+        <input class="form-control form-control-sm" name="id" value="{{index .Form "id"}}" placeholder="prod-mssql" required>
       </div>
-      <div class="col-md-2">
+      <div class="col-md-3">
         <label class="form-label small">Name</label>
-        <input class="form-control form-control-sm" name="name" placeholder="Production PG">
+        <input class="form-control form-control-sm" name="name" value="{{index .Form "name"}}" placeholder="Production SQL Server">
       </div>
-      <div class="col-md-2">
+      <div class="col-md-3">
         <label class="form-label small">Type</label>
         <select class="form-select form-select-sm" name="kind" id="connectionKind">
-          <option value="auto" selected>Auto detect</option>
-          <option value="postgres">PostgreSQL</option>
-          <option value="mysql">MariaDB/MySQL</option>
-          <option value="mssql">Microsoft SQL Server</option>
-          <option value="sqlite">SQLite</option>
+          <option value="mssql" {{if eq (index .Form "kind") "mssql"}}selected{{end}}>Microsoft SQL Server</option>
+          <option value="postgres" {{if eq (index .Form "kind") "postgres"}}selected{{end}}>PostgreSQL</option>
+          <option value="mysql" {{if eq (index .Form "kind") "mysql"}}selected{{end}}>MariaDB/MySQL</option>
+          <option value="sqlite" {{if eq (index .Form "kind") "sqlite"}}selected{{end}}>SQLite</option>
+          <option value="auto" {{if eq (index .Form "kind") "auto"}}selected{{end}}>Auto detect (paste a DSN below)</option>
         </select>
       </div>
-      <div class="col-md-5">
+
+      <!-- Quick Connect: plain host/port/credential fields, no DSN syntax required. -->
+      <div id="quickConnectFields" class="col-12">
+        <div class="row g-2">
+          <div class="col-md-5">
+            <label class="form-label small">Host / Server</label>
+            <input class="form-control form-control-sm" name="host" id="qcHost" value="{{index .Form "host"}}" placeholder="db.example.com">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">Port</label>
+            <input class="form-control form-control-sm" name="port" id="qcPort" value="{{index .Form "port"}}" placeholder="1433">
+          </div>
+          <div class="col-md-5" id="qcInstanceWrap">
+            <label class="form-label small">Instance (optional)</label>
+            <input class="form-control form-control-sm" name="instance" value="{{index .Form "instance"}}" placeholder="SQLEXPRESS">
+          </div>
+          <div class="col-md-4" id="qcAuthModeWrap">
+            <label class="form-label small">Authentication</label>
+            <select class="form-select form-select-sm" name="authmode" id="qcAuthMode">
+              <option value="sql" {{if eq (index .Form "authmode") "sql"}}selected{{end}}>SQL Server Authentication</option>
+              <option value="windows-current" {{if eq (index .Form "authmode") "windows-current"}}selected{{end}}>Windows Authentication (current user)</option>
+              <option value="windows-account" {{if eq (index .Form "authmode") "windows-account"}}selected{{end}}>Windows Authentication (specific account)</option>
+            </select>
+          </div>
+          <div class="col-md-4" id="qcDatabaseWrap">
+            <label class="form-label small">Database</label>
+            <input class="form-control form-control-sm" name="database" id="qcDatabase" value="{{index .Form "database"}}" placeholder="mydb">
+          </div>
+          <div class="col-md-4" id="qcUserWrap">
+            <label class="form-label small" id="qcUserLabel">User</label>
+            <input class="form-control form-control-sm" name="user" id="qcUser" value="{{index .Form "user"}}" placeholder="sa">
+          </div>
+          <div class="col-md-4" id="qcPasswordWrap">
+            <label class="form-label small">Password</label>
+            <input type="password" class="form-control form-control-sm" name="password" id="qcPassword" value="{{index .Form "password"}}" placeholder="••••••••" autocomplete="new-password">
+          </div>
+          <div class="col-12 small text-muted" id="qcWindowsCurrentHint">
+            DataDock will authenticate as the OS account it's running under. This only works when the DataDock server process itself runs on Windows.
+          </div>
+          <div class="col-12 d-flex gap-3 flex-wrap small align-items-center" id="qcMssqlOptions">
+            <label class="form-check mb-0">
+              <input class="form-check-input" type="checkbox" name="trust_cert" value="1" {{if index .Form "trustCert"}}checked{{end}}>
+              <span class="form-check-label">Trust server certificate (needed for most self-signed / local SQL Server setups)</span>
+            </label>
+            <label class="mb-0 d-flex align-items-center gap-1">
+              <span class="text-muted">Encrypt</span>
+              <select class="form-select form-select-sm" name="encrypt" style="width:auto">
+                <option value="disable" {{if eq (index .Form "encrypt") "disable"}}selected{{end}}>disable</option>
+                <option value="true" {{if eq (index .Form "encrypt") "true"}}selected{{end}}>true</option>
+                <option value="false" {{if eq (index .Form "encrypt") "false"}}selected{{end}}>false</option>
+              </select>
+            </label>
+          </div>
+          <div class="col-12 small" id="qcPostgresOptions">
+            <label class="mb-0 d-flex align-items-center gap-1">
+              <span class="text-muted">SSL mode</span>
+              <select class="form-select form-select-sm" name="sslmode" style="width:auto">
+                <option value="disable" {{if eq (index .Form "sslmode") "disable"}}selected{{end}}>disable</option>
+                <option value="require" {{if eq (index .Form "sslmode") "require"}}selected{{end}}>require</option>
+                <option value="verify-ca" {{if eq (index .Form "sslmode") "verify-ca"}}selected{{end}}>verify-ca</option>
+                <option value="verify-full" {{if eq (index .Form "sslmode") "verify-full"}}selected{{end}}>verify-full</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Advanced: a single raw DSN string, for anyone who already has one. -->
+      <div class="col-12 d-none" id="advancedDSNField">
         <label class="form-label small">DSN</label>
-        <input class="form-control form-control-sm" name="dsn" id="connectionDSN" placeholder="postgres://user:pass@host/db?sslmode=disable" required>
+        <input class="form-control form-control-sm" name="dsn" id="connectionDSN" value="{{index .Form "dsn"}}" placeholder="sqlserver://user:pass@host:1433?database=mydb or a pasted ADO connection string">
+        <div class="form-text">Accepts SQL Server URL or ADO (<code>Server=...;User Id=...;Password=...;</code>) connection strings, PostgreSQL/MySQL URLs, or a SQLite file path.</div>
       </div>
-      <div class="col-md-1 d-flex align-items-end">
-        <button class="btn btn-primary btn-sm w-100">Add</button>
+
+      <div class="col-12 d-flex gap-3 flex-wrap small align-items-center mt-1">
+        <button class="btn btn-primary btn-sm ms-auto">Add Connection</button>
       </div>
-      <div class="col-12 d-flex gap-3 flex-wrap small">
-        <label class="form-check">
-          <input class="form-check-input" type="checkbox" name="save" value="1" checked>
-          <span class="form-check-label">Store connection</span>
-        </label>
-        <label class="form-check">
-          <input class="form-check-input" type="checkbox" name="set_default" value="1">
-          <span class="form-check-label">Use as default connection</span>
-        </label>
-        <span class="text-muted">Auto-detect recognizes PostgreSQL URLs, MySQL tcp DSNs, SQL Server URLs, and SQLite paths.</span>
+      <div class="col-12 small text-muted mt-1">
+        <i class="bi bi-info-circle me-1"></i>This adds the connection only for you — no one else on this server sees or can use it, nothing is
+        written to disk, and it's gone on restart. Host/port/database/user are remembered in <em>this browser</em> for next time (never the password).
+        To share a connection with everyone (and let an admin make it the default), an admin can do so from the list above after
+        <a href="/admin/login?next=%2Fconnections">logging in</a>.
       </div>
     </form>
   </div>
@@ -104,30 +209,137 @@
   <div class="card-body">
     <h2 class="h6 mb-2">Auto-Detect Sources</h2>
     <div class="small text-muted">
-      DataDock also checks <code>DATABASE_URL</code>, <code>POSTGRES_URL</code>, <code>MYSQL_URL</code>, <code>MARIADB_URL</code>, <code>MSSQL_URL</code>, <code>SQLITE_PATH</code>, and <code>DATADOCK_CONNECTIONS</code> at startup. <code>DATADOCK_CONNECTIONS</code> accepts a JSON array with id, name, kind, dsn, and default.
+      DataDock also checks <code>DATABASE_URL</code>, <code>POSTGRES_URL</code>, <code>MYSQL_URL</code>, <code>MARIADB_URL</code>, <code>MSSQL_URL</code>, <code>SQLITE_PATH</code>, and <code>DATADOCK_CONNECTIONS</code> at startup. <code>DATADOCK_CONNECTIONS</code> accepts a JSON array with id, name, kind, dsn, and default. When "Type" is left on "Auto detect", pasted SQL Server ADO connection strings (<code>Server=...;User Id=...;Password=...;</code>) are recognized automatically, alongside PostgreSQL/MySQL/SQL Server URLs and SQLite paths.
     </div>
   </div>
 </div>
 
 <script>
 (function () {
-  var dsn = document.getElementById('connectionDSN');
   var kind = document.getElementById('connectionKind');
-  if (!dsn || !kind) return;
-  function detectKind(value) {
-    value = (value || '').trim().toLowerCase();
-    if (value.indexOf('postgres://') === 0 || value.indexOf('postgresql://') === 0) return 'postgres';
-    if (value.indexOf('mysql://') === 0 || value.indexOf('@tcp(') >= 0) return 'mysql';
-    if (value.indexOf('mssql://') === 0 || value.indexOf('sqlserver://') === 0) return 'mssql';
-    if (value.indexOf('sqlite://') === 0 || /\.(db|sqlite|sqlite3)$/.test(value) || value === ':memory:') return 'sqlite';
-    return 'auto';
-  }
-  dsn.addEventListener('input', function () {
-    if (kind.value === 'auto') {
-      var detected = detectKind(dsn.value);
-      dsn.dataset.detectedKind = detected;
-      dsn.title = detected === 'auto' ? 'Type will be detected on submit' : 'Detected: ' + detected;
+  var quickFields = document.getElementById('quickConnectFields');
+  var advancedField = document.getElementById('advancedDSNField');
+  var dsn = document.getElementById('connectionDSN');
+  var modeQuickBtn = document.getElementById('modeQuickBtn');
+  var modeAdvancedBtn = document.getElementById('modeAdvancedBtn');
+  var qcPort = document.getElementById('qcPort');
+  var qcInstanceWrap = document.getElementById('qcInstanceWrap');
+  var qcMssqlOptions = document.getElementById('qcMssqlOptions');
+  var qcPostgresOptions = document.getElementById('qcPostgresOptions');
+  var qcAuthModeWrap = document.getElementById('qcAuthModeWrap');
+  var qcAuthMode = document.getElementById('qcAuthMode');
+  var qcUserWrap = document.getElementById('qcUserWrap');
+  var qcUserLabel = document.getElementById('qcUserLabel');
+  var qcUser = document.getElementById('qcUser');
+  var qcPasswordWrap = document.getElementById('qcPasswordWrap');
+  var qcWindowsCurrentHint = document.getElementById('qcWindowsCurrentHint');
+  if (!kind || !quickFields || !advancedField) return;
+
+  var defaultPorts = { mssql: '1433', postgres: '5432', mysql: '3306', sqlite: '' };
+
+  function setMode(mode) {
+    if (mode === 'advanced') {
+      quickFields.classList.add('d-none');
+      advancedField.classList.remove('d-none');
+      if (dsn) dsn.required = true;
+      modeAdvancedBtn.classList.add('active');
+      modeQuickBtn.classList.remove('active');
+    } else {
+      quickFields.classList.remove('d-none');
+      advancedField.classList.add('d-none');
+      if (dsn) dsn.required = false;
+      modeQuickBtn.classList.add('active');
+      modeAdvancedBtn.classList.remove('active');
     }
+  }
+
+  function refreshAuthModeUI() {
+    if (!qcAuthMode) return;
+    var isMssql = kind.value === 'mssql';
+    var mode = isMssql ? qcAuthMode.value : 'sql';
+    var isWindowsCurrent = isMssql && mode === 'windows-current';
+    if (qcUserWrap) qcUserWrap.classList.toggle('d-none', isWindowsCurrent);
+    if (qcPasswordWrap) qcPasswordWrap.classList.toggle('d-none', isWindowsCurrent);
+    if (qcWindowsCurrentHint) qcWindowsCurrentHint.classList.toggle('d-none', !isWindowsCurrent);
+    if (qcUserLabel && qcUser) {
+      if (isMssql && mode === 'windows-account') {
+        qcUserLabel.textContent = 'User (DOMAIN\\username)';
+        qcUser.placeholder = 'CONTOSO\\svc-datadock';
+      } else {
+        qcUserLabel.textContent = 'User';
+        qcUser.placeholder = 'sa';
+      }
+    }
+  }
+
+  function refreshKindUI() {
+    var k = kind.value;
+    if (k === 'auto') {
+      setMode('advanced');
+      return;
+    }
+    if (qcPort) qcPort.placeholder = defaultPorts[k] || '';
+    if (qcInstanceWrap) qcInstanceWrap.classList.toggle('d-none', k !== 'mssql');
+    if (qcAuthModeWrap) qcAuthModeWrap.classList.toggle('d-none', k !== 'mssql');
+    if (qcMssqlOptions) qcMssqlOptions.classList.toggle('d-none', k !== 'mssql');
+    if (qcPostgresOptions) qcPostgresOptions.classList.toggle('d-none', k !== 'postgres');
+    refreshAuthModeUI();
+  }
+
+  modeQuickBtn.addEventListener('click', function () { setMode('quick'); });
+  modeAdvancedBtn.addEventListener('click', function () { setMode('advanced'); });
+  kind.addEventListener('change', refreshKindUI);
+  if (qcAuthMode) qcAuthMode.addEventListener('change', refreshAuthModeUI);
+
+  // After a failed attempt the server re-renders this form with whatever
+  // was submitted; restore the matching input mode instead of always
+  // defaulting back to Quick Connect.
+  if (dsn && dsn.value.trim() !== '') {
+    setMode('advanced');
+  } else {
+    setMode('quick');
+  }
+  refreshKindUI();
+
+  // Remember non-secret Quick Connect fields in this browser for next time —
+  // never the password, and never sent to the server as a "please save
+  // this" setting. This is purely a client-side convenience; whether the
+  // connection itself persists on the server is a separate, admin-only
+  // decision (see the Storage column above).
+  var prefillKey = 'datadock.connections.lastQuickConnect';
+  var prefillFields = ['kind', 'host', 'port', 'database', 'user', 'instance', 'authmode', 'encrypt', 'sslmode'];
+  var form = document.getElementById('connectionForm');
+
+  function loadPrefill() {
+    try {
+      return JSON.parse(localStorage.getItem(prefillKey) || '{}');
+    } catch (e) {
+      return {};
+    }
+  }
+
+  // Only prefill on a fresh GET-rendered form (no error re-population
+  // already happened server-side, i.e. every field is still empty).
+  var alreadyPopulated = prefillFields.some(function (name) {
+    var el = form.elements[name];
+    return el && el.value;
+  });
+  if (!alreadyPopulated) {
+    var saved = loadPrefill();
+    prefillFields.forEach(function (name) {
+      var el = form.elements[name];
+      if (el && saved[name]) el.value = saved[name];
+    });
+    kind.dispatchEvent(new Event('change'));
+  }
+
+  form.addEventListener('submit', function () {
+    var toSave = {};
+    prefillFields.forEach(function (name) {
+      var el = form.elements[name];
+      if (el) toSave[name] = el.value;
+    });
+    try { localStorage.setItem(prefillKey, JSON.stringify(toSave)); } catch (e) {}
   });
 })();
 </script>

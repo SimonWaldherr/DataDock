@@ -27,13 +27,15 @@
         <input class="form-control form-control-sm" name="cron_expr" placeholder="cron expr">
       </div>
       <div class="col-md-2">
-        <button class="btn btn-primary btn-sm w-100" type="submit">Save</button>
+        <button id="jobSaveBtn" class="btn btn-primary btn-sm w-100" type="submit">
+          <i class="bi bi-plus-lg me-1"></i>Save
+        </button>
       </div>
       <div class="col-12">
         <textarea class="form-control form-control-sm" name="sql" rows="3" placeholder="SELECT COUNT(*) AS total FROM table_name" required></textarea>
       </div>
     </form>
-    <div id="jobStatus" class="small mt-2"></div>
+    <div id="jobStatus" class="small mt-2" role="status" aria-live="polite"></div>
   </div>
 </div>
 
@@ -51,7 +53,7 @@
             <td>{{.Enabled}}</td>
             <td>{{with .LastRunAt}}{{.}}{{end}}</td>
             <td>{{with .NextRunAt}}{{.}}{{end}}</td>
-            <td><button class="btn btn-outline-primary btn-sm" onclick="runJob('{{.Name}}')">Run</button></td>
+            <td><button class="btn btn-outline-secondary btn-sm" onclick="runJob('{{.Name}}', this)"><i class="bi bi-play-fill me-1"></i>Run</button></td>
           </tr>
           {{else}}
           <tr><td colspan="6" class="text-muted">No jobs registered.</td></tr>
@@ -63,9 +65,18 @@
 </div>
 
 <script>
+function setJobStatus(message, isError) {
+  var el = document.getElementById('jobStatus');
+  el.textContent = message;
+  el.setAttribute('role', isError ? 'alert' : 'status');
+  el.classList.toggle('text-danger', !!isError);
+  el.classList.toggle('text-success', !isError && !!message);
+}
+
 function createJob(e) {
   e.preventDefault();
   var f = e.target;
+  var btn = document.getElementById('jobSaveBtn');
   var payload = {
     name: f.elements['name'].value,
     sql: f.elements['sql'].value,
@@ -75,17 +86,38 @@ function createJob(e) {
     enabled: true,
     no_overlap: true
   };
+  btn.disabled = true;
+  setJobStatus('Saving…', false);
   fetch('/api/jobs', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)})
     .then(function(r){ return r.json().then(function(data){ return {ok:r.ok,data:data}; }); })
     .then(function(resp){
-      document.getElementById('jobStatus').innerHTML = resp.ok ? 'Saved.' : (resp.data.error || 'Error');
-      if (resp.ok) location.reload();
+      if (resp.ok) {
+        setJobStatus('Saved.', false);
+        location.reload();
+        return;
+      }
+      btn.disabled = false;
+      setJobStatus(resp.data.error || 'Could not save the job.', true);
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      setJobStatus(err.message || String(err), true);
     });
 }
-function runJob(name) {
+
+function runJob(name, btn) {
+  if (btn) btn.disabled = true;
+  setJobStatus('Running "' + name + '"…', false);
   fetch('/api/jobs/run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name:name})})
     .then(function(r){ return r.json(); })
-    .then(function(data){ document.getElementById('jobStatus').innerHTML = data.error || ('Run finished: ' + data.status); });
+    .then(function(data){
+      if (btn) btn.disabled = false;
+      setJobStatus(data.error || ('Run finished: ' + data.status), !!data.error);
+    })
+    .catch(function(err) {
+      if (btn) btn.disabled = false;
+      setJobStatus(err.message || String(err), true);
+    });
 }
 </script>
 

@@ -82,7 +82,10 @@ func BuildAgentContext(ctx context.Context, db *tinysql.DB, tenant string, cfg A
 			break
 		}
 	}
-	data, err := json.MarshalIndent(doc, "", "  ")
+	// Minified: this profile is sent to the LLM as-is, and pretty-printing
+	// whitespace would just be wasted tokens (any human-facing display of
+	// it re-indents on the way out instead, see beautifyJSONForDisplay).
+	data, err := json.Marshal(doc)
 	if err != nil {
 		return "", err
 	}

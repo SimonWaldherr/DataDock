@@ -74,18 +74,24 @@ go run . -db mydata.db
 # Custom port
 go run . -addr :9090
 
+# Or let DataDock pick/store a free port in 8000-8100
+go run . -port 0
+
 # Build or test the standalone datadock command
 make build
 make test
 ```
 
-Open your browser at **http://localhost:8080**.
+Open your browser at the address printed by the server, commonly
+**http://localhost:8080** when using `-addr :8080`.
 
 ## Command-line flags
 
 | Flag | Default | Description |
 |---|---|---|
-| `-addr` | `:8080` | HTTP listen address |
+| `-addr` | empty | HTTP listen address; when set, takes precedence over `-port` and any stored port setting |
+| `-port` | `0` | HTTP listen port. `0` uses the stored setting or auto-detects a free port between `8000` and `8100`. |
+| `-find-free-port` | `false` | Print a free TCP port between `8000` and `8100` and exit. |
 | `-db` | `datadock.db` | Path to a `.gob` database file. Use `:memory:` or an empty value for in-memory mode. |
 | `-tenant` | `default` | Tenant namespace within the database |
 | `-dialect` | `$DATADOCK_SQL_DIALECT` or `tinysql` | SQL dialect profile for LLM guidance: `tinysql`, `sqlite`, `postgres`, `mysql`, `mariadb`, `mssql`. |
@@ -98,8 +104,7 @@ Open your browser at **http://localhost:8080**.
 | `-verbose` | `$DATADOCK_VERBOSE` or `false` | Write redacted communication logs for LLM HTTP calls, LLM discovery, database opens/pings, SQL queries, mutations, imports, jobs, and migrations to stdout. |
 | `-watch-dir` | `$DATADOCK_WATCH_DIR` | Optional directory to auto-import/update supported files into local tinySQL tables. |
 | `-watch-interval` | `$DATADOCK_WATCH_INTERVAL` or `3s` | Polling interval for `-watch-dir`. |
-| `-admin-user` | `$DATADOCK_ADMIN_USER` or `admin` | HTTP Basic Auth username for Admin pages and Admin APIs. |
-| `-admin-password` | `$DATADOCK_ADMIN_PASSWORD` or generated at startup | HTTP Basic Auth password for Admin pages and Admin APIs. |
+| `-audit-log` | `$DATADOCK_AUDIT_LOG` | Optional path for a tamper-evident tinySQL audit log. |
 
 Flags and environment variables are bootstrap defaults only. After startup, the
 Admin settings page can change the active dialect, connection timeout, query
@@ -121,12 +126,12 @@ name is derived from the filename and refreshed on update.
 
 ## Admin Settings
 
-Open **Admin** to edit runtime settings without touching any config file. Admin,
-connection management, job management, demo-data admin actions, and Admin APIs
-are protected by HTTP Basic Auth when DataDock is started normally. Set
-`DATADOCK_ADMIN_PASSWORD` or `-admin-password` for a stable password; if omitted,
-DataDock generates a temporary password at startup and prints it to the server
-log. Passwords are hashed in process memory before request checks.
+Open **Admin** to edit runtime settings without touching any config file. On the
+first visit, DataDock redirects to `/admin/setup` to create an Admin password.
+The password is stored as a bcrypt hash in `__datadock_settings`; later visits
+use `/admin/login` and a session cookie. Admin settings, shared connection
+persistence/default changes, job management, demo-data admin actions, LLM
+discovery/health, and Admin APIs require an authenticated Admin session.
 
 The same settings are available for automation through:
 
@@ -189,7 +194,9 @@ datadock uses stable web and data interchange standards for external integration
 ## Connections
 
 Open **Connections** in the top navigation to add and activate external
-databases. Supported connection kinds:
+databases. Connections added there are session-private by default. After logging
+in as Admin, a connection can be saved for everyone, forgotten, or made the
+server-wide default. Supported connection kinds:
 
 | Kind | Driver | DSN examples |
 |---|---|---|
@@ -353,23 +360,37 @@ cmd/datadock/
 | `POST` | `/api/query` | Execute SQL (JSON API) |
 | `POST` | `/api/export` | Download SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, XML, or GeoJSON |
 | `GET` | `/api/schema` | Return the compact active-connection schema snapshot used for LLM context |
-| `GET` | `/api/llm/health` | Test server-side connectivity to the configured LLM provider (Admin Basic Auth) |
-| `GET` | `/connections` | Connection manager (Admin Basic Auth) |
-| `POST` | `/connections` | Add a managed connection (Admin Basic Auth) |
-| `POST` | `/connections/active` | Switch active connection (Admin Basic Auth) |
-| `GET` | `/admin` | Admin status and runtime settings (Admin Basic Auth) |
-| `POST` | `/admin/settings` | Apply runtime settings from the Admin UI (Admin Basic Auth) |
-| `GET` | `/api/admin/status` | Admin status JSON (Admin Basic Auth) |
-| `GET/POST` | `/api/admin/settings` | Read or apply runtime settings as JSON (Admin Basic Auth) |
-| `GET` | `/jobs` | Job overview (Admin Basic Auth) |
-| `GET/POST` | `/api/jobs` | List or create jobs (Admin Basic Auth) |
-| `POST` | `/api/jobs/run` | Run a registered job manually (Admin Basic Auth) |
+| `GET` | `/api/catalog` | Return async catalog roots for non-tinySQL connections |
+| `GET` | `/api/catalog/expand` | Expand an async catalog node |
+| `GET` | `/api/llm/health` | Test server-side connectivity to the configured LLM provider (Admin session) |
+| `GET` | `/connections` | Connection manager |
+| `POST` | `/connections` | Add a session-private managed connection |
+| `POST` | `/connections/active` | Switch the active connection for the current session |
+| `GET` | `/admin/setup` | First-run Admin password setup |
+| `POST` | `/admin/setup` | Save the initial Admin password hash |
+| `GET` | `/admin/login` | Admin login form |
+| `POST` | `/admin/login` | Start an authenticated Admin session |
+| `POST` | `/admin/logout` | End the current Admin session |
+| `GET` | `/admin` | Admin status and runtime settings (Admin session) |
+| `POST` | `/admin/settings` | Apply runtime settings from the Admin UI (Admin session) |
+| `POST` | `/admin/maintenance/toggle` | Toggle server-wide maintenance mode (Admin session) |
+| `POST` | `/admin/change-password` | Change the Admin password (Admin session) |
+| `POST` | `/admin/connections/persist` | Save/share a connection for all sessions (Admin session) |
+| `POST` | `/admin/connections/forget` | Remove a saved connection (Admin session) |
+| `POST` | `/admin/connections/default` | Change the server-wide default connection (Admin session) |
+| `GET` | `/api/admin/status` | Admin status JSON (Admin session) |
+| `GET/POST` | `/api/admin/settings` | Read or apply runtime settings as JSON (Admin session) |
+| `GET` | `/jobs` | Job overview (Admin session) |
+| `GET/POST` | `/api/jobs` | List or create jobs (Admin session) |
+| `POST` | `/api/jobs/run` | Run a registered job manually (Admin session) |
 | `GET` | `/migrate` | Table migration wizard |
 | `POST` | `/migrate` | Run table migration |
 | `GET` | `/create-table` | Table designer |
 | `POST` | `/create-table` | Create table |
-| `POST` | `/demo-data` | Load (or reset) the built-in demo dataset plus a sample scheduled job (Admin Basic Auth) |
-| `POST` | `/demo-data/remove` | Drop every demo table and the sample demo job (Admin Basic Auth) |
+| `GET` | `/export` | Export query form |
+| `GET` | `/history` | Local query history page |
+| `POST` | `/demo-data` | Load (or reset) the built-in demo dataset plus a sample scheduled job (Admin session) |
+| `POST` | `/demo-data/remove` | Drop every demo table and the sample demo job (Admin session) |
 | `GET/POST` | `/static/*` | Static assets |
 
 Every mutating route above (except `/connections`, `/connections/active`, and
