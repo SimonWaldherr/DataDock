@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -50,6 +51,45 @@ func TestAPILLMRequiresConfiguration(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestBuildLLMMessagesTreatsSQLOnlyGenerateAsOptimization(t *testing.T) {
+	messages := buildLLMMessages(LLMRequest{
+		Action: llmActionGenerateSQL,
+		Schema: `{"tables":[{"name":"datadock_demo_events"}]}`,
+		SQL:    "SELECT * FROM datadock_demo_events",
+	})
+
+	if len(messages) != 2 {
+		t.Fatalf("expected system and user messages, got %d", len(messages))
+	}
+	user := messages[1].Content
+	if !strings.Contains(user, "Task: Optimize and refine the current SQL while preserving its intent.") {
+		t.Fatalf("expected SQL-only generation to be framed as optimization, got: %s", user)
+	}
+	if strings.Contains(user, "User prompt:") || strings.Contains(user, "User request:") {
+		t.Fatalf("did not expect an empty user prompt/request block, got: %s", user)
+	}
+	if !strings.Contains(user, "Current SQL:\nSELECT * FROM datadock_demo_events") {
+		t.Fatalf("expected current SQL in message, got: %s", user)
+	}
+}
+
+func TestBuildLLMMessagesIncludesUserRequestWhenPresent(t *testing.T) {
+	messages := buildLLMMessages(LLMRequest{
+		Action: llmActionGenerateSQL,
+		Prompt: "show critical events",
+		Schema: `{"tables":[{"name":"datadock_demo_events"}]}`,
+		SQL:    "SELECT * FROM datadock_demo_events",
+	})
+
+	user := messages[1].Content
+	if !strings.Contains(user, "Task: Generate one useful SQL query from the user request. Treat the current SQL as the draft to refine unless the request says otherwise.") {
+		t.Fatalf("expected prompt+SQL task framing, got: %s", user)
+	}
+	if !strings.Contains(user, "User request:\nshow critical events") {
+		t.Fatalf("expected user request block, got: %s", user)
 	}
 }
 
@@ -105,8 +145,44 @@ func TestAPILLMGenerateSQL(t *testing.T) {
 	if got := resp["text"]; got != "SELECT name FROM people LIMIT 10" {
 		t.Fatalf("unexpected text: %q", got)
 	}
-	if !strings.Contains(fake.lastReqs[0].Schema, "people") || !strings.Contains(fake.lastReqs[0].Schema, "tinySQL agent profile") {
+	if !strings.Contains(fake.lastReqs[0].Schema, "people") || !strings.Contains(fake.lastReqs[0].Schema, `"skill"`) {
 		t.Fatalf("expected schema to include people table, got %q", fake.lastReqs[0].Schema)
+	}
+}
+
+func TestAPILLMGenerateSQLCanRequestAdditionalContext(t *testing.T) {
+	app := newTestApp(t)
+	for i := 0; i < 10; i++ {
+		if _, err := app.sqlDB.Exec("CREATE TABLE filler_" + strconv.Itoa(i) + " (id INT, value TEXT)"); err != nil {
+			t.Fatalf("create filler table: %v", err)
+		}
+	}
+	if _, err := app.sqlDB.Exec("CREATE TABLE invoices (id INT, status TEXT, amount INT)"); err != nil {
+		t.Fatalf("create invoices: %v", err)
+	}
+	fake := &fakeLLMClient{texts: []string{
+		`{"action":"context","kind":"schema","tables":["invoices"],"explanation":"Need invoice columns."}`,
+		`{"action":"sql","sql":"SELECT status, SUM(amount) AS total_amount FROM invoices GROUP BY status","explanation":"Summarizes invoices by status."}`,
+	}}
+	app.llm = fake
+
+	req := httptest.NewRequest(http.MethodPost, "/api/llm", strings.NewReader(`{"action":"generate_sql","prompt":"invoice totals by status"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	app.apiLLMHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(fake.lastReqs) != 2 {
+		t.Fatalf("expected two LLM calls, got %d", len(fake.lastReqs))
+	}
+	if !strings.Contains(fake.lastReqs[1].Schema, "Additional requested RAG context") || !strings.Contains(fake.lastReqs[1].Schema, `"invoices"`) {
+		t.Fatalf("expected requested context in second call, got %s", fake.lastReqs[1].Schema)
+	}
+	if !strings.Contains(w.Body.String(), "SUM(amount)") {
+		t.Fatalf("expected generated SQL response, got %s", w.Body.String())
 	}
 }
 

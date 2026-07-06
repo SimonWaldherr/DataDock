@@ -510,7 +510,7 @@ function navSectionForPath(path) {
   if (path === '/query' || path.indexOf('/query/') === 0) return 'query';
   if (path === '/history' || path.indexOf('/history/') === 0) return 'history';
   if (path === '/create-table' || path.indexOf('/create-table/') === 0) return 'manage';
-  if (path === '/import' || path === '/export' || path.indexOf('/import/') === 0 || path.indexOf('/export/') === 0) return 'transfer';
+  if (path === '/import' || path === '/export' || path.indexOf('/import/') === 0 || path.indexOf('/export/') === 0) return 'manage';
   if (path === '/connections' || path.indexOf('/connections/') === 0) return 'connections';
   if (/^\/t\/[^/]+\/?$/.test(path)) return 'table';
   return '';

@@ -12,21 +12,21 @@
     <div class="d-flex flex-column gap-2">
       <label class="visually-hidden" for="llmPrompt">Ask the SQL assistant</label>
       <textarea id="llmPrompt" class="form-control form-control-sm" rows="2"
-                placeholder="Ask in natural language, e.g. show the top customers by revenue"></textarea>
+                placeholder="Describe the query you want"></textarea>
       <div class="toolbar">
         <div class="btn-group">
-          <button id="llmAskBtn" class="btn btn-primary btn-sm" onclick="runLLMAction()">
-            <i id="llmAskBtnIcon" class="bi bi-code-slash me-1"></i><span id="llmAskBtnLabel">Ask</span>
+          <button id="llmAskBtn" class="btn btn-primary btn-sm" onclick="runLLMAction()" title="Ask AI">
+            <i id="llmAskBtnIcon" class="bi bi-stars me-1"></i><span id="llmAskBtnLabel">Ask AI</span>
           </button>
-          <button class="btn btn-primary btn-sm dropdown-toggle dropdown-toggle-split" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+          <button id="llmModeBtn" class="btn btn-primary btn-sm dropdown-toggle dropdown-toggle-split" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Choose AI action">
             <span class="visually-hidden">Choose what the AI should do</span>
           </button>
-          <ul class="dropdown-menu">
-            <li><button class="dropdown-item" type="button" onclick="setLLMMode('generate_sql')"><i class="bi bi-code-slash me-2"></i>Ask<div class="small text-muted">Write the query but don't run it yet — review before executing</div></button></li>
-            <li><button class="dropdown-item" type="button" onclick="setLLMMode('ask_and_run')"><i class="bi bi-lightning-charge-fill me-2"></i>Ask &amp; Run<div class="small text-muted">Generate SQL from your question and run it immediately</div></button></li>
+          <ul id="llmModeMenu" class="dropdown-menu">
+            <li><button class="dropdown-item" type="button" data-llm-mode="generate_sql" onclick="setLLMMode('generate_sql')"><i class="bi bi-code-slash me-2"></i>Write SQL<div class="small text-muted">Put a query into the editor for review</div></button></li>
+            <li><button class="dropdown-item" type="button" data-llm-mode="ask_and_run" onclick="setLLMMode('ask_and_run')"><i class="bi bi-lightning-charge-fill me-2"></i>Ask &amp; Run<div class="small text-muted">Generate and run a read-only query</div></button></li>
             <li><hr class="dropdown-divider"></li>
-            <li><button class="dropdown-item" type="button" onclick="setLLMMode('explain_results')"><i class="bi bi-card-text me-2"></i>Explain current result</button></li>
-            <li><button class="dropdown-item" type="button" onclick="setLLMMode('explain_error')"><i class="bi bi-bug me-2"></i>Explain last error</button></li>
+            <li><button class="dropdown-item" type="button" data-llm-mode="explain_results" onclick="setLLMMode('explain_results')"><i class="bi bi-card-text me-2"></i>Explain result</button></li>
+            <li><button class="dropdown-item" type="button" data-llm-mode="explain_error" onclick="setLLMMode('explain_error')"><i class="bi bi-bug me-2"></i>Explain error</button></li>
           </ul>
         </div>
         <div class="dropdown">
@@ -273,13 +273,25 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   });
   ta.addEventListener('input', saveActiveQueryTabFromEditor);
+  ta.addEventListener('input', function () {
+    updateLLMButtonState();
+    refreshLLMPreviewIfOpen();
+  });
   loadMonacoEditor();
   renderSampleMenus();
+  setLLMMode(loadLLMMode(), {skipPreview: true});
 
   var llmDebounce = null;
   var llmPromptEl = document.getElementById('llmPrompt');
   if (llmPromptEl) {
+    llmPromptEl.addEventListener('keydown', function (e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        runLLMAction();
+      }
+    });
     llmPromptEl.addEventListener('input', function () {
+      updateLLMButtonState();
       clearTimeout(llmDebounce);
       llmDebounce = setTimeout(refreshLLMPreviewIfOpen, 400);
     });
@@ -881,23 +893,66 @@ function isMissingObjectError(msg) {
     msg.indexOf('invalid object name') >= 0;
 }
 
-function askLLM(action) {
-  var prompt = document.getElementById('llmPrompt').value.trim();
-  var sql = getEditorValue().trim();
-  var llmStatus = document.getElementById('llmStatus');
-  var llmAnswer = document.getElementById('llmAnswer');
-  llmStatus.textContent = 'Thinking...';
-  llmAnswer.innerHTML = '';
-  setLLMButtons(true);
-
-  var payload = {action: action, prompt: prompt, sql: sql};
+function llmPayloadForAction(action) {
+  var payload = {
+    action: action,
+    prompt: document.getElementById('llmPrompt').value.trim(),
+    sql: getEditorValue().trim()
+  };
   if (action === 'explain_error') {
-    payload.error = lastErrorMessage;
+    payload.error = lastErrorMessage || '';
   }
   if (action === 'explain_results' && lastResultData) {
     payload.columns = lastResultData.columns || [];
     payload.rows = lastResultData.rows || [];
   }
+  return payload;
+}
+
+function validateLLMAction(action, payload) {
+  if (action === 'generate_sql' && !payload.prompt && !payload.sql) {
+    return {message: 'Describe the query you want, or keep a SQL draft in the editor to refine.', focus: 'prompt'};
+  }
+  if (action === 'ask_and_run' && !payload.prompt) {
+    return {message: 'Describe the read-only query to generate and run.', focus: 'prompt'};
+  }
+  if (action === 'explain_results' && (!lastResultData || !(lastResultData.rows || []).length)) {
+    return {message: 'Run a query first, then explain its result.', focus: 'editor'};
+  }
+  if (action === 'explain_error' && !payload.error) {
+    return {message: 'Run a failing query first, then explain the error.', focus: 'editor'};
+  }
+  return null;
+}
+
+function showLLMAlert(kind, message) {
+  var llmAnswer = document.getElementById('llmAnswer');
+  llmAnswer.innerHTML = '<div class="alert alert-' + kind + ' py-2 mb-0" style="white-space:pre-wrap">' + escHtml(message || '') + '</div>';
+}
+
+function focusLLMTarget(target) {
+  if (target === 'prompt') {
+    document.getElementById('llmPrompt').focus();
+    return;
+  }
+  focusEditor();
+}
+
+function askLLM(action) {
+  var payload = llmPayloadForAction(action);
+  var validation = validateLLMAction(action, payload);
+  if (validation) {
+    showLLMAlert('warning', validation.message);
+    focusLLMTarget(validation.focus);
+    updateLLMButtonState();
+    return;
+  }
+
+  var llmStatus = document.getElementById('llmStatus');
+  var meta = llmModeMeta[action] || llmModeMeta.generate_sql;
+  llmStatus.textContent = meta.status;
+  document.getElementById('llmAnswer').innerHTML = '';
+  setLLMBusy(true);
 
   fetch('/api/llm', {
     method: 'POST',
@@ -906,31 +961,34 @@ function askLLM(action) {
   })
   .then(function(r){ return r.json().then(function(data){ return {ok: r.ok, data: data}; }); })
   .then(function(resp) {
-    setLLMButtons(false);
+    setLLMBusy(false);
     llmStatus.textContent = '';
     refreshLLMPreviewIfOpen();
     if (!resp.ok || resp.data.error) {
-      llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">' + escHtml(resp.data.error || 'LLM request failed') + '</div>';
+      showLLMAlert('warning', resp.data.error || 'LLM request failed');
       return;
     }
     if (action === 'generate_sql') {
+      if (resp.data.action === 'clarify') {
+        handleLLMClarify(resp.data);
+        return;
+      }
       var generatedSQL = (resp.data.sql || '').trim();
       if (!generatedSQL) {
-        llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">The LLM response did not contain executable SQL.</div>';
+        showLLMAlert('warning', 'The LLM response did not contain executable SQL.');
         return;
       }
       setEditorValue(generatedSQL);
       focusEditor();
-      llmAnswer.innerHTML = renderLLMSQLMetadata(resp.data);
+      document.getElementById('llmAnswer').innerHTML = renderLLMSQLMetadata(resp.data);
       return;
     }
-    var text = resp.data.text || '';
-    llmAnswer.innerHTML = '<div class="alert alert-info py-2 mb-0" style="white-space:pre-wrap">' + escHtml(text) + '</div>';
+    showLLMAlert('info', resp.data.text || '');
   })
   .catch(function(err) {
-    setLLMButtons(false);
+    setLLMBusy(false);
     llmStatus.textContent = '';
-    llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">' + escHtml(err.message || err.toString()) + '</div>';
+    showLLMAlert('warning', err.message || err.toString());
   });
 }
 
@@ -950,38 +1008,36 @@ function renderLLMSQLMetadata(data) {
 }
 
 function askAndRunLLM() {
-  var prompt = document.getElementById('llmPrompt').value.trim();
-  var llmStatus = document.getElementById('llmStatus');
-  var llmAnswer = document.getElementById('llmAnswer');
-  if (!prompt) {
-    document.getElementById('llmPrompt').focus();
+  var payload = llmPayloadForAction('ask_and_run');
+  var validation = validateLLMAction('ask_and_run', payload);
+  if (validation) {
+    showLLMAlert('warning', validation.message);
+    focusLLMTarget(validation.focus);
+    updateLLMButtonState();
     return;
   }
 
-  llmStatus.textContent = 'Generating and running...';
-  llmAnswer.innerHTML = '';
-  setLLMButtons(true);
+  var llmStatus = document.getElementById('llmStatus');
+  llmStatus.textContent = llmModeMeta.ask_and_run.status;
+  document.getElementById('llmAnswer').innerHTML = '';
+  setLLMBusy(true);
 
   fetch('/api/llm/run', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({prompt: prompt})
+    body: JSON.stringify({prompt: payload.prompt})
   })
   .then(function(r){ return r.json().then(function(data){ return {ok: r.ok, data: data}; }); })
   .then(function(resp) {
-    setLLMButtons(false);
+    setLLMBusy(false);
     llmStatus.textContent = '';
     refreshLLMPreviewIfOpen();
     if (!resp.ok || resp.data.error && resp.data.action !== 'error' && resp.data.action !== 'blocked') {
-      llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">' + escHtml(resp.data.error || 'LLM request failed') + '</div>';
+      showLLMAlert('warning', resp.data.error || 'LLM request failed');
       return;
     }
     if (resp.data.action === 'clarify') {
-      if (resp.data.follow_up) {
-        document.getElementById('llmPrompt').value = resp.data.follow_up;
-      }
-      llmAnswer.innerHTML = '<div class="alert alert-info py-2 mb-0" style="white-space:pre-wrap">' +
-        escHtml(resp.data.explanation || resp.data.follow_up || 'Clarification needed.') + '</div>';
+      handleLLMClarify(resp.data);
       return;
     }
     if (resp.data.sql) {
@@ -989,53 +1045,118 @@ function askAndRunLLM() {
     }
     if (resp.data.action === 'blocked' || resp.data.action === 'error') {
       renderError(resp.data.error || 'LLM-generated SQL could not be executed.');
-      llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0" style="white-space:pre-wrap">' +
-        escHtml(resp.data.explanation || resp.data.error || '') + '</div>';
+      showLLMAlert('warning', resp.data.explanation || resp.data.error || '');
       return;
     }
     renderResult(resp.data);
     if (resp.data.explanation) {
-      llmAnswer.innerHTML = '<div class="alert alert-info py-2 mb-0" style="white-space:pre-wrap">' + escHtml(resp.data.explanation) + '</div>';
+      showLLMAlert('info', resp.data.explanation);
     }
   })
   .catch(function(err) {
-    setLLMButtons(false);
+    setLLMBusy(false);
     llmStatus.textContent = '';
-    llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">' + escHtml(err.message || err.toString()) + '</div>';
+    showLLMAlert('warning', err.message || err.toString());
   });
 }
 
-function setLLMButtons(disabled) {
-  ['llmAskBtn', 'llmHealthBtn'].forEach(function(id) {
+function handleLLMClarify(data) {
+  if (data.follow_up) {
+    var prompt = document.getElementById('llmPrompt');
+    prompt.value = data.follow_up;
+    prompt.focus();
+    prompt.select();
+  }
+  showLLMAlert('info', data.explanation || data.follow_up || 'Clarification needed.');
+  updateLLMButtonState();
+}
+
+function setLLMBusy(busy) {
+  llmBusy = busy;
+  ['llmAskBtn', 'llmModeBtn', 'llmHealthBtn', 'llmDetailsBtn'].forEach(function(id) {
     var el = document.getElementById(id);
-    if (el) el.disabled = disabled;
+    if (el) el.disabled = busy;
   });
+  if (!busy) updateLLMButtonState();
 }
 
-// ── AI panel: single "Ask"-style button with a mode dropdown, plus a
+// ── AI panel: single action button with a mode dropdown, plus a
 // "Details" toggle that previews the exact system/user messages that would
 // be sent (via /api/llm/preview, built from the same code the real request
 // uses), so it's always accurate instead of a best-effort client guess.
 //
-// Default is "Ask" (generate_sql: writes the query, doesn't run it) rather
+// Default is Write SQL (generate_sql: writes the query, doesn't run it) rather
 // than "Ask & Run" — auto-executing LLM-generated SQL is the riskier action
 // (it could touch the wrong table or run something destructive-looking
 // unreviewed), so it must be an explicit choice, not the one-click default.
 
 var llmMode = 'generate_sql';
+var llmBusy = false;
 var llmModeMeta = {
-  ask_and_run: {icon: 'bi-lightning-charge-fill', label: 'Ask & Run'},
-  generate_sql: {icon: 'bi-code-slash', label: 'Ask'},
-  explain_results: {icon: 'bi-card-text', label: 'Explain Result'},
-  explain_error: {icon: 'bi-bug', label: 'Explain Error'}
+  generate_sql: {
+    icon: 'bi-stars',
+    label: 'Ask AI',
+    title: 'Ask AI to write SQL into the editor',
+    status: 'Drafting SQL...',
+    placeholder: 'Ask AI to write or improve SQL'
+  },
+  ask_and_run: {
+    icon: 'bi-stars',
+    label: 'Ask AI',
+    title: 'Ask AI to generate and run a read-only query',
+    status: 'Generating and running...',
+    placeholder: 'Ask AI to run a read-only query'
+  },
+  explain_results: {
+    icon: 'bi-stars',
+    label: 'Ask AI',
+    title: 'Ask AI to explain the current result',
+    status: 'Explaining result...',
+    placeholder: 'Ask AI what to focus on in the result'
+  },
+  explain_error: {
+    icon: 'bi-stars',
+    label: 'Ask AI',
+    title: 'Ask AI to explain the last SQL error',
+    status: 'Explaining error...',
+    placeholder: 'Ask AI what you were trying to do'
+  }
 };
 
-function setLLMMode(mode) {
+function loadLLMMode() {
+  try {
+    var stored = localStorage.getItem('datadock.llm.mode') || '';
+    if (stored && stored !== 'ask_and_run' && llmModeMeta[stored]) return stored;
+  } catch (e) {}
+  return 'generate_sql';
+}
+
+function setLLMMode(mode, options) {
   llmMode = llmModeMeta[mode] ? mode : 'generate_sql';
   var meta = llmModeMeta[llmMode];
   document.getElementById('llmAskBtnLabel').textContent = meta.label;
   document.getElementById('llmAskBtnIcon').className = 'bi ' + meta.icon + ' me-1';
-  refreshLLMPreviewIfOpen();
+  var prompt = document.getElementById('llmPrompt');
+  if (prompt) prompt.setAttribute('placeholder', meta.placeholder);
+  var btn = document.getElementById('llmAskBtn');
+  if (btn) btn.setAttribute('title', meta.title);
+  document.querySelectorAll('#llmModeMenu [data-llm-mode]').forEach(function(item) {
+    item.classList.toggle('active', item.getAttribute('data-llm-mode') === llmMode);
+  });
+  try { localStorage.setItem('datadock.llm.mode', llmMode); } catch (e) {}
+  updateLLMButtonState();
+  if (!options || !options.skipPreview) refreshLLMPreviewIfOpen();
+}
+
+function updateLLMButtonState() {
+  if (llmBusy) return;
+  var btn = document.getElementById('llmAskBtn');
+  if (!btn) return;
+  var payload = llmPayloadForAction(llmMode);
+  var validation = validateLLMAction(llmMode, payload);
+  var meta = llmModeMeta[llmMode] || llmModeMeta.generate_sql;
+  btn.disabled = false;
+  btn.setAttribute('title', validation ? validation.message : meta.title);
 }
 
 function runLLMAction() {
@@ -1065,18 +1186,8 @@ function refreshLLMPreviewIfOpen() {
 
 function currentLLMRequestPayload() {
   var previewAction = llmMode === 'ask_and_run' ? 'generate_sql' : llmMode;
-  var payload = {
-    action: previewAction,
-    prompt: document.getElementById('llmPrompt').value.trim(),
-    sql: getEditorValue().trim()
-  };
-  if (llmMode === 'explain_error') {
-    payload.error = lastErrorMessage || '';
-  }
-  if (llmMode === 'explain_results' && lastResultData) {
-    payload.columns = lastResultData.columns || [];
-    payload.rows = lastResultData.rows || [];
-  }
+  var payload = llmPayloadForAction(previewAction);
+  if (llmMode === 'ask_and_run') payload.sql = '';
   return payload;
 }
 
@@ -1114,11 +1225,11 @@ function testLLMHealth() {
   var llmAnswer = document.getElementById('llmAnswer');
   llmStatus.textContent = 'Testing LLM...';
   llmAnswer.innerHTML = '';
-  setLLMButtons(true);
+  setLLMBusy(true);
   fetch('/api/llm/health')
     .then(function(r){ return r.json().then(function(data){ return {ok: r.ok, data: data}; }); })
     .then(function(resp) {
-      setLLMButtons(false);
+      setLLMBusy(false);
       llmStatus.textContent = '';
       if (!resp.ok || resp.data.error) {
         llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">' + escHtml(resp.data.error || 'LLM health check failed') + '</div>';
@@ -1127,7 +1238,7 @@ function testLLMHealth() {
       llmAnswer.innerHTML = '<div class="alert alert-success py-2 mb-0">LLM reachable: ' + escHtml(resp.data.response || 'OK') + '</div>';
     })
     .catch(function(err) {
-      setLLMButtons(false);
+      setLLMBusy(false);
       llmStatus.textContent = '';
       llmAnswer.innerHTML = '<div class="alert alert-warning py-2 mb-0">' + escHtml(err.message || err.toString()) + '</div>';
     });

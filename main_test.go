@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -54,6 +55,28 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestOpenNativeDBIgnoresStaleWALSidecar(t *testing.T) {
+	path := t.TempDir() + "/datadock.db"
+	db := tinysql.NewDB()
+	if err := tinysql.SaveToFile(db, path); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+	if err := os.WriteFile(path+".wal", []byte("stale broken wal"), 0o644); err != nil {
+		t.Fatalf("write stale wal: %v", err)
+	}
+
+	loaded, err := openNativeDB(path)
+	if err != nil {
+		t.Fatalf("open native db should ignore stale WAL sidecar: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected loaded database")
+	}
+	if err := loaded.Close(); err != nil {
+		t.Fatalf("close loaded db: %v", err)
+	}
 }
 
 // newTestApp creates a fully isolated App for testing. Each call uses a unique

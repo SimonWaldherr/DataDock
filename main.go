@@ -71,14 +71,14 @@ func main() {
 		log.Fatalf("open database: %v", err)
 	}
 
-	// Autosave on clean shutdown when using a file.
-	if *dbFile != "" && *dbFile != ":memory:" {
-		defer func() {
-			if saveErr := tinysql.SaveToFile(nativeDB, *dbFile); saveErr != nil {
-				log.Printf("autosave: %v", saveErr)
-			}
-		}()
-	}
+	// Persist and close cleanly on shutdown. File-backed DataDock uses
+	// tinySQL's memory mode with a save path (see openNativeDB), so Close
+	// writes the final GOB snapshot without attaching a WAL.
+	defer func() {
+		if closeErr := nativeDB.Close(); closeErr != nil {
+			log.Printf("database close: %v", closeErr)
+		}
+	}()
 
 	// Register the native DB instance with the database/sql driver so that
 	// sql.Open("tinysql", ...) shares the same underlying storage.
@@ -323,7 +323,10 @@ func openNativeDB(filePath string) (*tinysql.DB, error) {
 	if filePath == "" || filePath == ":memory:" {
 		return tinysql.NewDB(), nil
 	}
-	db, err := tinysql.LoadFromFile(filePath)
+	db, err := tinysql.OpenDB(tinysql.StorageConfig{
+		Mode: tinysql.ModeMemory,
+		Path: filePath,
+	})
 	if err != nil {
 		if os.IsNotExist(err) {
 			return tinysql.NewDB(), nil

@@ -2793,7 +2793,13 @@ func (a *App) apiLLMHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req := a.buildLLMRequest(r.Context(), action, prompt, sqlText, errorText, body.Columns, body.Rows)
-	out, err := llm.Complete(r.Context(), req)
+	var out string
+	var err error
+	if action == llmActionGenerateSQL {
+		out, err = a.completeSQLWithContextRequests(r.Context(), llm, req)
+	} else {
+		out, err = llm.Complete(r.Context(), req)
+	}
 	if err != nil {
 		a.writeProblem(w, r, http.StatusBadGateway, "LLM request failed", err.Error())
 		return

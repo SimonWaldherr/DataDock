@@ -60,6 +60,40 @@ func TestSchemaSnapshotForUsesSkillAndRAGSelection(t *testing.T) {
 	}
 }
 
+func TestLLMSchemaContextTinySQLUsesCompactRAGSnapshot(t *testing.T) {
+	app := newTestApp(t)
+	for i := 0; i < 10; i++ {
+		if _, err := app.sqlDB.Exec(fmt.Sprintf("CREATE TABLE filler_%02d (id INT, value TEXT)", i)); err != nil {
+			t.Fatalf("create filler table: %v", err)
+		}
+	}
+	if _, err := app.sqlDB.Exec("CREATE TABLE event_logs (id INT, event_type TEXT, severity TEXT)"); err != nil {
+		t.Fatalf("create event_logs: %v", err)
+	}
+
+	ctx := app.llmSchemaContext(context.Background(), llmActionGenerateSQL, "", "SELECT * FROM event_logs", "")
+	if strings.Contains(ctx, "tinySQL agent profile") {
+		t.Fatalf("tinySQL LLM context should use compact RAG JSON, got: %s", ctx)
+	}
+	var decoded ragContextDoc
+	if err := json.Unmarshal([]byte(ctx), &decoded); err != nil {
+		t.Fatalf("expected JSON RAG context: %v\n%s", err, ctx)
+	}
+	if len(decoded.Tables) > maxRAGTables {
+		t.Fatalf("expected at most %d tables, got %d", maxRAGTables, len(decoded.Tables))
+	}
+	found := false
+	for _, table := range decoded.Tables {
+		if table.Name == "event_logs" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected current SQL table in compact RAG context: %s", ctx)
+	}
+}
+
 func TestTokenizeRAGQuery(t *testing.T) {
 	got := tokenizeRAGQuery("Show the top customer emails by country and SQL")
 	joined := strings.Join(got, ",")

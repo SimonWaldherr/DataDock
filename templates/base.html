@@ -40,16 +40,15 @@
   <span class="nav-sep"></span>
 
   <div class="nav-primary" aria-label="Primary navigation" role="tablist">
-    <a class="btn-nav" data-nav-section="query" href="/query" title="SQL Editor" role="tab" aria-selected="false"><i class="bi bi-terminal"></i><span>SQL</span></a>
-    <a class="btn-nav" data-nav-section="history" href="/history" title="Query History" role="tab" aria-selected="false"><i class="bi bi-clock-history"></i><span>History</span></a>
-    <a class="btn-nav" data-nav-section="manage" href="/create-table" title="Manage Table" role="tab" aria-selected="false"><i class="bi bi-plus-lg"></i><span>Manage Table</span></a>
-    <a class="btn-nav" data-nav-section="transfer" href="/import" title="Import and Export" role="tab" aria-selected="false"><i class="bi bi-arrow-left-right"></i><span>Import/Export</span></a>
-    <a class="btn-nav" data-nav-section="connections" href="/connections" title="Connections" role="tab" aria-selected="false"><i class="bi bi-hdd-network"></i><span>Connections</span></a>
     {{with .ActiveTable}}
     <a class="btn-nav table-nav-tab" data-nav-section="table" href="/t/{{.}}" title="{{.}}" role="tab" aria-selected="false"><i class="bi bi-table"></i><span>Preview</span></a>
     {{else}}
     <a class="btn-nav table-nav-tab d-none" data-nav-section="table" href="#" title="Current table" role="tab" aria-selected="false"><i class="bi bi-table"></i><span>Preview</span></a>
     {{end}}
+    <a class="btn-nav" data-nav-section="query" href="/query" title="SQL Editor" role="tab" aria-selected="false"><i class="bi bi-terminal"></i><span>SQL</span></a>
+    <a class="btn-nav" data-nav-section="history" href="/history" title="Query History" role="tab" aria-selected="false"><i class="bi bi-clock-history"></i><span>History</span></a>
+    <a class="btn-nav" data-nav-section="manage" href="/create-table" title="Manage Tables" role="tab" aria-selected="false"><i class="bi bi-database-add"></i><span>Manage Tables</span></a>
+    <a class="btn-nav" data-nav-section="connections" href="/connections" title="Connections" role="tab" aria-selected="false"><i class="bi bi-hdd-network"></i><span>Connections</span></a>
   </div>
 
   <div class="nav-actions" role="tablist" aria-label="Secondary navigation">
@@ -93,7 +92,6 @@
         <div class="dropdown-divider"></div>
         <div class="dropdown-header">Administration</div>
         <a class="dropdown-item" href="/admin"><i class="bi bi-shield-lock"></i>Admin Settings</a>
-        <a class="dropdown-item" href="/connections"><i class="bi bi-hdd-network"></i>Connections</a>
         <div class="dropdown-divider"></div>
         <div class="dropdown-header">Reference</div>
         <a class="dropdown-item" href="/guide"><i class="bi bi-journal-text"></i>Guide</a>

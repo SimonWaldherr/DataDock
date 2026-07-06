@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	dbcatalog "github.com/SimonWaldherr/datadock/internal/catalog"
 	"github.com/SimonWaldherr/datadock/internal/resultutil"
 	"github.com/SimonWaldherr/datadock/internal/sqlutil"
 )
@@ -28,6 +27,7 @@ const (
 	maxLLMSampleValues      = 3
 	maxRAGTables            = 8
 	maxLLMTopValues         = 8
+	maxLLMContextRequests   = 2
 )
 
 type LLMResultContext = resultutil.Summary
@@ -56,10 +56,12 @@ type LLMRequest struct {
 }
 
 type LLMSQLResponse struct {
-	Action      string `json:"action"`
-	SQL         string `json:"sql,omitempty"`
-	Explanation string `json:"explanation,omitempty"`
-	FollowUp    string `json:"follow_up,omitempty"`
+	Action      string   `json:"action"`
+	SQL         string   `json:"sql,omitempty"`
+	Explanation string   `json:"explanation,omitempty"`
+	FollowUp    string   `json:"follow_up,omitempty"`
+	Kind        string   `json:"kind,omitempty"`
+	Tables      []string `json:"tables,omitempty"`
 }
 
 type OpenAICompatibleClient struct {
@@ -180,36 +182,38 @@ func buildLLMMessages(req LLMRequest) []chatMessage {
 }
 
 // buildLLMMessagesForDisplay returns the same messages as buildLLMMessages
-// but with embedded JSON pretty-printed, for display only. req.Schema isn't
-// always pure JSON — for tinySQL connections it's prose with one or more
-// embedded {...} blocks (see tinySQLAgentContext) — so this scans for and
-// reformats each embedded JSON object individually rather than assuming the
-// whole string parses as one value.
+// but with embedded JSON pretty-printed, for display only. req.Schema is
+// normally a minified JSON object, but this also handles any surrounding prose
+// defensively by formatting embedded {...} blocks individually.
 func buildLLMMessagesForDisplay(req LLMRequest) []chatMessage {
 	indent := func(v any) ([]byte, error) { return json.MarshalIndent(v, "", "  ") }
 	return buildLLMMessagesWithFormatting(req, prettyPrintEmbeddedJSON, indent)
 }
 
 func buildLLMMessagesWithFormatting(req LLMRequest, formatSchema func(string) string, marshalResult func(any) ([]byte, error)) []chatMessage {
-	system := "You are DataDock's SQL assistant. Use the provided RAG context only. " +
-		"Follow the SQL dialect rules in the schema context exactly. " +
-		"Follow the active skill instructions and output contract exactly. " +
-		"Prefer safe SELECT queries unless the user explicitly asks for data changes. " +
-		"For SQL generation, return valid JSON only: " +
-		`{"action":"sql","sql":"SELECT ...","explanation":"..."} or {"action":"clarify","follow_up":"...","explanation":"..."}. ` +
-		"For explanations, be concise and practical."
+	system := "You are DataDock's SQL assistant. Answer using only the provided RAG context. " +
+		"Follow the SQL dialect profile and active skill instructions exactly. " +
+		"Use only retrieved tables and columns. If more schema context is needed, request it before final SQL. If the request remains ambiguous, ask one concrete clarification. " +
+		"Prefer safe, read-only SELECT queries unless the user explicitly asks for data changes. " +
+		"For SQL generation, return exactly one JSON object and no markdown or extra prose: " +
+		`{"action":"sql","sql":"SELECT ...","explanation":"..."}, {"action":"context","kind":"schema","tables":["table_name"],"explanation":"..."}, or {"action":"clarify","follow_up":"...","explanation":"..."}. ` +
+		"Keep explanations concise and practical."
 
 	var user strings.Builder
 	user.WriteString("Action: ")
 	user.WriteString(req.Action)
+	user.WriteString("\nTask: ")
+	user.WriteString(llmTaskInstruction(req))
 	user.WriteString("\n\nRAG context:\n")
 	user.WriteString(formatSchema(req.Schema))
-	user.WriteString("\n\nUser prompt:\n")
-	user.WriteString(trimForLLM(req.Prompt, maxLLMPromptChars))
 
 	if strings.TrimSpace(req.SQL) != "" {
 		user.WriteString("\n\nCurrent SQL:\n")
 		user.WriteString(trimForLLM(req.SQL, maxLLMPromptChars))
+	}
+	if strings.TrimSpace(req.Prompt) != "" {
+		user.WriteString("\n\nUser request:\n")
+		user.WriteString(trimForLLM(req.Prompt, maxLLMPromptChars))
 	}
 	if strings.TrimSpace(req.Error) != "" {
 		user.WriteString("\n\nError:\n")
@@ -227,12 +231,30 @@ func buildLLMMessagesWithFormatting(req LLMRequest, formatSchema func(string) st
 	}
 }
 
+func llmTaskInstruction(req LLMRequest) string {
+	switch req.Action {
+	case llmActionGenerateSQL, llmActionAskRun:
+		if strings.TrimSpace(req.SQL) != "" {
+			if strings.TrimSpace(req.Prompt) == "" {
+				return "Optimize and refine the current SQL while preserving its intent. Return only the SQL JSON contract."
+			}
+			return "Generate one useful SQL query from the user request. Treat the current SQL as the draft to refine unless the request says otherwise. Request more context only if required."
+		}
+		return "Generate one useful SQL query from the user request. Request more context only if required."
+	case llmActionExplainResults:
+		return "Explain the result sample for the current SQL in plain language."
+	case llmActionExplainError:
+		return "Explain the SQL/database error and suggest a correction when the schema context supports one."
+	default:
+		return "Assist with SQL using only the retrieved context."
+	}
+}
+
 // prettyPrintEmbeddedJSON scans s for top-level {...} objects and replaces
 // each one that's valid JSON with an indented rendering, leaving any
 // surrounding prose untouched. Used only for display (buildLLMMessagesForDisplay):
-// the RAG context is always minified JSON on its own, but the tinySQL agent
-// profile mixes prose with one or more embedded JSON objects, so a plain
-// "is the whole string JSON?" check isn't enough to make it readable.
+// the RAG context is normally minified JSON on its own, but this keeps the
+// display path tolerant of surrounding prose from older or external callers.
 func prettyPrintEmbeddedJSON(s string) string {
 	var out strings.Builder
 	for i := 0; i < len(s); {
@@ -313,10 +335,17 @@ func parseLLMSQLResponse(text string) LLMSQLResponse {
 }
 
 func normalizeLLMSQLResponse(out LLMSQLResponse) LLMSQLResponse {
-	out.Action = strings.TrimSpace(out.Action)
+	out.Action = strings.ToLower(strings.TrimSpace(out.Action))
 	out.SQL = strings.TrimSpace(stripMarkdownCodeFence(out.SQL))
 	out.Explanation = strings.TrimSpace(out.Explanation)
 	out.FollowUp = strings.TrimSpace(out.FollowUp)
+	out.Kind = strings.ToLower(strings.TrimSpace(out.Kind))
+	if out.Action == "context" && out.Kind == "" {
+		out.Kind = "schema"
+	}
+	if len(out.Tables) > maxRAGTables {
+		out.Tables = out.Tables[:maxRAGTables]
+	}
 	if out.Action == "" && out.SQL != "" {
 		out.Action = "sql"
 	}
@@ -331,11 +360,13 @@ func parseLooseLLMSQLResponse(text string) (LLMSQLResponse, bool) {
 	action, _ := looseJSONStringField(text, "action")
 	explanation, _ := looseJSONStringField(text, "explanation")
 	followUp, _ := looseJSONStringField(text, "follow_up")
+	kind, _ := looseJSONStringField(text, "kind")
 	return LLMSQLResponse{
 		Action:      action,
 		SQL:         sqlText,
 		Explanation: explanation,
 		FollowUp:    followUp,
+		Kind:        kind,
 	}, true
 }
 
@@ -385,15 +416,60 @@ func (a *App) generateSQLFromPrompt(ctx context.Context, prompt string) (LLMSQLR
 	if llm == nil {
 		return LLMSQLResponse{}, errors.New("LLM is not configured")
 	}
-	out, err := llm.Complete(ctx, LLMRequest{
+	req := LLMRequest{
 		Action: llmActionGenerateSQL,
 		Prompt: prompt,
 		Schema: a.llmSchemaContext(ctx, llmActionGenerateSQL, prompt, "", ""),
-	})
+	}
+	out, err := a.completeSQLWithContextRequests(ctx, llm, req)
 	if err != nil {
 		return LLMSQLResponse{}, err
 	}
 	return parseLLMSQLResponse(out), nil
+}
+
+func (a *App) completeSQLWithContextRequests(ctx context.Context, llm LLMClient, req LLMRequest) (string, error) {
+	var out string
+	var err error
+	for i := 0; i <= maxLLMContextRequests; i++ {
+		out, err = llm.Complete(ctx, req)
+		if err != nil {
+			return "", err
+		}
+		parsed := parseLLMSQLResponse(out)
+		if parsed.Action != "context" {
+			return out, nil
+		}
+		extra := a.requestedLLMContext(ctx, req, parsed)
+		if strings.TrimSpace(extra) == "" {
+			return `{"action":"clarify","follow_up":"Which table or field should I inspect?","explanation":"The model requested additional context but did not name a retrievable table."}`, nil
+		}
+		req.Schema = strings.TrimSpace(req.Schema) + "\n\n" + extra
+	}
+	return `{"action":"clarify","follow_up":"Which table or fields should I use?","explanation":"More schema context was needed than DataDock can safely fetch in one request."}`, nil
+}
+
+func (a *App) requestedLLMContext(ctx context.Context, req LLMRequest, parsed LLMSQLResponse) string {
+	var terms []string
+	for _, table := range parsed.Tables {
+		table = strings.TrimSpace(table)
+		if table != "" {
+			terms = append(terms, table)
+		}
+	}
+	query := strings.Join(terms, " ")
+	if query == "" {
+		query = strings.TrimSpace(req.Prompt + " " + req.SQL)
+	}
+	if query == "" {
+		return ""
+	}
+	kind := parsed.Kind
+	if kind == "" {
+		kind = "schema"
+	}
+	snapshot := a.schemaSnapshotFor(ctx, req.Action, query, "", "")
+	return "Additional requested RAG context (" + kind + "):\n" + snapshot
 }
 
 func (a *App) explainLLMResults(ctx context.Context, prompt, sql string, result QueryResult) (string, error) {
@@ -543,31 +619,7 @@ func (a *App) schemaSnapshotFor(ctx context.Context, action, prompt, sqlText, er
 }
 
 func (a *App) llmSchemaContext(ctx context.Context, action, prompt, sqlText, errorText string) string {
-	conn := a.activeConn(ctx)
-	if conn == nil || conn.IsTinySQL() {
-		if profile := a.tinySQLAgentContext(ctx, action); profile != "" {
-			return profile
-		}
-	}
 	return a.schemaSnapshotFor(ctx, action, prompt, sqlText, errorText)
-}
-
-func (a *App) tinySQLAgentContext(ctx context.Context, action string) string {
-	cfg := dbcatalog.DefaultAgentContextConfig()
-	cfg.MaxTables = maxRAGTables
-	cfg.MaxColumnsPerTable = 10
-	cfg.MaxViews = maxRAGTables
-	cfg.MaxJobs = maxRAGTables
-	cfg.MaxChars = maxLLMPromptChars
-	profile, err := dbcatalog.BuildAgentContext(ctx, a.nativeDB, a.tenant, cfg)
-	if err != nil || strings.TrimSpace(profile) == "" {
-		return ""
-	}
-	skill, err := json.Marshal(llmSkillForAction(action))
-	if err != nil {
-		return profile
-	}
-	return "Active DataDock LLM skill:\n" + string(skill) + "\n\n" + profile
 }
 
 func (a *App) schemaSnapshotForSQLConnection(ctx context.Context, conn *DBConnection, action, prompt, sqlText, errorText string) string {
