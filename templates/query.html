@@ -767,6 +767,9 @@ function executeQueryForTab(tabID, sql, options) {
         setQueryTabStatus(tabID, 'Loading demo data…');
         return fetch('/demo-data', {method: 'POST', signal: controller.signal})
           .then(function () {
+            if (window.DataDock && typeof window.DataDock.refreshSidebar === 'function') {
+              window.DataDock.refreshSidebar();
+            }
             return fetch('/api/query', {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
@@ -1196,6 +1199,11 @@ function finishQueryRun(tabID, data, sql, options) {
     runtime.chartSQL = sql;
   }
   saveQueryResultHistory(sql, data);
+  if (data && !data.error && (data.statement_class === 'ddl' || data.statement_class === 'script')) {
+    if (window.DataDock && typeof window.DataDock.refreshSidebar === 'function') {
+      window.DataDock.refreshSidebar();
+    }
+  }
   if (tabID === activeQueryTabID) {
     renderActiveTabOutput();
   }
@@ -2219,8 +2227,25 @@ function renderTableFragment(data) {
 function renderSchemaGraphShell() {
   return '<div class="card mt-1"><div class="card-body py-2"><div class="d-flex justify-content-between align-items-center mb-2">' +
     '<h2 class="h6 mb-0"><i class="bi bi-diagram-3 text-primary"></i> Schema Graph</h2>' +
-    '<span class="small text-muted">tables, columns, relationships</span></div><div id="schemaGraph" class="schema-graph">Loading...</div></div></div>';
+    '<span class="small text-muted">tables, columns, relationships</span></div><div id="schemaGraph" class="schema-graph">Loading...</div></div></div>' +
+    '<div class="modal fade" id="schemaObjectModal" tabindex="-1" aria-labelledby="schemaObjectModalTitle" aria-hidden="true">' +
+      '<div class="modal-dialog modal-lg modal-dialog-scrollable">' +
+        '<div class="modal-content">' +
+          '<div class="modal-header">' +
+            '<div><h2 class="modal-title h5" id="schemaObjectModalTitle">Object</h2><div class="small text-muted" id="schemaObjectModalKind"></div></div>' +
+            '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>' +
+          '</div>' +
+          '<div class="modal-body" id="schemaObjectModalBody"></div>' +
+          '<div class="modal-footer">' +
+            '<button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Close</button>' +
+            '<a class="btn btn-primary btn-sm" id="schemaObjectOpenLink" href="#"><i class="bi bi-box-arrow-up-right me-1"></i>Open</a>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
 }
+
+var schemaGraphTablesByName = {};
 
 function loadSchemaGraph() {
   fetch('/api/schema')
@@ -2234,15 +2259,18 @@ function loadSchemaGraph() {
         target.innerHTML = '<div class="text-muted small">No schema context available.</div>';
         return;
       }
-      var html = '<div class="schema-graph-grid">';
+      schemaGraphTablesByName = {};
+      var html = '<div id="sg-tables" class="schema-graph-grid">';
       tables.forEach(function(table) {
-        html += '<div class="schema-node"><div class="schema-node-title">' + escHtml(table.name) +
+        schemaGraphTablesByName[table.name] = table;
+        html += '<button type="button" class="schema-node" data-schema-object="' + escHtml(table.name) + '" onclick="openSchemaObjectModal(this.dataset.schemaObject)">' +
+          '<div class="schema-node-title">' + escHtml(table.name) +
           '<span class="text-muted small ms-1">' + escHtml(table.kind || 'table') + '</span></div>';
         (table.columns || []).forEach(function(col) {
           html += '<div class="schema-column">' + escHtml(col.name) +
             '<span class="text-muted"> ' + escHtml(col.type || '') + '</span></div>';
         });
-        html += '</div>';
+        html += '</button>';
       });
       html += '</div>';
       if (relationships.length) {
@@ -2258,6 +2286,37 @@ function loadSchemaGraph() {
       var target = document.getElementById('schemaGraph');
       if (target) target.textContent = err.message || String(err);
     });
+}
+
+function openSchemaObjectModal(name) {
+  var table = schemaGraphTablesByName[name];
+  if (!table) return;
+  var title = document.getElementById('schemaObjectModalTitle');
+  var kind = document.getElementById('schemaObjectModalKind');
+  var body = document.getElementById('schemaObjectModalBody');
+  var openLink = document.getElementById('schemaObjectOpenLink');
+  if (!title || !kind || !body || !openLink) return;
+
+  title.textContent = table.name || 'Object';
+  kind.textContent = table.kind || 'table';
+  openLink.href = '/t/' + encodeURIComponent(table.name || '');
+
+  var html = '<div class="table-responsive"><table class="table table-sm mb-0">' +
+    '<thead><tr><th>Column</th><th>Type</th></tr></thead><tbody>';
+  var columns = table.columns || [];
+  if (!columns.length) {
+    html += '<tr><td colspan="2" class="text-muted">No columns available.</td></tr>';
+  } else {
+    columns.forEach(function(col) {
+      html += '<tr><td><code>' + escHtml(col.name || '') + '</code></td><td>' + escHtml(col.type || '') + '</td></tr>';
+    });
+  }
+  html += '</tbody></table></div>';
+  body.innerHTML = html;
+
+  if (window.bootstrap && window.bootstrap.Modal) {
+    window.bootstrap.Modal.getOrCreateInstance(document.getElementById('schemaObjectModal')).show();
+  }
 }
 
 function firstTextColumn(data) {

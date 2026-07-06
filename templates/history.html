@@ -10,9 +10,17 @@
 
 <div class="card">
   <div class="card-body py-2">
-    <div class="d-flex justify-content-between align-items-center mb-2">
+    <div class="d-flex justify-content-between align-items-center gap-2 flex-wrap mb-2">
       <span class="small text-muted">Queries you've run recently, kept in this browser only.</span>
-      <button class="btn btn-outline-secondary btn-sm" onclick="clearLocalQueryHistory()">Clear</button>
+      <div class="toolbar">
+        <button type="button" class="btn btn-outline-secondary btn-sm" onclick="exportLocalQueryHistory('json')">
+          <i class="bi bi-filetype-json me-1"></i>JSON
+        </button>
+        <button type="button" class="btn btn-outline-secondary btn-sm" onclick="exportLocalQueryHistory('csv')">
+          <i class="bi bi-filetype-csv me-1"></i>CSV
+        </button>
+        <button type="button" class="btn btn-outline-secondary btn-sm" onclick="clearLocalQueryHistory()">Clear</button>
+      </div>
     </div>
     <div id="queryHistory" class="small"></div>
   </div>
@@ -66,6 +74,47 @@ function restoreLocalQueryHistory(idx) {
 function clearLocalQueryHistory() {
   try { localStorage.removeItem(queryHistoryKey); } catch (e) {}
   renderLocalQueryHistory();
+}
+
+function exportLocalQueryHistory(format) {
+  var items = loadLocalQueryHistory();
+  if (items.length === 0) {
+    window.alert('No local query history to export.');
+    return;
+  }
+  var stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  if (format === 'csv') {
+    var header = ['at', 'rowCount', 'elapsedMs', 'error', 'sql'];
+    var lines = [header.map(csvCell).join(',')];
+    items.forEach(function (item) {
+      lines.push([
+        item.at || '',
+        item.rowCount || 0,
+        item.elapsedMs || 0,
+        item.error || '',
+        item.sql || ''
+      ].map(csvCell).join(','));
+    });
+    downloadTextFile('datadock-query-history-' + stamp + '.csv', 'text/csv;charset=utf-8', lines.join('\n') + '\n');
+    return;
+  }
+  downloadTextFile('datadock-query-history-' + stamp + '.json', 'application/json;charset=utf-8', JSON.stringify(items, null, 2) + '\n');
+}
+
+function downloadTextFile(filename, type, content) {
+  var blob = new Blob([content], {type: type});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+}
+
+function csvCell(value) {
+  return '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"';
 }
 
 function formatHistoryTime(value) {

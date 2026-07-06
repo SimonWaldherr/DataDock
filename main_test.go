@@ -134,6 +134,46 @@ func TestIndexNoTables(t *testing.T) {
 	}
 }
 
+func TestStyleCSSRoute(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/static/style.css", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); !strings.Contains(got, "text/css") {
+		t.Fatalf("expected CSS content type, got %q", got)
+	}
+	if !strings.Contains(w.Body.String(), ":root") || !strings.Contains(w.Body.String(), ".app-nav") {
+		t.Fatalf("CSS route returned unexpected content")
+	}
+}
+
+func TestAboutPageRoute(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/about", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{"About DataDock", "Runtime", "Local Browser Data"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("about page missing %q: %s", want, body)
+		}
+	}
+}
+
 func TestDemoDataCreatesAllDemoTables(t *testing.T) {
 	app := newTestApp(t)
 	mux := http.NewServeMux()
@@ -654,6 +694,30 @@ func TestRuntimeSettingsPersistInTinySQL(t *testing.T) {
 	}
 }
 
+func TestAdminSessionCanSeeDataDockSystemTables(t *testing.T) {
+	app := newTestApp(t)
+	if err := app.saveRuntimeSettings(context.Background()); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	anon := httptest.NewRecorder()
+	mux.ServeHTTP(anon, httptest.NewRequest(http.MethodGet, "/query", nil))
+	if strings.Contains(anon.Body.String(), "__datadock_settings") {
+		t.Fatalf("anonymous sidebar leaked DataDock system table: %s", anon.Body.String())
+	}
+
+	adminCookie := setupAdminSession(t, mux)
+	adminReq := httptest.NewRequest(http.MethodGet, "/query", nil)
+	adminReq.AddCookie(adminCookie)
+	admin := httptest.NewRecorder()
+	mux.ServeHTTP(admin, adminReq)
+	if !strings.Contains(admin.Body.String(), "__datadock_settings") {
+		t.Fatalf("admin sidebar did not include DataDock system table: %s", admin.Body.String())
+	}
+}
+
 func TestAdminSettingsFormPreservesAPIKey(t *testing.T) {
 	app := newTestApp(t)
 	if err := app.applyRuntimeSettings(RuntimeSettings{
@@ -739,6 +803,9 @@ func TestAdminRoutesRequireAdminSession(t *testing.T) {
 	if apiRec.Code != http.StatusPreconditionRequired {
 		t.Fatalf("expected API request before setup to return 428, got %d", apiRec.Code)
 	}
+	if got := apiRec.Header().Get("Content-Type"); !strings.Contains(got, "application/problem+json") {
+		t.Fatalf("expected API setup failure to use Problem Details, got %q", got)
+	}
 
 	setupReq := httptest.NewRequest(http.MethodPost, "/admin/setup", strings.NewReader(
 		url.Values{"password": {"secret123"}, "password_confirm": {"secret123"}, "next": {"/admin"}}.Encode()))
@@ -769,6 +836,78 @@ func TestAdminRoutesRequireAdminSession(t *testing.T) {
 	mux.ServeHTTP(noCookieRec, noCookieReq)
 	if noCookieRec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected API request without admin session to return 401, got %d", noCookieRec.Code)
+	}
+}
+
+func TestSanitizeAdminNextPath(t *testing.T) {
+	cases := map[string]string{
+		"":                          "/admin",
+		"   ":                       "/admin",
+		"https://example.com/admin": "/admin",
+		"//example.com/admin":       "/admin",
+		"admin":                     "/admin",
+		"/admin":                    "/admin",
+		"/connections?id=local":     "/connections?id=local",
+	}
+	for raw, want := range cases {
+		if got := sanitizeAdminNextPath(raw); got != want {
+			t.Fatalf("sanitizeAdminNextPath(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestAdminLoginLogoutAndExpiry(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+	cookie := setupAdminSession(t, mux)
+
+	logoutReq := httptest.NewRequest(http.MethodPost, "/admin/logout", nil)
+	logoutReq.AddCookie(cookie)
+	logoutRec := httptest.NewRecorder()
+	mux.ServeHTTP(logoutRec, logoutReq)
+	if logoutRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected logout redirect, got %d", logoutRec.Code)
+	}
+
+	adminReq := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	adminReq.AddCookie(cookie)
+	adminRec := httptest.NewRecorder()
+	mux.ServeHTTP(adminRec, adminReq)
+	if adminRec.Code != http.StatusSeeOther || !strings.Contains(adminRec.Header().Get("Location"), "/admin/login") {
+		t.Fatalf("expected logged-out session to redirect to login, got %d location %q", adminRec.Code, adminRec.Header().Get("Location"))
+	}
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(
+		url.Values{"password": {"secret123"}, "next": {"https://evil.example/admin"}}.Encode()))
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginReq.AddCookie(cookie)
+	loginRec := httptest.NewRecorder()
+	mux.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected login redirect, got %d; body: %s", loginRec.Code, loginRec.Body.String())
+	}
+	if got := loginRec.Header().Get("Location"); got != "/admin" {
+		t.Fatalf("expected external next target to be sanitized to /admin, got %q", got)
+	}
+
+	sessionID := sessionIDFromRequest(loginReq)
+	app.adminAuthMu.Lock()
+	app.adminAuthedSessions[sessionID] = time.Now().Add(-time.Second)
+	app.adminAuthMu.Unlock()
+
+	expiredReq := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	expiredReq.AddCookie(cookie)
+	expiredRec := httptest.NewRecorder()
+	mux.ServeHTTP(expiredRec, expiredReq)
+	if expiredRec.Code != http.StatusSeeOther || !strings.Contains(expiredRec.Header().Get("Location"), "/admin/login") {
+		t.Fatalf("expected expired admin session to redirect to login, got %d location %q", expiredRec.Code, expiredRec.Header().Get("Location"))
+	}
+	app.adminAuthMu.Lock()
+	_, stillTracked := app.adminAuthedSessions[sessionID]
+	app.adminAuthMu.Unlock()
+	if stillTracked {
+		t.Fatal("expected expired admin session to be removed")
 	}
 }
 

@@ -38,10 +38,9 @@ type App struct {
 	adminPasswordHash string
 	verbose           *VerboseLogger
 
-	// adminAuthMu/adminAuthedSessions track which sessions have logged into
-	// the Admin area, in memory only (a fresh process always requires a
-	// fresh login, which is the safer default for something gating
-	// credential storage).
+	// Admin logins are process-local on purpose: the password hash persists,
+	// but every restart requires a fresh Admin login before credential
+	// storage or server-wide settings can be changed.
 	adminAuthMu         sync.Mutex
 	adminAuthedSessions map[string]time.Time
 }
@@ -262,6 +261,10 @@ func (a *App) withConnectTimeout(ctx context.Context) (context.Context, context.
 
 // tableObjects returns a sorted list of browsable tables and views.
 func (a *App) tableObjects(ctx context.Context) []TableObject {
+	return a.tableObjectsWithSystem(ctx, false)
+}
+
+func (a *App) tableObjectsWithSystem(ctx context.Context, includeSystem bool) []TableObject {
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
 	conn := a.activeConn(ctx)
@@ -276,18 +279,18 @@ func (a *App) tableObjects(ctx context.Context) []TableObject {
 		return nil
 	}
 
-	if objects := a.tinySQLCatalogObjects(ctx); len(objects) > 0 {
+	if objects := a.tinySQLCatalogObjects(ctx, includeSystem); len(objects) > 0 {
 		return objects
 	}
-	return a.tinySQLNativeObjects(ctx)
+	return a.tinySQLNativeObjects(ctx, includeSystem)
 }
 
-func (a *App) tinySQLNativeObjects(ctx context.Context) []TableObject {
+func (a *App) tinySQLNativeObjects(ctx context.Context, includeSystem bool) []TableObject {
 	objects := make([]TableObject, 0)
 	seen := make(map[string]bool)
 	tables := a.nativeDB.ListTables(a.tenant)
 	for _, t := range tables {
-		if t != nil && !isDataDockSystemObject(t.Name) {
+		if t != nil && (includeSystem || !isDataDockSystemObject(t.Name)) {
 			objects = append(objects, TableObject{Name: t.Name, Kind: "table"})
 			seen[strings.ToLower(t.Name)] = true
 		}
@@ -302,7 +305,7 @@ func (a *App) tinySQLNativeObjects(ctx context.Context) []TableObject {
 	return objects
 }
 
-func (a *App) tinySQLCatalogObjects(ctx context.Context) []TableObject {
+func (a *App) tinySQLCatalogObjects(ctx context.Context, includeSystem bool) []TableObject {
 	objects, err := dbcatalog.ListObjects(ctx, a.nativeDB, a.tenant)
 	if err != nil {
 		return nil
@@ -314,7 +317,7 @@ func (a *App) tinySQLCatalogObjects(ctx context.Context) []TableObject {
 		if name == "" {
 			continue
 		}
-		if isDataDockSystemObject(name) {
+		if !includeSystem && isDataDockSystemObject(name) {
 			continue
 		}
 		kind, ok := normalizeCatalogObjectKind(obj.Type)
@@ -335,6 +338,15 @@ func (a *App) tinySQLCatalogObjects(ctx context.Context) []TableObject {
 // tableNames returns a sorted list of table/view names for the current tenant.
 func (a *App) tableNames(ctx context.Context) []string {
 	objects := a.tableObjects(ctx)
+	return tableObjectNames(objects)
+}
+
+func (a *App) tableNamesWithSystem(ctx context.Context, includeSystem bool) []string {
+	objects := a.tableObjectsWithSystem(ctx, includeSystem)
+	return tableObjectNames(objects)
+}
+
+func tableObjectNames(objects []TableObject) []string {
 	names := make([]string, 0, len(objects))
 	for _, obj := range objects {
 		names = append(names, obj.Name)
@@ -343,7 +355,11 @@ func (a *App) tableNames(ctx context.Context) []string {
 }
 
 func (a *App) tableObjectKind(ctx context.Context, name string) string {
-	for _, obj := range a.tableObjects(ctx) {
+	return a.tableObjectKindWithSystem(ctx, name, false)
+}
+
+func (a *App) tableObjectKindWithSystem(ctx context.Context, name string, includeSystem bool) string {
+	for _, obj := range a.tableObjectsWithSystem(ctx, includeSystem) {
 		if strings.EqualFold(obj.Name, name) {
 			return obj.Kind
 		}
@@ -382,7 +398,7 @@ func (a *App) tableMeta(ctx context.Context, name string) (TableMeta, error) {
 
 	// Use the canonical name from the DB (not the user-provided name) for
 	// all subsequent operations to avoid tainted-identifier issues.
-	meta := TableMeta{Name: found.Name, Kind: a.tableObjectKind(ctx, found.Name)}
+	meta := TableMeta{Name: found.Name, Kind: a.tableObjectKindWithSystem(ctx, found.Name, true)}
 
 	for _, sc := range found.Cols {
 		typeName := sc.Type.String()
@@ -412,7 +428,7 @@ func (a *App) tinySQLViewNames(ctx context.Context) []string {
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
 	var names []string
-	for _, obj := range a.tinySQLCatalogObjects(ctx) {
+	for _, obj := range a.tinySQLCatalogObjects(ctx, false) {
 		if obj.Kind == "view" {
 			names = append(names, obj.Name)
 		}

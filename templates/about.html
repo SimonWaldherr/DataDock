@@ -1,0 +1,92 @@
+{{define "about"}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection "DefaultTheme" .DefaultTheme "DefaultDensity" .DefaultDensity "MaintenanceMode" .MaintenanceMode)}}
+
+<div class="page-hdr">
+  <h1><i class="bi bi-info-circle text-primary"></i>About DataDock</h1>
+  <div class="toolbar">
+    <a href="/guide" class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-journal-text me-1"></i>Guide
+    </a>
+    <a href="/healthz" class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-activity me-1"></i>Health
+    </a>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6">Runtime</h2>
+    <div class="row g-3">
+      <div class="col-md-4">
+        <div class="metric">
+          <div class="fw-semibold">Connection</div>
+          <div class="small text-muted">{{with .ActiveConnection}}{{.Name}} · {{.Dialect.Name}}{{else}}tinySQL{{end}}</div>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="metric">
+          <div class="fw-semibold">Tenant</div>
+          <div class="small text-muted">{{if .Tenant}}{{.Tenant}}{{else}}default{{end}}</div>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="metric">
+          <div class="fw-semibold">Maintenance</div>
+          <div class="small text-muted">{{if .MaintenanceMode}}Active{{else}}Off{{end}}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6">Settings</h2>
+    <div class="row g-3">
+      <div class="col-md-3">
+        <div class="metric">
+          <div class="fw-semibold">Theme</div>
+          <div class="small text-muted">{{.DefaultTheme}}</div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="metric">
+          <div class="fw-semibold">Density</div>
+          <div class="small text-muted">{{.DefaultDensity}}</div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="metric">
+          <div class="fw-semibold">Page size</div>
+          <div class="small text-muted">{{.PageSize}}</div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="metric">
+          <div class="fw-semibold">Timeouts</div>
+          <div class="small text-muted">Query {{.QueryTimeout}} · Connect {{.ConnTimeout}}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6">Local Browser Data</h2>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Key</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>datadock.queryHistory.v1</code></td><td>Local SQL query history, exportable from the History tab.</td></tr>
+          <tr><td><code>datadock.queryTabs.v1</code></td><td>SQL editor tabs and their current state.</td></tr>
+          <tr><td><code>datadock.theme</code> / <code>datadock.density</code></td><td>Per-browser display preferences.</td></tr>
+          <tr><td><code>datadock.recentTables</code></td><td>Recently opened tables/views in the sidebar.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+{{template "base_end" .}}
+{{end}}

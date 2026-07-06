@@ -201,7 +201,9 @@ function changeTablePageSize(size) {
   var url = new URL(window.location.href);
   url.searchParams.set('pagesize', size);
   url.searchParams.set('page', '1');
-  window.location.href = url.toString();
+  if (!window.DataDock || typeof window.DataDock.navigateTablePage !== 'function' || !window.DataDock.navigateTablePage(url)) {
+    window.location.href = url.toString();
+  }
 }
 
 var tableScriptCache = null;

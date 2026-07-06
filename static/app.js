@@ -37,12 +37,21 @@ function openTableScript(tableName, action) {
 function openSQLInEditor(sql, title, autoRun) {
   var payload = JSON.stringify({sql: sql, title: title, autoRun: !!autoRun});
   var encoded = encodeURIComponent(btoa(unescape(encodeURIComponent(payload))));
-  window.location.href = '/query#s=' + encoded;
+  var url = '/query#s=' + encoded;
+  if (window.DataDock && typeof window.DataDock.navigateShellPage === 'function') {
+    window.DataDock.navigateShellPage(url, true);
+    return;
+  }
+  window.location.href = url;
 }
 
 (function () {
   var path = window.location.pathname;
   var root = document.documentElement;
+  var mainContent = document.getElementById('mainContent');
+  var tableNavigationSeq = 0;
+  var shellPageCache = {};
+  var shellActiveKey = '';
 
   // Track which table/view pages were opened, most-recent-first, so the
   // sidebar can show a "Recent" shortlist above the full Tables/Views tree.
@@ -81,31 +90,9 @@ function openSQLInEditor(sql, title, autoRun) {
   applyTheme(theme);
   applyDensity(density);
 
-  // Highlight active table link in the sidebar based on the current URL path.
-  document.querySelectorAll('.sidebar .table-link').forEach(function (a) {
-    if (a.getAttribute('href') === path) {
-      a.classList.add('active');
-    }
-  });
+  setActiveTableFromURL(new URL(window.location.href));
 
-  // Highlight active top-level navigation without needing per-template state.
-  document.querySelectorAll('.app-nav .btn-nav').forEach(function (a) {
-    var href = a.getAttribute('href');
-    if (href && href !== '/' && (path === href || path.indexOf(href + '/') === 0)) {
-      a.classList.add('active');
-    }
-  });
-  document.querySelectorAll('.app-nav .dropdown-item').forEach(function (a) {
-    var href = a.getAttribute('href');
-    if (href && href !== '/' && (path === href || path.indexOf(href + '/') === 0)) {
-      a.classList.add('active');
-      var menu = a.closest('.dropdown');
-      if (menu) {
-        var button = menu.querySelector('.btn-nav');
-        if (button) button.classList.add('active');
-      }
-    }
-  });
+  setActiveTopNavFromURL(new URL(window.location.href));
 
   // Collapsible sidebar groups (SSMS-style object explorer: Database >
   // Schema > Tables/Views/Procedures), remembering each group's expand
@@ -170,6 +157,60 @@ function openSQLInEditor(sql, title, autoRun) {
     filter.select();
   });
 
+  // Table pages are the highest-traffic navigation path in DataDock. Load
+  // them into the existing shell so opening tables, sorting columns, and
+  // paging rows does not rebuild the sidebar or reload the whole document.
+  document.addEventListener('click', function (e) {
+    var link = e.target && e.target.closest ? e.target.closest('a.table-link, .nav-primary a.table-nav-tab, #mainContent a') : null;
+    if (!shouldHandleTableNavigation(e, link)) return;
+    var url = new URL(link.href, window.location.origin);
+    if (!isTablePageURL(url)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    navigateContentPage(url, true);
+  }, true);
+
+  document.addEventListener('click', function (e) {
+    var link = e.target && e.target.closest ? e.target.closest('.nav-primary a.btn-nav, .app-nav .dropdown-item, #mainContent a') : null;
+    if (!shouldHandleShellNavigation(e, link)) return;
+    var url = new URL(link.href, window.location.origin);
+    if (!isShellPageURL(url)) return;
+    e.preventDefault();
+    navigateContentPage(url, true);
+  });
+
+  window.addEventListener('popstate', function () {
+    var url = new URL(window.location.href);
+    if (isContentPageURL(url)) {
+      navigateContentPage(url, false);
+      return;
+    }
+    window.location.reload();
+  });
+
+  window.DataDock = window.DataDock || {};
+  window.DataDock.navigateTablePage = function (urlLike) {
+    var url = new URL(urlLike, window.location.origin);
+    if (!isTablePageURL(url)) {
+      window.location.href = url.href;
+      return false;
+    }
+    navigateContentPage(url, true);
+    return true;
+  };
+  window.DataDock.navigateShellPage = function (urlLike, pushHistory) {
+    var url = new URL(urlLike, window.location.origin);
+    if (!isShellPageURL(url)) {
+      window.location.href = url.href;
+      return false;
+    }
+    navigateContentPage(url, pushHistory !== false);
+    return true;
+  };
+  window.DataDock.refreshSidebar = function () {
+    refreshSidebarTree();
+  };
+
   // Collapse/expand the whole sidebar to reclaim width on smaller screens
   // or when the SQL editor/data grid needs more room.
   var collapseBtn = document.getElementById('sidebarCollapseBtn');
@@ -211,7 +252,289 @@ function openSQLInEditor(sql, title, autoRun) {
       applyDensity(densitySelect.value);
     });
   }
+
+  function shouldHandleTableNavigation(e, link) {
+    if (!link || !mainContent) return false;
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return false;
+    if (link.target && link.target !== '_self') return false;
+    if (link.hasAttribute('download')) return false;
+    return true;
+  }
+
+  function shouldHandleShellNavigation(e, link) {
+    if (!link || !mainContent) return false;
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return false;
+    if (link.target && link.target !== '_self') return false;
+    if (link.hasAttribute('download')) return false;
+    return true;
+  }
+
+  function isContentPageURL(url) {
+    return isTablePageURL(url) || isShellPageURL(url);
+  }
+
+  function isTablePageURL(url) {
+    return url.origin === window.location.origin && /^\/t\/[^/]+\/?$/.test(url.pathname);
+  }
+
+  function isShellPageURL(url) {
+    return url.origin === window.location.origin && shellPageKey(url) !== '';
+  }
+
+  function shellPageKey(url) {
+    if (['/query', '/history', '/create-table', '/import', '/export', '/connections', '/guide', '/about'].indexOf(url.pathname) === -1) return '';
+    return url.pathname + url.search;
+  }
+
+  function tableNameFromURL(url) {
+    var match = url.pathname.match(/^\/t\/([^/]+)\/?$/);
+    return match ? decodeURIComponent(match[1]) : '';
+  }
+
+  function navigateContentPage(url, pushHistory) {
+    if (!mainContent) {
+      window.location.href = url.href;
+      return;
+    }
+    var shellKey = shellPageKey(url);
+    if (shellKey && shellPageCache[shellKey]) {
+      showCachedShellPage(url, shellKey, pushHistory);
+      return;
+    }
+    var seq = ++tableNavigationSeq;
+    cacheCurrentShellPage();
+    mainContent.classList.add('is-loading');
+    mainContent.setAttribute('aria-busy', 'true');
+
+    fetch(url.href, {headers: {'X-Requested-With': 'fetch'}})
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.text();
+      })
+      .then(function (html) {
+        if (seq !== tableNavigationSeq) return;
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        var nextMain = doc.getElementById('mainContent');
+        if (!nextMain) throw new Error('No main content in response');
+
+        if (doc.title) document.title = doc.title;
+        if (pushHistory && url.href !== window.location.href) history.pushState({datadockContentPage: true}, '', url.href);
+
+        if (shellKey) {
+          var pane = document.createElement('div');
+          pane.className = 'main-pane';
+          pane.dataset.pageKey = shellKey;
+          pane.innerHTML = nextMain.innerHTML;
+          shellPageCache[shellKey] = {pane: pane, title: doc.title || document.title, url: url.href};
+          shellActiveKey = shellKey;
+          mainContent.replaceChildren(pane);
+          executeScripts(pane);
+        } else {
+          shellActiveKey = '';
+          mainContent.innerHTML = nextMain.innerHTML;
+          executeScripts(mainContent);
+        }
+
+        var tableName = tableNameFromURL(url);
+        if (tableName) recordRecentTable(tableName);
+        setActiveTableFromURL(url);
+        setActiveTopNavFromURL(url);
+        renderRecentTables();
+        if (tableName && !sidebarHasTable(tableName)) refreshSidebarTree();
+        runPageActivation(url);
+
+        mainContent.scrollTop = 0;
+        mainContent.focus({preventScroll: true});
+      })
+      .catch(function () {
+        if (seq !== tableNavigationSeq) return;
+        window.location.href = url.href;
+      })
+      .finally(function () {
+        if (seq !== tableNavigationSeq) return;
+        mainContent.classList.remove('is-loading');
+        mainContent.removeAttribute('aria-busy');
+      });
+  }
+
+  function cacheCurrentShellPage() {
+    var currentURL = new URL(window.location.href);
+    var key = shellActiveKey || shellPageKey(currentURL);
+    if (!key || !mainContent) return;
+    if (shellPageCache[key] && shellPageCache[key].pane.parentNode === mainContent) return;
+
+    var pane = document.createElement('div');
+    pane.className = 'main-pane';
+    pane.dataset.pageKey = key;
+    while (mainContent.firstChild) {
+      pane.appendChild(mainContent.firstChild);
+    }
+    shellPageCache[key] = {pane: pane, title: document.title, url: currentURL.href};
+    shellActiveKey = key;
+    mainContent.appendChild(pane);
+  }
+
+  function showCachedShellPage(url, key, pushHistory) {
+    cacheCurrentShellPage();
+    var cached = shellPageCache[key];
+    if (!cached) return;
+    if (pushHistory && url.href !== window.location.href) history.pushState({datadockShellPage: true}, '', url.href);
+    shellActiveKey = key;
+    document.title = cached.title || document.title;
+    mainContent.replaceChildren(cached.pane);
+    setActiveTableFromURL(url);
+    setActiveTopNavFromURL(url);
+    runPageActivation(url);
+    mainContent.scrollTop = 0;
+    mainContent.focus({preventScroll: true});
+  }
+
+  function runPageActivation(url) {
+    if (url.pathname === '/query') {
+      setTimeout(function () {
+        if (typeof restoreQueryFromHash === 'function' && url.hash) restoreQueryFromHash();
+        if (typeof sqlEditor !== 'undefined' && sqlEditor && typeof sqlEditor.layout === 'function') {
+          sqlEditor.layout();
+        }
+      }, 0);
+    } else if (url.pathname === '/history') {
+      setTimeout(function () {
+        if (typeof renderLocalQueryHistory === 'function') renderLocalQueryHistory();
+      }, 0);
+    }
+  }
+
+  function sidebarHasTable(name) {
+    var wanted = String(name || '').toLowerCase();
+    if (!wanted) return false;
+    var found = false;
+    document.querySelectorAll('.sidebar .table-link').forEach(function (a) {
+      var linkURL;
+      try {
+        linkURL = new URL(a.getAttribute('href') || '', window.location.origin);
+      } catch (e) {
+        linkURL = null;
+      }
+      var linkMatch = linkURL && linkURL.pathname.match(/^\/t\/([^/]+)\/?$/);
+      var linkName = linkMatch ? decodeURIComponent(linkMatch[1]) : '';
+      if (linkName.toLowerCase() === wanted) found = true;
+    });
+    return found;
+  }
+
+  function executeScripts(container) {
+    var originalAddEventListener = document.addEventListener;
+    if (document.readyState !== 'loading') {
+      document.addEventListener = function (type, listener, options) {
+        if (type === 'DOMContentLoaded' && typeof listener === 'function') {
+          setTimeout(function () { listener.call(document, new Event('DOMContentLoaded')); }, 0);
+          return;
+        }
+        return originalAddEventListener.call(document, type, listener, options);
+      };
+    }
+    try {
+      container.querySelectorAll('script').forEach(function (oldScript) {
+        var script = document.createElement('script');
+        Array.prototype.forEach.call(oldScript.attributes, function (attr) {
+          script.setAttribute(attr.name, attr.value);
+        });
+        script.text = oldScript.textContent || '';
+        oldScript.replaceWith(script);
+      });
+    } finally {
+      document.addEventListener = originalAddEventListener;
+    }
+  }
 })();
+
+function setActiveTableFromURL(url) {
+  var activeName = '';
+  var match = url.pathname.match(/^\/t\/([^/]+)\/?$/);
+  if (match) activeName = decodeURIComponent(match[1]);
+
+  document.querySelectorAll('#catalogTreeRoot, #sidebarStaticRoot').forEach(function (root) {
+    root.dataset.activeTable = activeName;
+  });
+
+  document.querySelectorAll('.sidebar .table-link').forEach(function (a) {
+    var linkURL;
+    try {
+      linkURL = new URL(a.getAttribute('href') || '', window.location.origin);
+    } catch (e) {
+      linkURL = null;
+    }
+    var linkMatch = linkURL && linkURL.pathname.match(/^\/t\/([^/]+)\/?$/);
+    var linkName = linkMatch ? decodeURIComponent(linkMatch[1]) : '';
+    a.classList.toggle('active', !!activeName && linkName.toLowerCase() === activeName.toLowerCase());
+  });
+}
+
+function setActiveTopNavFromURL(url) {
+  var path = url.pathname;
+  var activeSection = navSectionForPath(path);
+  updateTableNavTab(url);
+  document.querySelectorAll('.app-nav .btn-nav').forEach(function (a) {
+    a.classList.remove('active');
+    if (a.hasAttribute('aria-selected')) a.setAttribute('aria-selected', 'false');
+  });
+  document.querySelectorAll('.app-nav .dropdown-item').forEach(function (a) {
+    a.classList.remove('active');
+  });
+
+  document.querySelectorAll('.app-nav .btn-nav').forEach(function (a) {
+    var href = a.getAttribute('href');
+    var section = a.dataset.navSection || '';
+    if ((section && section === activeSection) || (!section && href && href !== '/' && (path === href || path.indexOf(href + '/') === 0))) {
+      a.classList.add('active');
+      if (a.hasAttribute('aria-selected')) a.setAttribute('aria-selected', 'true');
+    }
+  });
+  document.querySelectorAll('.app-nav .dropdown-item').forEach(function (a) {
+    var href = a.getAttribute('href');
+    if (href && href !== '/' && (path === href || path.indexOf(href + '/') === 0)) {
+      a.classList.add('active');
+      var menu = a.closest('.dropdown');
+      if (menu) {
+        var button = menu.querySelector('.btn-nav');
+        if (button) {
+          button.classList.add('active');
+          if (button.hasAttribute('aria-selected')) button.setAttribute('aria-selected', 'true');
+        }
+      }
+    }
+  });
+}
+
+function navSectionForPath(path) {
+  if (path === '/query' || path.indexOf('/query/') === 0) return 'query';
+  if (path === '/history' || path.indexOf('/history/') === 0) return 'history';
+  if (path === '/create-table' || path.indexOf('/create-table/') === 0) return 'manage';
+  if (path === '/import' || path === '/export' || path.indexOf('/import/') === 0 || path.indexOf('/export/') === 0) return 'transfer';
+  if (path === '/connections' || path.indexOf('/connections/') === 0) return 'connections';
+  if (/^\/t\/[^/]+\/?$/.test(path)) return 'table';
+  return '';
+}
+
+function updateTableNavTab(url) {
+  var tab = document.querySelector('.nav-primary .table-nav-tab');
+  if (!tab) return;
+  var match = url.pathname.match(/^\/t\/([^/]+)\/?$/);
+  if (!match) {
+    tab.classList.add('d-none');
+    tab.setAttribute('href', '#');
+    tab.setAttribute('title', 'Current table');
+    var emptyLabel = tab.querySelector('span');
+    if (emptyLabel) emptyLabel.textContent = 'Preview';
+    return;
+  }
+  var tableName = decodeURIComponent(match[1]);
+  tab.classList.remove('d-none');
+  tab.setAttribute('href', '/t/' + encodeURIComponent(tableName));
+  tab.setAttribute('title', tableName);
+  var label = tab.querySelector('span');
+  if (label) label.textContent = 'Preview';
+}
 
 // wireSidebarGroupCollapse attaches expand/collapse behavior to a
 // .sidebar-group-header button, persisting the state in localStorage by

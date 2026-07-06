@@ -58,6 +58,8 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 		mux.HandleFunc(pattern, a.withSession(handler))
 	}
 
+	mux.HandleFunc("GET /static/style.css", styleCSSHandler)
+
 	handle("GET /", a.indexHandler)
 
 	// Table datasheet view.
@@ -111,6 +113,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("GET /export", a.exportFormHandler)
 	handle("GET /history", a.historyHandler)
 	handle("GET /guide", a.guideHandler)
+	handle("GET /about", a.aboutHandler)
 	handle("POST /drop-table/{table}", a.requireWritable(a.dropTableHandler))
 
 	// SQL query editor.
@@ -138,11 +141,23 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /api/llm/run", a.apiLLMRunHandler)
 }
 
+func styleCSSHandler(w http.ResponseWriter, r *http.Request) {
+	content, err := webFS.ReadFile("static/style.css")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(content)
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data map[string]interface{}) {
-	objects := a.tableObjects(r.Context())
-	data["Tables"] = a.tableNames(r.Context())
+	adminAuthenticated := a.isAdminAuthenticated(sessionIDFromContext(r.Context()))
+	objects := a.tableObjectsWithSystem(r.Context(), adminAuthenticated)
+	data["Tables"] = tableObjectNames(objects)
 	data["TableObjects"] = objects
 	data["DefaultTheme"] = a.currentDefaultTheme()
 	data["DefaultDensity"] = a.currentDefaultDensity()
@@ -151,7 +166,7 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data m
 		data["PageSize"] = a.currentPageSize()
 	}
 	data["PageSizeOptions"] = pageSizeOptions
-	data["AdminAuthenticated"] = a.isAdminAuthenticated(sessionIDFromContext(r.Context()))
+	data["AdminAuthenticated"] = adminAuthenticated
 	if a.conns != nil {
 		sessionID := sessionIDFromContext(r.Context())
 		data["Connections"] = a.conns.ListFor(sessionID)
@@ -168,6 +183,13 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data m
 	if err := a.tpl.ExecuteTemplate(w, name, data); err != nil {
 		http.Error(w, "template error: "+err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func (a *App) canBrowseTableName(r *http.Request, name string) bool {
+	if !isDataDockSystemObject(name) {
+		return true
+	}
+	return a.isAdminAuthenticated(sessionIDFromContext(r.Context()))
 }
 
 func (a *App) serverError(w http.ResponseWriter, err error) {
@@ -532,6 +554,10 @@ func (a *App) indexHandler(w http.ResponseWriter, r *http.Request) {
 // tableViewHandler renders the datasheet for a table.
 func (a *App) tableViewHandler(w http.ResponseWriter, r *http.Request) {
 	tableName := r.PathValue("table")
+	if !a.canBrowseTableName(r, tableName) {
+		a.renderObjectMissing(w, r, tableName, fmt.Errorf("table %q not found", tableName))
+		return
+	}
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	if page < 1 {
 		page = 1
@@ -610,6 +636,10 @@ func resolvePageSize(raw string, fallback int) int {
 // sidebar's and table view's quick-action buttons.
 func (a *App) apiTableScriptHandler(w http.ResponseWriter, r *http.Request) {
 	tableName := r.PathValue("table")
+	if !a.canBrowseTableName(r, tableName) {
+		a.writeProblem(w, r, http.StatusNotFound, "Not found", fmt.Sprintf("table %q not found", tableName))
+		return
+	}
 	meta, err := a.tableMeta(r.Context(), tableName)
 	if err != nil {
 		if isMissingDBObjectError(err) {
@@ -625,6 +655,10 @@ func (a *App) apiTableScriptHandler(w http.ResponseWriter, r *http.Request) {
 // exportTableHandler streams a full table export as CSV or JSON.
 func (a *App) exportTableHandler(w http.ResponseWriter, r *http.Request) {
 	tableName := r.PathValue("table")
+	if !a.canBrowseTableName(r, tableName) {
+		a.renderObjectMissing(w, r, tableName, fmt.Errorf("table %q not found", tableName))
+		return
+	}
 	meta, err := a.tableMeta(r.Context(), tableName)
 	if err != nil {
 		a.renderObjectMissing(w, r, tableName, err)
@@ -675,6 +709,15 @@ func (a *App) historyHandler(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) guideHandler(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "guide", map[string]interface{}{})
+}
+
+func (a *App) aboutHandler(w http.ResponseWriter, r *http.Request) {
+	a.render(w, r, "about", map[string]interface{}{
+		"Tenant":       a.tenant,
+		"PageSize":     a.currentPageSize(),
+		"QueryTimeout": a.currentQueryTimeout().String(),
+		"ConnTimeout":  a.currentConnectTimeout().String(),
+	})
 }
 
 // adminPageData assembles the base data every render of the "admin" template
@@ -982,6 +1025,10 @@ func (a *App) tableRowsSorted(r *http.Request, page int, sortCol, dir string, pa
 // newRecordFormHandler renders a blank form for creating a record.
 func (a *App) newRecordFormHandler(w http.ResponseWriter, r *http.Request) {
 	tableName := r.PathValue("table")
+	if !a.canBrowseTableName(r, tableName) {
+		a.renderObjectMissing(w, r, tableName, fmt.Errorf("table %q not found", tableName))
+		return
+	}
 	meta, err := a.tableMeta(r.Context(), tableName)
 	if err != nil {
 		if isMissingDBObjectError(err) {
@@ -1002,6 +1049,10 @@ func (a *App) newRecordFormHandler(w http.ResponseWriter, r *http.Request) {
 // createRecordHandler stores a new record.
 func (a *App) createRecordHandler(w http.ResponseWriter, r *http.Request) {
 	tableName := r.PathValue("table")
+	if !a.canBrowseTableName(r, tableName) {
+		a.renderObjectMissing(w, r, tableName, fmt.Errorf("table %q not found", tableName))
+		return
+	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -1040,6 +1091,10 @@ func (a *App) createRecordHandler(w http.ResponseWriter, r *http.Request) {
 // editRecordFormHandler renders a pre-populated edit form.
 func (a *App) editRecordFormHandler(w http.ResponseWriter, r *http.Request) {
 	tableName := r.PathValue("table")
+	if !a.canBrowseTableName(r, tableName) {
+		a.renderObjectMissing(w, r, tableName, fmt.Errorf("table %q not found", tableName))
+		return
+	}
 	id := r.PathValue("id")
 
 	meta, err := a.tableMeta(r.Context(), tableName)
@@ -1087,6 +1142,10 @@ func (a *App) editRecordFormHandler(w http.ResponseWriter, r *http.Request) {
 // updateRecordHandler saves changes to an existing record.
 func (a *App) updateRecordHandler(w http.ResponseWriter, r *http.Request) {
 	tableName := r.PathValue("table")
+	if !a.canBrowseTableName(r, tableName) {
+		a.renderObjectMissing(w, r, tableName, fmt.Errorf("table %q not found", tableName))
+		return
+	}
 	id := r.PathValue("id")
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -1127,6 +1186,10 @@ func (a *App) updateRecordHandler(w http.ResponseWriter, r *http.Request) {
 // deleteRecordHandler deletes a record by id.
 func (a *App) deleteRecordHandler(w http.ResponseWriter, r *http.Request) {
 	tableName := r.PathValue("table")
+	if !a.canBrowseTableName(r, tableName) {
+		a.renderObjectMissing(w, r, tableName, fmt.Errorf("table %q not found", tableName))
+		return
+	}
 	meta, err := a.tableMeta(r.Context(), tableName)
 	if err != nil {
 		if isMissingDBObjectError(err) {
@@ -1741,6 +1804,10 @@ func demoSQLString(value string) string {
 // dropTableHandler drops a table after confirmation.
 func (a *App) dropTableHandler(w http.ResponseWriter, r *http.Request) {
 	tableName := r.PathValue("table")
+	if !a.canBrowseTableName(r, tableName) {
+		http.NotFound(w, r)
+		return
+	}
 	// Resolve to the canonical DB name before building any SQL.
 	meta, err := a.tableMeta(r.Context(), tableName)
 	if err != nil {
@@ -1875,7 +1942,8 @@ func (a *App) apiSchemaHandler(w http.ResponseWriter, r *http.Request) {
 // come back with needsFetch=true and are populated on demand via
 // apiCatalogExpandHandler.
 func (a *App) apiCatalogHandler(w http.ResponseWriter, r *http.Request) {
-	tree, err := a.catalogTree(r.Context())
+	includeSystem := a.isAdminAuthenticated(sessionIDFromContext(r.Context()))
+	tree, err := a.catalogTreeWithSystem(r.Context(), includeSystem)
 	if err != nil {
 		a.writeProblem(w, r, http.StatusInternalServerError, "Could not load catalog", err.Error())
 		return

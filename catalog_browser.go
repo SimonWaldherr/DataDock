@@ -39,6 +39,10 @@ type CatalogDatabase struct {
 // catalogTree returns the full server-wide catalog (every database/schema
 // the active connection's credentials can see) for the sidebar tree.
 func (a *App) catalogTree(ctx context.Context) ([]CatalogDatabase, error) {
+	return a.catalogTreeWithSystem(ctx, false)
+}
+
+func (a *App) catalogTreeWithSystem(ctx context.Context, includeSystem bool) ([]CatalogDatabase, error) {
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
 	conn := a.activeConn(ctx)
@@ -46,7 +50,7 @@ func (a *App) catalogTree(ctx context.Context) ([]CatalogDatabase, error) {
 		return nil, fmt.Errorf("no active connection")
 	}
 	if conn.IsTinySQL() {
-		objects := a.tableObjects(ctx)
+		objects := a.tableObjectsWithSystem(ctx, includeSystem)
 		return []CatalogDatabase{{Name: "", Current: true, Schemas: []CatalogSchema{catalogSchemaFromObjects("", objects)}}}, nil
 	}
 	return conn.ListCatalog(ctx)

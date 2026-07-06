@@ -1,0 +1,13 @@
+{
+  "name": "datadock",
+  "private": true,
+  "version": "0.0.0",
+  "description": "DataDock web UI assets and formatting helpers.",
+  "scripts": {
+    "format": "node scripts/format-assets.js",
+    "format:check": "node scripts/format-assets.js --check"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

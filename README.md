@@ -14,7 +14,7 @@ administrator-managed shared connections or per-user credentials.
 
 | Feature | Description |
 |---|---|
-| **Table/View Browser** | Sidebar lists available tables and views; click to open a paginated datasheet view |
+| **Table/View Browser** | Sidebar lists available tables and views; click to open a paginated datasheet view; use the sidebar refresh button after external schema changes, while in-app DDL refreshes it automatically |
 | **Datasheet View** | View, sort, and page through table rows |
 | **Record CRUD** | Add, edit, and delete records from any table with an `id INT` column |
 | **Table Design** | Create new tables with a visual column designer (INT, FLOAT, TEXT, BOOL) |
@@ -22,7 +22,7 @@ administrator-managed shared connections or per-user credentials.
 | **Drop Table** | Delete any table with a one-click confirmation |
 | **SQL Editor** | Monaco-enhanced SQL editor with SQL syntax highlighting and textarea fallback; selected text can be executed with Run, export, Ctrl+Enter, or F5 |
 | **Example Queries & Prompts** | One-click sample SQL queries and natural-language prompts against the demo dataset, so the editor and LLM assistant can be tried immediately with zero setup; picking an example query auto-imports the demo dataset first if it isn't loaded yet |
-| **Local Query History** | Browser-local history for recently executed queries |
+| **Local Query History** | Browser-local history for recently executed queries, with JSON/CSV export from the History tab |
 | **Shareable Queries** | Copy a browser URL that restores the editor SQL from a compact hash |
 | **Quick Charts** | D3-powered first chart preview for numeric query results |
 | **Geo Views** | Map query results from GeoJSON geometry columns or latitude/longitude columns |
@@ -31,6 +31,7 @@ administrator-managed shared connections or per-user credentials.
 | **Table Migration** | Copy a table from one registered connection into another, with optional target table creation |
 | **LLM Assistant** | Optional OpenAI-compatible assistant for SQL generation, schema context preview, and natural-language explanations |
 | **Runtime Admin Settings** | Dialect, timeouts, LLM provider, page size, and default theme/density can be changed from the Admin UI or API without YAML/JSON config files |
+| **Admin Catalog View** | Authenticated Admin sessions can see DataDock/system tables such as `__datadock_settings`; normal sessions keep them hidden |
 | **Maintenance Mode** | Admin toggle that blocks writes (record edits, DDL, imports, migrations, DML) server-wide while keeping read-only SQL available |
 | **Demo Dataset** | One-click demo data (departments/people/projects, sales funnel, metrics time series, GeoJSON/Map locations, JSON/XML payloads) with a sample scheduled job, and a one-click removal |
 | **File Persistence** | Optionally read/write a `.gob` file on disk |
@@ -141,6 +142,26 @@ The same settings are available for automation through:
 | `/api/admin/settings` | `GET` | Return the current runtime settings as JSON, with secrets masked |
 | `/api/admin/settings` | `POST` | Apply runtime settings from JSON |
 
+Automation clients use the same session flow as the browser. Before the first
+Admin password is set, Admin APIs return `428 Precondition Required`; after a
+password exists but the request has no authenticated session, they return `401
+Unauthorized`. Use a cookie jar with `curl` or your HTTP client:
+
+```bash
+# First run only: create the Admin password and keep the session cookie.
+curl -c datadock.cookies -X POST http://localhost:8080/admin/setup \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data-urlencode 'password=change-this-password' \
+  --data-urlencode 'password_confirm=change-this-password' \
+  --data-urlencode 'next=/admin'
+
+# Later runs: log in and refresh the cookie jar.
+curl -c datadock.cookies -X POST http://localhost:8080/admin/login \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data-urlencode 'password=change-this-password' \
+  --data-urlencode 'next=/admin'
+```
+
 In addition to dialect/timeouts/LLM provider settings, Admin also controls:
 
 | Setting | Description |
@@ -160,6 +181,7 @@ Example API update:
 
 ```bash
 curl -X POST http://localhost:8080/api/admin/settings \
+  -b datadock.cookies \
   -H 'Content-Type: application/json' \
   -d '{
     "dialect": "mssql",
@@ -389,15 +411,17 @@ cmd/datadock/
 | `POST` | `/create-table` | Create table |
 | `GET` | `/export` | Export query form |
 | `GET` | `/history` | Local query history page |
+| `GET` | `/about` | Runtime and local browser storage information |
 | `POST` | `/demo-data` | Load (or reset) the built-in demo dataset plus a sample scheduled job (Admin session) |
 | `POST` | `/demo-data/remove` | Drop every demo table and the sample demo job (Admin session) |
 | `GET/POST` | `/static/*` | Static assets |
 
-Every mutating route above (except `/connections`, `/connections/active`, and
-`/admin/settings`) is blocked while **maintenance mode** is enabled in Admin,
-returning `503 Service Unavailable`. `/query` and `/api/query` stay open for
-read-only statements (`SELECT`, `WITH`, `SHOW`, `EXPLAIN`) even in maintenance
-mode.
+Every data-mutating route above is blocked while **maintenance mode** is enabled
+in Admin, returning `503 Service Unavailable`. Session-local connection changes,
+Admin settings, the maintenance toggle itself, login/logout, and read-only query
+execution stay available so an administrator can turn maintenance mode off again
+and users can continue inspecting data with `SELECT`, `WITH`, `SHOW`, or
+`EXPLAIN`.
 
 ### JSON API
 

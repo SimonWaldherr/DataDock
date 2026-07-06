@@ -64,11 +64,10 @@ func verifyAdminPassword(hash, plain string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)) == nil
 }
 
-// requireAdmin gates a handler behind the Admin password: with no password
-// set yet, it sends the visitor to set one up; otherwise it requires the
-// session to have already logged in via /admin/login. API requests get a
-// JSON problem response instead of a redirect, since a browser redirect
-// makes no sense for a fetch() call.
+// requireAdmin gates sensitive handlers behind first-run password setup and
+// the per-session Admin login. Browser routes redirect into the setup/login
+// flow; API routes return Problem Details so automation clients can handle the
+// missing-setup (428) and missing-login (401) states explicitly.
 func (a *App) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID := sessionIDFromContext(r.Context())
@@ -197,9 +196,9 @@ func (a *App) adminLogoutHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// adminToggleMaintenanceHandler flips maintenance (read-only) mode on or
-// off. It's a separate, minimal endpoint, starting from
-// a.currentRuntimeSettings() and only touching ReadOnlyMode.
+// adminToggleMaintenanceHandler is deliberately separate from the main settings
+// form: it is reachable even while maintenance mode is on and only flips the
+// ReadOnlyMode bit, so an incomplete settings form cannot change other values.
 func (a *App) adminToggleMaintenanceHandler(w http.ResponseWriter, r *http.Request) {
 	settings := a.currentRuntimeSettings()
 	settings.ReadOnlyMode = !settings.ReadOnlyMode
