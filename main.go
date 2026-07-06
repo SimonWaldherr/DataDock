@@ -38,6 +38,8 @@ func main() {
 	watchDir := flag.String("watch-dir", envDefault("DATADOCK_WATCH_DIR", ""), "Optional directory to auto-import supported files into tinySQL tables")
 	watchInterval := flag.Duration("watch-interval", envDurationDefault("DATADOCK_WATCH_INTERVAL", 3*time.Second), "Polling interval for -watch-dir auto-import")
 	auditPath := flag.String("audit-log", envDefault("DATADOCK_AUDIT_LOG", ""), "Optional path for a tamper-evident tinySQL audit log")
+	adminUser := flag.String("admin-user", envDefault("DATADOCK_ADMIN_USER", "admin"), "Username for HTTP Basic authentication on Admin pages and Admin APIs")
+	adminPassword := flag.String("admin-password", envDefault("DATADOCK_ADMIN_PASSWORD", ""), "Password for HTTP Basic authentication on Admin pages and Admin APIs; generated at startup when empty")
 	flag.Parse()
 	verbose := NewVerboseLogger(*verboseMode)
 	if verbose.Enabled() {
@@ -98,6 +100,22 @@ func main() {
 
 	app := newApp(nativeDB, sqlDB, *tenant, tpl)
 	app.setVerboseLogger(verbose)
+	adminUserName := strings.TrimSpace(*adminUser)
+	if adminUserName == "" {
+		adminUserName = "admin"
+	}
+	adminPass := *adminPassword
+	if adminPass == "" {
+		generated, err := newGeneratedAdminPassword()
+		if err != nil {
+			log.Fatalf("generate admin password: %v", err)
+		}
+		adminPass = generated
+		log.Printf("Admin Basic Auth enabled with generated credentials: user=%q password=%q", adminUserName, adminPass)
+	} else {
+		log.Printf("Admin Basic Auth enabled for user %q", adminUserName)
+	}
+	app.setAdminAuth(AdminAuthConfig{Username: adminUserName, Password: adminPass})
 	settings := RuntimeSettings{
 		Dialect:        *sqlDialect,
 		ConnectTimeout: *connectTimeout,

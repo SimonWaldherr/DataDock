@@ -3,14 +3,34 @@
 
 <div class="page-hdr">
   <h1><i class="bi bi-speedometer2 text-primary"></i>Admin</h1>
-  <span class="badge {{if index .Status "ok"}}text-bg-success{{else}}text-bg-danger{{end}}">
-    <i class="bi bi-{{if index .Status "ok"}}check-circle{{else}}exclamation-triangle{{end}} me-1"></i>{{if index .Status "ok"}}Healthy{{else}}Error{{end}}
-  </span>
+  <div class="d-flex align-items-center gap-2 flex-wrap">
+    <span class="badge {{if .AdminAuthEnabled}}text-bg-success{{else}}text-bg-warning{{end}}">
+      <i class="bi bi-shield-lock me-1"></i>{{if .AdminAuthEnabled}}Basic Auth: {{.AdminAuthUser}}{{else}}Admin Auth Off{{end}}
+    </span>
+    <span class="badge {{if index .Status "ok"}}text-bg-success{{else}}text-bg-danger{{end}}">
+      <i class="bi bi-{{if index .Status "ok"}}check-circle{{else}}exclamation-triangle{{end}} me-1"></i>{{if index .Status "ok"}}Healthy{{else}}Error{{end}}
+    </span>
+  </div>
 </div>
 
 {{template "alert" .}}
 
 <div class="card">
+  <div class="card-body py-2">
+    <div class="toolbar">
+      <a class="btn btn-outline-secondary btn-sm" href="#adminStatusCards"><i class="bi bi-activity me-1"></i>Status</a>
+      <a class="btn btn-outline-secondary btn-sm" href="#adminSettings"><i class="bi bi-sliders me-1"></i>Settings</a>
+      <a class="btn btn-outline-secondary btn-sm" href="#adminDemoData"><i class="bi bi-database-add me-1"></i>Demo Data</a>
+      <a class="btn btn-outline-secondary btn-sm" href="#adminStatusJSON"><i class="bi bi-braces me-1"></i>Status JSON</a>
+      <span class="vr"></span>
+      <a class="btn btn-outline-secondary btn-sm" href="/jobs"><i class="bi bi-calendar2-check me-1"></i>Jobs</a>
+      <a class="btn btn-outline-secondary btn-sm" href="/connections"><i class="bi bi-hdd-network me-1"></i>Connections</a>
+      <a class="btn btn-outline-secondary btn-sm" href="/migrate"><i class="bi bi-arrow-left-right me-1"></i>Migration</a>
+    </div>
+  </div>
+</div>
+
+<div id="adminStatusCards" class="card">
   <div class="card-body">
     <div class="row g-3">
       <div class="col-md-3">
@@ -64,7 +84,7 @@
   </div>
 </div>
 
-<div class="card">
+<div id="adminSettings" class="card">
   <div class="card-body">
     <h2 class="h6 mb-3">Connection &amp; Workbench</h2>
     <form method="post" action="/admin/settings" class="row g-3">
@@ -179,7 +199,7 @@
   </div>
 </div>
 
-<div class="card">
+<div id="adminDemoData" class="card">
   <div class="card-body">
     <h2 class="h6 mb-1">Demo Data</h2>
     <p class="small text-muted mb-3">Load a ready-made demo dataset (departments, people, projects, a small sales funnel, and a 30-day metrics time series) to explore DataDock, or remove it again to reset. A sample scheduled job is registered alongside the demo data.</p>
@@ -198,7 +218,7 @@
   </div>
 </div>
 
-<div class="card">
+<div id="adminStatusJSON" class="card">
   <div class="card-body">
     <div class="d-flex justify-content-between align-items-center mb-2">
       <h2 class="h6 mb-0">Status JSON</h2>

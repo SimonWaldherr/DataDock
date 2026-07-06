@@ -75,8 +75,8 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("GET /connections", a.connectionsHandler)
 	handle("POST /connections", a.addConnectionHandler)
 	handle("POST /connections/active", a.setActiveConnectionHandler)
-	handle("GET /admin", a.adminHandler)
-	handle("POST /admin/settings", a.adminSettingsHandler)
+	handle("GET /admin", a.requireAdmin(a.adminHandler))
+	handle("POST /admin/settings", a.requireAdmin(a.adminSettingsHandler))
 	handle("GET /jobs", a.jobsHandler)
 	handle("GET /migrate", a.migrationHandler)
 	handle("POST /migrate", a.requireWritable(a.runMigrationHandler))
@@ -84,8 +84,8 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /create-table", a.requireWritable(a.createTableHandler))
 	handle("GET /import", a.importFormHandler)
 	handle("POST /import", a.requireWritable(a.importFileHandler))
-	handle("POST /demo-data", a.requireWritable(a.demoDataHandler))
-	handle("POST /demo-data/remove", a.requireWritable(a.demoDataRemoveHandler))
+	handle("POST /demo-data", a.requireAdmin(a.requireWritable(a.demoDataHandler)))
+	handle("POST /demo-data/remove", a.requireAdmin(a.requireWritable(a.demoDataRemoveHandler)))
 	handle("GET /guide", a.guideHandler)
 	handle("POST /drop-table/{table}", a.requireWritable(a.dropTableHandler))
 
@@ -97,17 +97,17 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /api/query", a.apiQueryHandler)
 	handle("POST /api/export", a.apiExportHandler)
 	handle("GET /api/schema", a.apiSchemaHandler)
-	handle("GET /api/admin/status", a.apiAdminStatusHandler)
-	handle("GET /api/admin/settings", a.apiAdminSettingsHandler)
-	handle("POST /api/admin/settings", a.apiAdminSettingsHandler)
+	handle("GET /api/admin/status", a.requireAdmin(a.apiAdminStatusHandler))
+	handle("GET /api/admin/settings", a.requireAdmin(a.apiAdminSettingsHandler))
+	handle("POST /api/admin/settings", a.requireAdmin(a.apiAdminSettingsHandler))
 	handle("GET /api/jobs", a.apiJobsHandler)
 	handle("POST /api/jobs", a.requireWritable(a.apiJobsHandler))
 	handle("POST /api/jobs/run", a.requireWritable(a.apiRunJobHandler))
 	handle("POST /api/import", a.requireWritable(a.apiImportHandler))
 	handle("POST /api/llm", a.apiLLMHandler)
-	handle("GET /api/llm/discover", a.apiLLMDiscoverHandler)
-	handle("POST /api/llm/autoconfig", a.apiLLMAutoConfigHandler)
-	handle("GET /api/llm/health", a.apiLLMHealthHandler)
+	handle("GET /api/llm/discover", a.requireAdmin(a.apiLLMDiscoverHandler))
+	handle("POST /api/llm/autoconfig", a.requireAdmin(a.apiLLMAutoConfigHandler))
+	handle("GET /api/llm/health", a.requireAdmin(a.apiLLMHealthHandler))
 	handle("POST /api/llm/run", a.apiLLMRunHandler)
 }
 
@@ -120,6 +120,8 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data m
 	data["DefaultTheme"] = a.currentDefaultTheme()
 	data["DefaultDensity"] = a.currentDefaultDensity()
 	data["MaintenanceMode"] = a.currentReadOnlyMode()
+	data["AdminAuthEnabled"] = a.adminAuthEnabled()
+	data["AdminAuthUser"] = a.adminAuthUsername()
 	if a.conns != nil {
 		sessionID := sessionIDFromContext(r.Context())
 		data["Connections"] = a.conns.ListFor(sessionID)
@@ -1826,6 +1828,8 @@ func (a *App) adminStatus(ctx context.Context) map[string]any {
 		"tenants":               health.Tenants,
 		"tables":                health.Tables,
 		"audit_log_enabled":     a.auditLog,
+		"admin_auth_enabled":    a.adminAuthEnabled(),
+		"admin_auth_user":       a.adminAuthUsername(),
 		"managed_connections":   0,
 		"active_connection":     nil,
 		"last_sync_at":          formatTimePtr(health.LastSyncAt),

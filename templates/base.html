@@ -1417,8 +1417,12 @@
         <div class="dropdown-header">Operations</div>
         <a class="dropdown-item" href="/migrate"><i class="bi bi-arrow-left-right"></i>Migration</a>
         <a class="dropdown-item" href="/jobs"><i class="bi bi-calendar2-check"></i>Jobs</a>
-        <a class="dropdown-item" href="/admin"><i class="bi bi-speedometer2"></i>Admin</a>
         <div class="dropdown-divider"></div>
+        <div class="dropdown-header">Administration</div>
+        <a class="dropdown-item" href="/admin"><i class="bi bi-shield-lock"></i>Admin Settings{{if .AdminAuthEnabled}}<span class="badge text-bg-success ms-auto">Basic Auth</span>{{end}}</a>
+        <a class="dropdown-item" href="/connections"><i class="bi bi-hdd-network"></i>Connections</a>
+        <div class="dropdown-divider"></div>
+        <div class="dropdown-header">Reference</div>
         <a class="dropdown-item" href="/guide"><i class="bi bi-journal-text"></i>Guide</a>
       </div>
     </div>

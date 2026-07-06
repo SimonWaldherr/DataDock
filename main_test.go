@@ -679,6 +679,38 @@ func TestAdminAndJobsPagesRender(t *testing.T) {
 	}
 }
 
+func TestAdminRoutesRequireBasicAuth(t *testing.T) {
+	app := newTestApp(t)
+	app.setAdminAuth(AdminAuthConfig{Username: "root", Password: "secret"})
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated admin request to return 401, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("WWW-Authenticate"); !strings.Contains(got, "Basic") {
+		t.Fatalf("expected Basic challenge, got %q", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req.SetBasicAuth("root", "secret")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected authenticated admin request to return 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	apiReq := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	apiRec := httptest.NewRecorder()
+	mux.ServeHTTP(apiRec, apiReq)
+	if apiRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated admin API request to return 401, got %d", apiRec.Code)
+	}
+}
+
 func TestAPIImportHandlerCSV(t *testing.T) {
 	app := newTestApp(t)
 	body := strings.NewReader(`{"table":"imported_people","format":"csv","content":"id,name\n1,Ada\n2,Grace\n","header_mode":"present","create_table":true,"type_inference":true}`)

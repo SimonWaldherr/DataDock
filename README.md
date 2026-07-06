@@ -98,6 +98,8 @@ Open your browser at **http://localhost:8080**.
 | `-verbose` | `$DATADOCK_VERBOSE` or `false` | Write redacted communication logs for LLM HTTP calls, LLM discovery, database opens/pings, SQL queries, mutations, imports, jobs, and migrations to stdout. |
 | `-watch-dir` | `$DATADOCK_WATCH_DIR` | Optional directory to auto-import/update supported files into local tinySQL tables. |
 | `-watch-interval` | `$DATADOCK_WATCH_INTERVAL` or `3s` | Polling interval for `-watch-dir`. |
+| `-admin-user` | `$DATADOCK_ADMIN_USER` or `admin` | HTTP Basic Auth username for Admin pages and Admin APIs. |
+| `-admin-password` | `$DATADOCK_ADMIN_PASSWORD` or generated at startup | HTTP Basic Auth password for Admin pages and Admin APIs. |
 
 Flags and environment variables are bootstrap defaults only. After startup, the
 Admin settings page can change the active dialect, connection timeout, query
@@ -119,8 +121,13 @@ name is derived from the filename and refreshed on update.
 
 ## Admin Settings
 
-Open **Admin** to edit runtime settings without touching any config file. The
-same settings are available for automation through:
+Open **Admin** to edit runtime settings without touching any config file. Admin
+pages and Admin APIs are protected by HTTP Basic Auth when DataDock is started
+normally. Set `DATADOCK_ADMIN_PASSWORD` or `-admin-password` for a stable
+password; if omitted, DataDock generates a temporary password at startup and
+prints it to the server log.
+
+The same settings are available for automation through:
 
 | Endpoint | Method | Description |
 |---|---|---|

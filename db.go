@@ -35,6 +35,7 @@ type App struct {
 	defaultTheme   string
 	defaultDensity string
 	verbose        *VerboseLogger
+	adminAuth      AdminAuthConfig
 }
 
 // Column describes a single column returned by a query.
