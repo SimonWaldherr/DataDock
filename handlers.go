@@ -2778,7 +2778,7 @@ func (a *App) apiLLMHandler(w http.ResponseWriter, r *http.Request) {
 
 	action := strings.TrimSpace(body.Action)
 	switch action {
-	case llmActionGenerateSQL, llmActionExplainResults, llmActionExplainError, llmActionAskRun:
+	case llmActionGenerateSQL, llmActionExplainResults, llmActionExplainError, llmActionAskRun, llmActionCreateChart:
 	default:
 		a.writeProblem(w, r, http.StatusBadRequest, "Unsupported LLM action", "unsupported LLM action")
 		return
@@ -2795,7 +2795,7 @@ func (a *App) apiLLMHandler(w http.ResponseWriter, r *http.Request) {
 	req := a.buildLLMRequest(r.Context(), action, prompt, sqlText, errorText, body.Columns, body.Rows)
 	var out string
 	var err error
-	if action == llmActionGenerateSQL {
+	if action == llmActionGenerateSQL || action == llmActionCreateChart {
 		out, err = a.completeSQLWithToolCalls(r.Context(), llm, req)
 	} else {
 		out, err = llm.Complete(r.Context(), req)
@@ -2806,13 +2806,35 @@ func (a *App) apiLLMHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if action == llmActionGenerateSQL {
 		parsed := parseLLMSQLResponse(out)
-		a.writeJSON(w, http.StatusOK, map[string]string{
+		if strings.TrimSpace(parsed.SQL) != "" {
+			parsed.Review = a.reviewGeneratedSQL(r.Context(), llm, prompt, parsed.SQL)
+		}
+		resp := map[string]any{
 			"action":      parsed.Action,
 			"text":        parsed.SQL,
 			"sql":         parsed.SQL,
 			"explanation": parsed.Explanation,
+			"review":      parsed.Review,
 			"follow_up":   parsed.FollowUp,
-		})
+		}
+		if parsed.Chart != nil {
+			resp["chart"] = parsed.Chart
+		}
+		a.writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	if action == llmActionCreateChart {
+		parsed := parseLLMSQLResponse(out)
+		parsed.Chart = constrainLLMChartSpec(parsed.Chart, body.Columns)
+		resp := map[string]any{
+			"action":      parsed.Action,
+			"explanation": parsed.Explanation,
+			"follow_up":   parsed.FollowUp,
+		}
+		if parsed.Chart != nil {
+			resp["chart"] = parsed.Chart
+		}
+		a.writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
@@ -2857,7 +2879,7 @@ func (a *App) apiLLMPreviewHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	action := strings.TrimSpace(body.Action)
 	switch action {
-	case llmActionGenerateSQL, llmActionExplainResults, llmActionExplainError, llmActionAskRun:
+	case llmActionGenerateSQL, llmActionExplainResults, llmActionExplainError, llmActionAskRun, llmActionCreateChart:
 	default:
 		action = llmActionAskRun
 	}
@@ -2920,7 +2942,8 @@ func (a *App) apiLLMHealthHandler(w http.ResponseWriter, r *http.Request) {
 // apiLLMRunHandler turns a natural-language prompt into a read-only SQL query,
 // executes it, and asks the LLM for a short result/error explanation.
 func (a *App) apiLLMRunHandler(w http.ResponseWriter, r *http.Request) {
-	if a.llmClient() == nil {
+	llm := a.llmClient()
+	if llm == nil {
 		a.writeProblem(w, r, http.StatusServiceUnavailable, "LLM is not configured", "LLM is not configured")
 		return
 	}
@@ -2953,11 +2976,13 @@ func (a *App) apiLLMRunHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sqlText := strings.TrimSpace(generated.SQL)
+	review := a.reviewGeneratedSQL(r.Context(), llm, prompt, sqlText)
 	if err := a.validateAutoRunnableSQL(r.Context(), sqlText); err != nil {
 		a.writeJSON(w, http.StatusOK, map[string]any{
 			"action":      "blocked",
 			"sql":         sqlText,
 			"explanation": generated.Explanation,
+			"review":      review,
 			"error":       err.Error(),
 		})
 		return
@@ -2974,6 +2999,7 @@ func (a *App) apiLLMRunHandler(w http.ResponseWriter, r *http.Request) {
 			"sql":         sqlText,
 			"error":       result.Err,
 			"explanation": explanation,
+			"review":      review,
 		})
 		return
 	}
@@ -2987,6 +3013,7 @@ func (a *App) apiLLMRunHandler(w http.ResponseWriter, r *http.Request) {
 		"action":      "sql",
 		"sql":         sqlText,
 		"explanation": explanation,
+		"review":      review,
 		"columns":     result.Columns,
 		"rows":        result.Rows,
 		"affected":    result.Affected,

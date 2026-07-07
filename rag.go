@@ -95,6 +95,27 @@ func llmSkillForAction(action string) LLMSkillProfile {
 				"Do not invent tables or columns that are absent from context.",
 			},
 		}
+	case llmActionCreateChart:
+		return LLMSkillProfile{
+			Name:    "result_to_chart",
+			Purpose: "Turn a tabular result sample into one safe chart specification.",
+			Instructions: []string{
+				"Use only column names present in the result sample.",
+				"Return a compact chart JSON object, not JavaScript.",
+				"Prefer bar charts for categories and line charts for time-like dimensions.",
+				"Use aggregation=sum for numeric measures unless counting rows is more appropriate.",
+			},
+		}
+	case llmActionReviewSQL:
+		return LLMSkillProfile{
+			Name:    "sql_reviewer",
+			Purpose: "Independently review generated SQL without schema context.",
+			Instructions: []string{
+				"Describe the SQL intent.",
+				"Call out safety concerns and whether it appears read-only.",
+				"Do not assume unavailable schema details.",
+			},
+		}
 	default:
 		return LLMSkillProfile{
 			Name:    "sql_assistant",

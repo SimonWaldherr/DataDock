@@ -175,14 +175,67 @@ func TestAPILLMGenerateSQLCanRequestAdditionalContext(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if len(fake.lastReqs) != 2 {
-		t.Fatalf("expected two LLM calls, got %d", len(fake.lastReqs))
+	if len(fake.lastReqs) != 3 {
+		t.Fatalf("expected context request, SQL, and review calls, got %d", len(fake.lastReqs))
 	}
 	if !strings.Contains(fake.lastReqs[1].Schema, "MCP tool result") || !strings.Contains(fake.lastReqs[1].Schema, `"tool":"datadock.schema.search"`) || !strings.Contains(fake.lastReqs[1].Schema, `"invoices"`) {
 		t.Fatalf("expected MCP tool result in second call, got %s", fake.lastReqs[1].Schema)
 	}
+	if fake.lastReqs[2].Action != llmActionReviewSQL || fake.lastReqs[2].Schema != "" {
+		t.Fatalf("expected independent SQL review without RAG context, got %#v", fake.lastReqs[2])
+	}
 	if !strings.Contains(w.Body.String(), "SUM(amount)") {
 		t.Fatalf("expected generated SQL response, got %s", w.Body.String())
+	}
+}
+
+func TestAPILLMCreateChartReturnsChartSpec(t *testing.T) {
+	app := newTestApp(t)
+	fake := &fakeLLMClient{text: `{"action":"chart","chart":{"type":"bar","x":"Status","y":"missing_amount","aggregation":"sum","title":"Amount by status"},"explanation":"Use a bar chart."}`}
+	app.llm = fake
+
+	req := httptest.NewRequest(http.MethodPost, "/api/llm", strings.NewReader(`{"action":"create_chart","prompt":"chart this","columns":["status","amount"],"rows":[["paid","10"],["open","7"]]}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	app.apiLLMHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"action":"chart"`) || !strings.Contains(w.Body.String(), `"x":"status"`) || !strings.Contains(w.Body.String(), `"aggregation":"count"`) {
+		t.Fatalf("expected chart response, got %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"y":`) {
+		t.Fatalf("expected invalid y column to be removed, got %s", w.Body.String())
+	}
+	if len(fake.lastReqs) != 1 || fake.lastReqs[0].Action != llmActionCreateChart || fake.lastReqs[0].Result == nil {
+		t.Fatalf("expected one chart LLM request with result context, got %#v", fake.lastReqs)
+	}
+}
+
+func TestLLMTableProfileToolFiltersRequestedTables(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE profile_keep (id INT, amount INT)"); err != nil {
+		t.Fatalf("create keep table: %v", err)
+	}
+	if _, err := app.sqlDB.Exec("CREATE TABLE profile_noise (id INT, note TEXT)"); err != nil {
+		t.Fatalf("create noise table: %v", err)
+	}
+
+	out := app.callLLMTool(context.Background(), LLMRequest{Action: llmActionGenerateSQL}, LLMSQLResponse{
+		Action: "tool_call",
+		Tool:   llmToolTableProfile,
+		Arguments: LLMToolArguments{
+			Tables: []string{"profile_keep"},
+		},
+	})
+
+	if !strings.Contains(out, `"tool":"datadock.table.profile"`) || !strings.Contains(out, `"profile_keep"`) {
+		t.Fatalf("expected requested table profile, got %s", out)
+	}
+	if strings.Contains(out, `"profile_noise"`) {
+		t.Fatalf("expected unrelated table to be filtered out, got %s", out)
 	}
 }
 

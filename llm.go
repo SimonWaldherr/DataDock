@@ -22,13 +22,19 @@ const (
 	llmActionAskRun         = "ask_and_run"
 	llmActionExplainResults = "explain_results"
 	llmActionExplainError   = "explain_error"
+	llmActionCreateChart    = "create_chart"
+	llmActionReviewSQL      = "review_sql"
 	maxLLMPromptChars       = 8000
 	maxLLMContextRows       = 20
 	maxLLMSampleValues      = 3
 	maxRAGTables            = 8
 	maxLLMTopValues         = 8
 	maxLLMContextRequests   = 2
+	maxLLMReviewChars       = 900
 	llmToolSchemaSearch     = "datadock.schema.search"
+	llmToolTableProfile     = "datadock.table.profile"
+	llmToolQueryPreview     = "datadock.query.preview"
+	llmToolResultSummarize  = "datadock.result.summarize"
 )
 
 type LLMResultContext = resultutil.Summary
@@ -61,6 +67,8 @@ type LLMSQLResponse struct {
 	SQL         string           `json:"sql,omitempty"`
 	Explanation string           `json:"explanation,omitempty"`
 	FollowUp    string           `json:"follow_up,omitempty"`
+	Review      string           `json:"review,omitempty"`
+	Chart       *LLMChartSpec    `json:"chart,omitempty"`
 	Tool        string           `json:"tool,omitempty"`
 	Arguments   LLMToolArguments `json:"arguments,omitempty"`
 	Kind        string           `json:"kind,omitempty"`   // legacy alias for action=context
@@ -70,6 +78,17 @@ type LLMSQLResponse struct {
 type LLMToolArguments struct {
 	Query  string   `json:"query,omitempty"`
 	Tables []string `json:"tables,omitempty"`
+	SQL    string   `json:"sql,omitempty"`
+	Limit  int      `json:"limit,omitempty"`
+}
+
+type LLMChartSpec struct {
+	Type        string `json:"type,omitempty"`
+	Title       string `json:"title,omitempty"`
+	X           string `json:"x,omitempty"`
+	Y           string `json:"y,omitempty"`
+	Series      string `json:"series,omitempty"`
+	Aggregation string `json:"aggregation,omitempty"`
 }
 
 type OpenAICompatibleClient struct {
@@ -203,18 +222,26 @@ func buildLLMMessagesWithFormatting(req LLMRequest, formatSchema func(string) st
 		"Follow the SQL dialect profile and active skill instructions exactly. " +
 		"Use only retrieved tables and columns. If more schema context is needed, request a DataDock MCP-style tool call before final SQL. If the request remains ambiguous, ask one concrete clarification. " +
 		"Prefer safe, read-only SELECT queries unless the user explicitly asks for data changes. " +
-		"Available context tool: " + llmToolSchemaSearch + ` with arguments {"query":"search terms","tables":["optional_table"]}. ` +
+		"Available context tools: " + llmToolSchemaSearch + ` {"query":"search terms","tables":["optional_table"]}; ` +
+		llmToolTableProfile + ` {"tables":["table_name"]}; ` +
+		llmToolQueryPreview + ` {"sql":"SELECT ...","limit":20}; ` +
+		llmToolResultSummarize + ` {"query":"focus"}. ` +
 		"For SQL generation, return exactly one JSON object and no markdown or extra prose: " +
-		`{"action":"sql","sql":"SELECT ...","explanation":"..."}, {"action":"tool_call","tool":"` + llmToolSchemaSearch + `","arguments":{"query":"...","tables":["table_name"]},"explanation":"..."}, or {"action":"clarify","follow_up":"...","explanation":"..."}. ` +
+		`{"action":"sql","sql":"SELECT ...","explanation":"..."}, {"action":"chart","chart":{"type":"bar","x":"column","y":"column","aggregation":"sum","title":"..."},"explanation":"..."}, {"action":"tool_call","tool":"` + llmToolSchemaSearch + `","arguments":{"query":"...","tables":["table_name"]},"explanation":"..."}, or {"action":"clarify","follow_up":"...","explanation":"..."}. ` +
 		"Keep explanations concise and practical."
+	if req.Action == llmActionReviewSQL {
+		system = "You are DataDock's independent SQL reviewer. Do not use schema/RAG context. Review only the supplied SQL and user request. Return plain concise text covering intent, risks, and whether it appears read-only."
+	}
 
 	var user strings.Builder
 	user.WriteString("Action: ")
 	user.WriteString(req.Action)
 	user.WriteString("\nTask: ")
 	user.WriteString(llmTaskInstruction(req))
-	user.WriteString("\n\nRAG context:\n")
-	user.WriteString(formatSchema(req.Schema))
+	if req.Action != llmActionReviewSQL {
+		user.WriteString("\n\nRAG context:\n")
+		user.WriteString(formatSchema(req.Schema))
+	}
 
 	if strings.TrimSpace(req.SQL) != "" {
 		user.WriteString("\n\nCurrent SQL:\n")
@@ -254,6 +281,10 @@ func llmTaskInstruction(req LLMRequest) string {
 		return "Explain the result sample for the current SQL in plain language."
 	case llmActionExplainError:
 		return "Explain the SQL/database error and suggest a correction when the schema context supports one."
+	case llmActionCreateChart:
+		return "Create one chart specification for the current result sample. Use only column names present in the result sample. Return action=chart JSON only."
+	case llmActionReviewSQL:
+		return "Review the generated SQL independently without schema context. Describe intent, risks, and execution safety."
 	default:
 		return "Assist with SQL using only the retrieved context."
 	}
@@ -348,9 +379,14 @@ func normalizeLLMSQLResponse(out LLMSQLResponse) LLMSQLResponse {
 	out.SQL = strings.TrimSpace(stripMarkdownCodeFence(out.SQL))
 	out.Explanation = strings.TrimSpace(out.Explanation)
 	out.FollowUp = strings.TrimSpace(out.FollowUp)
+	out.Review = trimForLLM(out.Review, maxLLMReviewChars)
 	out.Tool = strings.TrimSpace(out.Tool)
 	out.Arguments.Query = strings.TrimSpace(out.Arguments.Query)
+	out.Arguments.SQL = strings.TrimSpace(stripMarkdownCodeFence(out.Arguments.SQL))
 	out.Kind = strings.ToLower(strings.TrimSpace(out.Kind))
+	if out.Chart != nil {
+		out.Chart = normalizeLLMChartSpec(out.Chart)
+	}
 	if out.Action == "context" {
 		out.Action = "tool_call"
 		if out.Tool == "" {
@@ -367,10 +403,79 @@ func normalizeLLMSQLResponse(out LLMSQLResponse) LLMSQLResponse {
 	if len(out.Arguments.Tables) > maxRAGTables {
 		out.Arguments.Tables = out.Arguments.Tables[:maxRAGTables]
 	}
+	if out.Arguments.Limit <= 0 || out.Arguments.Limit > maxLLMContextRows {
+		out.Arguments.Limit = maxLLMContextRows
+	}
 	if out.Action == "" && out.SQL != "" {
 		out.Action = "sql"
 	}
 	return out
+}
+
+func normalizeLLMChartSpec(chart *LLMChartSpec) *LLMChartSpec {
+	if chart == nil {
+		return nil
+	}
+	chart.Type = strings.ToLower(strings.TrimSpace(chart.Type))
+	chart.Title = strings.TrimSpace(chart.Title)
+	chart.X = strings.TrimSpace(chart.X)
+	chart.Y = strings.TrimSpace(chart.Y)
+	chart.Series = strings.TrimSpace(chart.Series)
+	chart.Aggregation = strings.ToLower(strings.TrimSpace(chart.Aggregation))
+	switch chart.Type {
+	case "bar", "line", "area":
+	default:
+		chart.Type = "bar"
+	}
+	switch chart.Aggregation {
+	case "count", "sum", "avg", "none":
+	default:
+		if chart.Y == "" {
+			chart.Aggregation = "count"
+		} else {
+			chart.Aggregation = "sum"
+		}
+	}
+	return chart
+}
+
+func constrainLLMChartSpec(chart *LLMChartSpec, columns []string) *LLMChartSpec {
+	chart = normalizeLLMChartSpec(chart)
+	if chart == nil || len(columns) == 0 {
+		return chart
+	}
+	columnByLower := make(map[string]string, len(columns))
+	for _, col := range columns {
+		col = strings.TrimSpace(col)
+		if col != "" {
+			columnByLower[strings.ToLower(col)] = col
+		}
+	}
+	if col := columnByLower[strings.ToLower(chart.X)]; col != "" {
+		chart.X = col
+	} else {
+		return nil
+	}
+	if chart.Y != "" {
+		if col := columnByLower[strings.ToLower(chart.Y)]; col != "" {
+			chart.Y = col
+		} else {
+			chart.Y = ""
+			chart.Aggregation = "count"
+		}
+	}
+	if chart.Series != "" {
+		if col := columnByLower[strings.ToLower(chart.Series)]; col != "" {
+			chart.Series = col
+		} else {
+			chart.Series = ""
+		}
+	}
+	if chart.Aggregation != "count" && chart.Y == "" {
+		chart.Aggregation = "count"
+	}
+	chart.Title = trimForLLM(chart.Title, 160)
+	return chart
 }
 
 func parseLooseLLMSQLResponse(text string) (LLMSQLResponse, bool) {
@@ -451,6 +556,22 @@ func (a *App) generateSQLFromPrompt(ctx context.Context, prompt string) (LLMSQLR
 	return parseLLMSQLResponse(out), nil
 }
 
+func (a *App) reviewGeneratedSQL(ctx context.Context, llm LLMClient, prompt, sqlText string) string {
+	sqlText = strings.TrimSpace(sqlText)
+	if llm == nil || sqlText == "" {
+		return ""
+	}
+	out, err := llm.Complete(ctx, LLMRequest{
+		Action: llmActionReviewSQL,
+		Prompt: strings.TrimSpace(prompt),
+		SQL:    sqlText,
+	})
+	if err != nil {
+		return ""
+	}
+	return trimForLLM(stripMarkdownCodeFence(out), maxLLMReviewChars)
+}
+
 func (a *App) completeSQLWithToolCalls(ctx context.Context, llm LLMClient, req LLMRequest) (string, error) {
 	var out string
 	var err error
@@ -463,7 +584,7 @@ func (a *App) completeSQLWithToolCalls(ctx context.Context, llm LLMClient, req L
 		if parsed.Action != "tool_call" {
 			return out, nil
 		}
-		extra := a.callLLMContextTool(ctx, req, parsed)
+		extra := a.callLLMTool(ctx, req, parsed)
 		if strings.TrimSpace(extra) == "" {
 			return `{"action":"clarify","follow_up":"Which table or field should I inspect?","explanation":"The model requested a context tool DataDock could not satisfy."}`, nil
 		}
@@ -472,10 +593,22 @@ func (a *App) completeSQLWithToolCalls(ctx context.Context, llm LLMClient, req L
 	return `{"action":"clarify","follow_up":"Which table or fields should I use?","explanation":"More context tool calls were needed than DataDock can safely perform in one request."}`, nil
 }
 
-func (a *App) callLLMContextTool(ctx context.Context, req LLMRequest, parsed LLMSQLResponse) string {
-	if parsed.Tool != "" && parsed.Tool != llmToolSchemaSearch {
+func (a *App) callLLMTool(ctx context.Context, req LLMRequest, parsed LLMSQLResponse) string {
+	switch parsed.Tool {
+	case "", llmToolSchemaSearch:
+		return a.callLLMSchemaSearchTool(ctx, req, parsed)
+	case llmToolTableProfile:
+		return a.callLLMTableProfileTool(ctx, req, parsed)
+	case llmToolQueryPreview:
+		return a.callLLMQueryPreviewTool(ctx, parsed)
+	case llmToolResultSummarize:
+		return a.callLLMResultSummarizeTool(req, parsed)
+	default:
 		return ""
 	}
+}
+
+func (a *App) callLLMSchemaSearchTool(ctx context.Context, req LLMRequest, parsed LLMSQLResponse) string {
 	var terms []string
 	for _, table := range parsed.Arguments.Tables {
 		table = strings.TrimSpace(table)
@@ -491,18 +624,121 @@ func (a *App) callLLMContextTool(ctx context.Context, req LLMRequest, parsed LLM
 		return ""
 	}
 	snapshot := a.schemaSnapshotFor(ctx, req.Action, query, "", "")
+	return llmToolResultBlock(llmToolSchemaSearch, parsed.Arguments, json.RawMessage(snapshot))
+}
+
+func (a *App) callLLMTableProfileTool(ctx context.Context, req LLMRequest, parsed LLMSQLResponse) string {
+	query := strings.TrimSpace(parsed.Arguments.Query + " " + strings.Join(parsed.Arguments.Tables, " "))
+	if query == "" {
+		query = strings.TrimSpace(req.Prompt + " " + req.SQL)
+	}
+	if query == "" {
+		return ""
+	}
+	snapshot := a.schemaSnapshotFor(ctx, req.Action, query, "", "")
+	snapshot = filterRAGSnapshotToTables(snapshot, parsed.Arguments.Tables)
+	return llmToolResultBlock(llmToolTableProfile, parsed.Arguments, json.RawMessage(snapshot))
+}
+
+func filterRAGSnapshotToTables(snapshot string, tables []string) string {
+	if len(tables) == 0 {
+		return snapshot
+	}
+	keep := make(map[string]bool, len(tables))
+	for _, table := range tables {
+		table = strings.Trim(strings.TrimSpace(table), "`\"'")
+		if table != "" {
+			keep[strings.ToLower(table)] = true
+		}
+	}
+	if len(keep) == 0 {
+		return snapshot
+	}
+	var doc ragContextDoc
+	if err := json.Unmarshal([]byte(snapshot), &doc); err != nil {
+		return snapshot
+	}
+	filteredTables := doc.Tables[:0]
+	for _, table := range doc.Tables {
+		if keep[strings.ToLower(table.Name)] {
+			filteredTables = append(filteredTables, table)
+		}
+	}
+	doc.Tables = filteredTables
+	filteredRelationships := doc.Relationships[:0]
+	for _, rel := range doc.Relationships {
+		if keep[relationshipTableName(rel.From)] || keep[relationshipTableName(rel.To)] {
+			filteredRelationships = append(filteredRelationships, rel)
+		}
+	}
+	doc.Relationships = filteredRelationships
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return snapshot
+	}
+	return string(data)
+}
+
+func relationshipTableName(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if idx := strings.IndexByte(ref, '.'); idx >= 0 {
+		ref = ref[:idx]
+	}
+	return strings.ToLower(strings.Trim(ref, "`\"'"))
+}
+
+func (a *App) callLLMQueryPreviewTool(ctx context.Context, parsed LLMSQLResponse) string {
+	sqlText := strings.TrimSpace(parsed.Arguments.SQL)
+	if sqlText == "" {
+		return ""
+	}
+	if err := a.validateAutoRunnableSQL(ctx, sqlText); err != nil {
+		result := map[string]any{"error": err.Error(), "sql": sqlText}
+		data, _ := json.Marshal(result)
+		return llmToolResultBlock(llmToolQueryPreview, parsed.Arguments, data)
+	}
+	limit := parsed.Arguments.Limit
+	if limit <= 0 || limit > maxLLMContextRows {
+		limit = maxLLMContextRows
+	}
+	result := a.executeSQLWindow(ctx, sqlText, 0, limit)
+	payload := map[string]any{
+		"sql":             sqlText,
+		"columns":         result.Columns,
+		"rows":            result.Rows,
+		"error":           result.Err,
+		"statement_class": string(result.StatementClass),
+		"elapsed_ms":      result.Elapsed.Milliseconds(),
+		"has_more":        result.HasMore,
+	}
+	data, _ := json.Marshal(payload)
+	return llmToolResultBlock(llmToolQueryPreview, parsed.Arguments, data)
+}
+
+func (a *App) callLLMResultSummarizeTool(req LLMRequest, parsed LLMSQLResponse) string {
+	if req.Result == nil {
+		return ""
+	}
+	data, err := json.Marshal(req.Result)
+	if err != nil {
+		return ""
+	}
+	return llmToolResultBlock(llmToolResultSummarize, parsed.Arguments, data)
+}
+
+func llmToolResultBlock(tool string, args LLMToolArguments, raw json.RawMessage) string {
 	result := struct {
 		Tool      string           `json:"tool"`
 		Arguments LLMToolArguments `json:"arguments"`
 		Result    json.RawMessage  `json:"result"`
 	}{
-		Tool:      llmToolSchemaSearch,
-		Arguments: parsed.Arguments,
-		Result:    json.RawMessage(snapshot),
+		Tool:      tool,
+		Arguments: args,
+		Result:    raw,
 	}
 	data, err := json.Marshal(result)
 	if err != nil {
-		return "MCP tool result " + llmToolSchemaSearch + ":\n" + snapshot
+		return "MCP tool result " + tool + ":\n" + string(raw)
 	}
 	return "MCP tool result:\n" + string(data)
 }

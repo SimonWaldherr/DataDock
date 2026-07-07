@@ -25,6 +25,7 @@
             <li><button class="dropdown-item" type="button" data-llm-mode="generate_sql" onclick="setLLMMode('generate_sql')"><i class="bi bi-code-slash me-2"></i>Write SQL<div class="small text-muted">Put a query into the editor for review</div></button></li>
             <li><button class="dropdown-item" type="button" data-llm-mode="ask_and_run" onclick="setLLMMode('ask_and_run')"><i class="bi bi-lightning-charge-fill me-2"></i>Ask &amp; Run<div class="small text-muted">Generate and run a read-only query</div></button></li>
             <li><hr class="dropdown-divider"></li>
+            <li><button class="dropdown-item" type="button" data-llm-mode="create_chart" onclick="setLLMMode('create_chart')"><i class="bi bi-bar-chart me-2"></i>Create chart<div class="small text-muted">Build a chart from the current result</div></button></li>
             <li><button class="dropdown-item" type="button" data-llm-mode="explain_results" onclick="setLLMMode('explain_results')"><i class="bi bi-card-text me-2"></i>Explain result</button></li>
             <li><button class="dropdown-item" type="button" data-llm-mode="explain_error" onclick="setLLMMode('explain_error')"><i class="bi bi-bug me-2"></i>Explain error</button></li>
           </ul>
@@ -902,7 +903,7 @@ function llmPayloadForAction(action) {
   if (action === 'explain_error') {
     payload.error = lastErrorMessage || '';
   }
-  if (action === 'explain_results' && lastResultData) {
+  if ((action === 'explain_results' || action === 'create_chart') && lastResultData) {
     payload.columns = lastResultData.columns || [];
     payload.rows = lastResultData.rows || [];
   }
@@ -918,6 +919,9 @@ function validateLLMAction(action, payload) {
   }
   if (action === 'explain_results' && (!lastResultData || !(lastResultData.rows || []).length)) {
     return {message: 'Run a query first, then explain its result.', focus: 'editor'};
+  }
+  if (action === 'create_chart' && (!lastResultData || !(lastResultData.rows || []).length)) {
+    return {message: 'Run a query first, then ask AI for a chart.', focus: 'editor'};
   }
   if (action === 'explain_error' && !payload.error) {
     return {message: 'Run a failing query first, then explain the error.', focus: 'editor'};
@@ -983,6 +987,18 @@ function askLLM(action) {
       document.getElementById('llmAnswer').innerHTML = renderLLMSQLMetadata(resp.data);
       return;
     }
+    if (action === 'create_chart') {
+      if (resp.data.action === 'clarify') {
+        handleLLMClarify(resp.data);
+        return;
+      }
+      if (!renderAIChart(lastResultData, resp.data.chart, resp.data.explanation)) {
+        showLLMAlert('warning', 'The AI response did not contain a usable chart specification.');
+        return;
+      }
+      showLLMAlert('info', resp.data.explanation || 'Chart created.');
+      return;
+    }
     showLLMAlert('info', resp.data.text || '');
   })
   .catch(function(err) {
@@ -996,6 +1012,9 @@ function renderLLMSQLMetadata(data) {
   var parts = ['<div class="alert alert-info py-2 mb-0">SQL generated in the editor. Review it before running.'];
   if (data.explanation) {
     parts.push('<div class="mt-2" style="white-space:pre-wrap">' + escHtml(data.explanation) + '</div>');
+  }
+  if (data.review) {
+    parts.push('<div class="mt-2 pt-2 border-top"><span class="fw-semibold">AI review:</span><div style="white-space:pre-wrap">' + escHtml(data.review) + '</div></div>');
   }
   if (data.follow_up) {
     parts.push('<div class="mt-2"><span class="fw-semibold">Follow-up:</span> ' + escHtml(data.follow_up) + '</div>');
@@ -1045,12 +1064,12 @@ function askAndRunLLM() {
     }
     if (resp.data.action === 'blocked' || resp.data.action === 'error') {
       renderError(resp.data.error || 'LLM-generated SQL could not be executed.');
-      showLLMAlert('warning', resp.data.explanation || resp.data.error || '');
+      showLLMAlert('warning', combineLLMExplanationAndReview(resp.data.explanation || resp.data.error || '', resp.data.review || ''));
       return;
     }
     renderResult(resp.data);
-    if (resp.data.explanation) {
-      showLLMAlert('info', resp.data.explanation);
+    if (resp.data.explanation || resp.data.review) {
+      showLLMAlert('info', combineLLMExplanationAndReview(resp.data.explanation || '', resp.data.review || ''));
     }
   })
   .catch(function(err) {
@@ -1069,6 +1088,13 @@ function handleLLMClarify(data) {
   }
   showLLMAlert('info', data.explanation || data.follow_up || 'Clarification needed.');
   updateLLMButtonState();
+}
+
+function combineLLMExplanationAndReview(explanation, review) {
+  var parts = [];
+  if (explanation) parts.push(explanation);
+  if (review) parts.push('AI review:\n' + review);
+  return parts.join('\n\n');
 }
 
 function setLLMBusy(busy) {
@@ -1097,15 +1123,22 @@ var llmModeMeta = {
     icon: 'bi-stars',
     label: 'Ask AI',
     title: 'Ask AI to write SQL into the editor',
-    status: 'Drafting SQL...',
+    status: 'Drafting and reviewing SQL...',
     placeholder: 'Ask AI to write or improve SQL'
   },
   ask_and_run: {
     icon: 'bi-stars',
     label: 'Ask AI',
     title: 'Ask AI to generate and run a read-only query',
-    status: 'Generating and running...',
+    status: 'Generating, reviewing, and running...',
     placeholder: 'Ask AI to run a read-only query'
+  },
+  create_chart: {
+    icon: 'bi-bar-chart',
+    label: 'Ask AI',
+    title: 'Ask AI to chart the current result',
+    status: 'Creating chart...',
+    placeholder: 'Ask AI how to chart the current result'
   },
   explain_results: {
     icon: 'bi-stars',
@@ -2566,6 +2599,88 @@ function loadLocalQueryHistory() {
 // "Measure" controls can re-aggregate and redraw without re-running the query.
 var quickChartMaxCategories = 20;
 var quickChartState = {data: null, choice: null};
+
+function renderAIChart(data, spec, explanation) {
+  var area = document.getElementById('chartArea');
+  if (!window.d3 || !data || !data.columns || !data.rows || !data.rows.length || !spec) return false;
+  var xIdx = data.columns.indexOf(spec.x || '');
+  var yIdx = data.columns.indexOf(spec.y || '');
+  if (xIdx < 0) return false;
+  var aggregation = (spec.aggregation || (yIdx >= 0 ? 'sum' : 'count')).toLowerCase();
+  if (aggregation !== 'count' && yIdx < 0) return false;
+  var type = (spec.type || 'bar').toLowerCase();
+  if (type !== 'bar' && type !== 'line' && type !== 'area') type = 'bar';
+  var points = aggregateAIChart(data, xIdx, yIdx, aggregation, type !== 'bar');
+  if (!points.length) return false;
+  var xName = data.columns[xIdx];
+  var yName = yIdx >= 0 ? data.columns[yIdx] : 'rows';
+  var title = spec.title || ((aggregation === 'count' ? 'Count' : aggregation.toUpperCase() + ' ' + yName) + ' by ' + xName);
+  area.innerHTML = '<div class="card h-100"><div class="card-body py-2">' +
+    '<div class="d-flex justify-content-between align-items-start mb-2 gap-2 flex-wrap">' +
+    '<div><h2 class="h6 mb-0"><i class="bi bi-stars text-primary"></i> AI Chart</h2>' +
+    '<span class="small text-muted">' + escHtml(title) + '</span></div>' +
+    '<span class="badge text-bg-light">' + escHtml(type) + '</span></div>' +
+    (explanation ? '<div class="small text-muted mb-2">' + escHtml(explanation) + '</div>' : '') +
+    '<div id="aiChart"></div></div></div>';
+  drawAIChart(points, type);
+  return true;
+}
+
+function aggregateAIChart(data, xIdx, yIdx, aggregation, preferTime) {
+  var groups = {}, order = [];
+  (data.rows || []).forEach(function(row, i) {
+    var raw = xIdx >= 0 ? row[xIdx] : 'Row ' + (i + 1);
+    var label = (raw === '' || raw === null || raw === undefined) ? '(empty)' : String(raw);
+    if (!groups[label]) {
+      groups[label] = {label: label, value: 0, count: 0, date: preferTime ? parseChartDate(raw) : null};
+      order.push(label);
+    }
+    groups[label].count++;
+    var n = yIdx >= 0 ? Number(row[yIdx]) : 1;
+    if (aggregation === 'count') {
+      groups[label].value = groups[label].count;
+    } else if (!isNaN(n)) {
+      groups[label].value += n;
+    }
+  });
+  var points = order.map(function(label) {
+    var p = groups[label];
+    if (aggregation === 'avg' && p.count > 0) p.value = p.value / p.count;
+    return p;
+  });
+  if (preferTime) {
+    points = points.filter(function(p) { return p.date; }).sort(function(a, b) { return a.date - b.date; });
+  } else {
+    points.sort(function(a, b) { return b.value - a.value; });
+    points = points.slice(0, quickChartMaxCategories);
+  }
+  return points;
+}
+
+function drawAIChart(points, type) {
+  var target = document.querySelector('#chartArea .card-body');
+  var width = Math.max(320, target ? target.clientWidth - 12 : 640);
+  var height = 240;
+  var margin = {top: 8, right: 12, bottom: 54, left: 54};
+  var svg = d3.select('#aiChart').append('svg').attr('viewBox', '0 0 ' + width + ' ' + height).attr('role', 'img');
+  var maxY = d3.max(points, function(d) { return d.value; }) || 0;
+  var y = d3.scaleLinear().domain([0, maxY]).nice().range([height - margin.bottom, margin.top]);
+  svg.append('g').attr('transform', 'translate(' + margin.left + ',0)').call(d3.axisLeft(y).ticks(5));
+  var allDates = points.length >= 2 && points.every(function(p) { return !!p.date; });
+  if ((type === 'line' || type === 'area') && allDates) {
+    var xTime = d3.scaleTime().domain(d3.extent(points, function(d) { return d.date; })).range([margin.left, width - margin.right]);
+    svg.append('g').attr('transform', 'translate(0,' + (height - margin.bottom) + ')').call(d3.axisBottom(xTime).ticks(5));
+    if (type === 'area') {
+      svg.append('path').datum(points).attr('fill', 'rgba(21,101,192,.18)').attr('d', d3.area().x(function(d) { return xTime(d.date); }).y0(y(0)).y1(function(d) { return y(d.value); }));
+    }
+    svg.append('path').datum(points).attr('fill', 'none').attr('stroke', '#1565c0').attr('stroke-width', 2).attr('d', d3.line().x(function(d) { return xTime(d.date); }).y(function(d) { return y(d.value); }));
+    svg.append('g').selectAll('circle').data(points).join('circle').attr('cx', function(d) { return xTime(d.date); }).attr('cy', function(d) { return y(d.value); }).attr('r', 3).attr('fill', '#1565c0').append('title').text(function(d) { return d.label + ': ' + d.value; });
+    return;
+  }
+  var x = d3.scaleBand().domain(points.map(function(d) { return d.label; })).range([margin.left, width - margin.right]).padding(0.18);
+  svg.append('g').attr('transform', 'translate(0,' + (height - margin.bottom) + ')').call(d3.axisBottom(x).tickFormat(function(d) { return String(d).slice(0, 12); })).selectAll('text').attr('transform', 'rotate(-35)').style('text-anchor', 'end');
+  svg.append('g').selectAll('rect').data(points).join('rect').attr('x', function(d) { return x(d.label); }).attr('y', function(d) { return y(Math.max(0, d.value)); }).attr('width', x.bandwidth()).attr('height', function(d) { return Math.max(0, y(0) - y(Math.max(0, d.value))); }).attr('fill', '#1565c0').append('title').text(function(d) { return d.label + ': ' + d.value; });
+}
 
 function renderQuickChart(data, choiceOverride) {
   var area = document.getElementById('chartArea');
