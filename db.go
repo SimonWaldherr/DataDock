@@ -32,6 +32,7 @@ type App struct {
 	queryTimeout      time.Duration
 	readOnlyMode      bool
 	pageSize          int
+	matchMaxRows      int
 	defaultTheme      string
 	defaultDensity    string
 	port              int

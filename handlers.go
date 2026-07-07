@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 
 	dbimporter "github.com/SimonWaldherr/datadock/internal/importer"
 	dbjobs "github.com/SimonWaldherr/datadock/internal/jobs"
+	"github.com/SimonWaldherr/datadock/internal/match"
 	"github.com/SimonWaldherr/datadock/internal/resultutil"
 	"github.com/SimonWaldherr/datadock/internal/standards"
 	"github.com/SimonWaldherr/datadock/internal/typed"
@@ -47,6 +49,7 @@ func newApp(nativeDB *tinysql.DB, sqlDB *sql.DB, tenant string, tpl *template.Te
 		queryTimeout:   60 * time.Second,
 		llmConfig:      LLMConfig{Timeout: 45 * time.Second},
 		pageSize:       defaultPageSize,
+		matchMaxRows:   defaultMatchMaxRows,
 		defaultTheme:   defaultUITheme,
 		defaultDensity: defaultUIDensity,
 	}
@@ -104,6 +107,16 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("GET /jobs", a.requireAdmin(a.jobsHandler))
 	handle("GET /migrate", a.migrationHandler)
 	handle("POST /migrate", a.requireWritable(a.runMigrationHandler))
+	handle("GET /match", a.matchHandler)
+	// Not wrapped in requireWritable: previewing candidates and exporting
+	// them as CSV are read-only and must stay available in maintenance
+	// mode, like read-only SQL. Only mode=save (which creates/inserts into
+	// a real table) is gated, inline, inside runMatchHandler.
+	handle("POST /match", a.runMatchHandler)
+	// Not wrapped in requireWritable at the route level: a plain table
+	// dropdown resubmit is read-only. Only the upload branch (creates a
+	// table) is gated, inline, inside matchTablesHandler.
+	handle("POST /match/tables", a.matchTablesHandler)
 	handle("GET /create-table", a.createTableFormHandler)
 	handle("POST /create-table", a.requireWritable(a.createTableHandler))
 	handle("GET /import", a.importFormHandler)
@@ -955,6 +968,443 @@ func (a *App) migrationPageData(r *http.Request) map[string]interface{} {
 	return data
 }
 
+// matchMethodOption describes one selectable comparison method for the
+// Matching wizard's per-field dropdown.
+type matchMethodOption struct{ Value, Label, Hint string }
+
+var matchMethodOptions = []matchMethodOption{
+	{"token_set", "Word match", "Compares the set of words, ignoring order and legal-form suffixes (GmbH, AG, Inc., ...)"},
+	{"similarity", "Similarity", "Typo-tolerant character-level similarity (Jaro-Winkler) on the normalized value"},
+	{"normalized", "Normalized exact", "Case, diacritics, punctuation, and legal-form suffixes folded away, then compared exactly"},
+	{"address", "Address (street + number)", "Splits the trailing house number and normalizes Str./Straße before comparing"},
+	{"exact_ci", "Exact (ignore case)", "Case-insensitive exact match, no other normalization"},
+	{"exact", "Exact", "Byte-for-byte identical values only"},
+	{"numeric", "Numeric (tolerance %)", "Compares two numbers within a relative tolerance"},
+}
+
+const matchDisplayLimit = 500
+
+func (a *App) matchHandler(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	data := a.matchPageData(r, q.Get("source"), q.Get("target"), q.Get("source_table"), q.Get("target_table"))
+	a.render(w, r, "match", data)
+}
+
+// matchPageData builds the Matching wizard's render data from explicit
+// connection/table selections rather than always reading r.URL.Query():
+// matchHandler (GET) passes the query string, but runMatchHandler (POST) has
+// to pass the just-submitted form values instead, since a POST to a bare
+// "/match" URL carries no query string of its own — reading query params
+// unconditionally there would silently drop the source/target selection and
+// make the field-rule editor disappear after every run.
+func (a *App) matchPageData(r *http.Request, sourceID, targetID, sourceTable, targetTable string) map[string]interface{} {
+	sessionID := sessionIDFromContext(r.Context())
+	active := a.activeConn(r.Context())
+
+	sourceID = strings.TrimSpace(sourceID)
+	if sourceID == "" && active != nil {
+		sourceID = active.ID
+	}
+	targetID = strings.TrimSpace(targetID)
+	if targetID == "" {
+		targetID = defaultConnectionID
+	}
+	sourceTable = strings.TrimSpace(sourceTable)
+	targetTable = strings.TrimSpace(targetTable)
+
+	data := map[string]interface{}{
+		"Connections":        a.conns.ListFor(sessionID),
+		"SelectedSourceID":   sourceID,
+		"SelectedTargetID":   targetID,
+		"SourceTable":        sourceTable,
+		"TargetTable":        targetTable,
+		"MatchMethods":       matchMethodOptions,
+		"AutoThresholdPct":   90,
+		"ReviewThresholdPct": 60,
+		"SaveScope":          "auto_and_review",
+		"SaveConnID":         defaultConnectionID,
+		"SaveTable":          suggestResultTableName(sourceTable, targetTable),
+	}
+
+	var sourceCols, targetCols []Column
+	if source := a.conns.GetFor(sessionID, sourceID); source != nil {
+		ctx := contextWithActiveConnection(r.Context(), source)
+		if names, err := a.matchTableNames(ctx, source); err != nil {
+			data["SourceTablesError"] = err.Error()
+		} else {
+			data["SourceTables"] = names
+		}
+		if sourceTable != "" {
+			if meta, err := a.tableMeta(ctx, sourceTable); err != nil {
+				data["SourceColumnsError"] = err.Error()
+			} else {
+				sourceCols = meta.Columns
+				data["SourceColumns"] = meta.Columns
+				data["SourceKeyColumn"] = defaultKeyColumn(meta)
+			}
+		}
+	}
+	if target := a.conns.GetFor(sessionID, targetID); target != nil {
+		ctx := contextWithActiveConnection(r.Context(), target)
+		if names, err := a.matchTableNames(ctx, target); err != nil {
+			data["TargetTablesError"] = err.Error()
+		} else {
+			data["TargetTables"] = names
+		}
+		if targetTable != "" {
+			if meta, err := a.tableMeta(ctx, targetTable); err != nil {
+				data["TargetColumnsError"] = err.Error()
+			} else {
+				targetCols = meta.Columns
+				data["TargetColumns"] = meta.Columns
+				data["TargetKeyColumn"] = defaultKeyColumn(meta)
+			}
+		}
+	}
+	if len(sourceCols) > 0 && len(targetCols) > 0 {
+		data["FieldRows"] = suggestFieldPairs(sourceCols, targetCols)
+	}
+	return data
+}
+
+// matchTableNames lists browsable tables/views for conn. Unlike
+// a.tableNames (used by the sidebar and other pages, which deliberately
+// swallows errors so a flaky connection doesn't break page rendering
+// everywhere), this surfaces the underlying error for non-tinySQL
+// connections instead of silently returning an empty list — on the
+// Matching wizard specifically, an empty "Source/Target Table" dropdown
+// with no explanation is otherwise indistinguishable from "this connection
+// genuinely has zero tables", which makes a real failure (network,
+// permissions, timeout) impossible to diagnose from the UI.
+func (a *App) matchTableNames(ctx context.Context, conn *DBConnection) ([]string, error) {
+	if conn.IsTinySQL() {
+		return a.tableNames(ctx), nil
+	}
+	objects, err := conn.tableObjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return tableObjectNames(objects), nil
+}
+
+// defaultKeyColumn guesses a sensible identifier column to key match results
+// on: "id" if present, otherwise the table's first column.
+func defaultKeyColumn(meta TableMeta) string {
+	for _, c := range meta.Columns {
+		if strings.EqualFold(c.Name, "id") {
+			return c.Name
+		}
+	}
+	if len(meta.Columns) > 0 {
+		return meta.Columns[0].Name
+	}
+	return ""
+}
+
+// suggestFieldPairs proposes a starting set of field rules by pairing each
+// source column with its best-matching (by column-name similarity) unused
+// target column, so the wizard isn't a blank form even before the user has
+// mapped anything by hand. "id"-named columns are skipped since they're
+// virtually never meaningful to fuzzy-match on across two systems.
+func suggestFieldPairs(sourceCols, targetCols []Column) []MatchFieldSpec {
+	usedTarget := make(map[string]bool, len(targetCols))
+	var out []MatchFieldSpec
+	for _, sc := range sourceCols {
+		if strings.EqualFold(sc.Name, "id") || len(out) >= 8 {
+			continue
+		}
+		normSrc := match.CanonicalizeName(sc.Name)
+		bestScore, bestName := 0.0, ""
+		for _, tc := range targetCols {
+			if usedTarget[tc.Name] || strings.EqualFold(tc.Name, "id") {
+				continue
+			}
+			if score := match.JaroWinkler(normSrc, match.CanonicalizeName(tc.Name)); score > bestScore {
+				bestScore, bestName = score, tc.Name
+			}
+		}
+		if bestName != "" && bestScore >= 0.6 {
+			usedTarget[bestName] = true
+			out = append(out, MatchFieldSpec{SourceColumn: sc.Name, TargetColumn: bestName, Method: "token_set", Weight: 1})
+		}
+	}
+	return out
+}
+
+// suggestResultTableName proposes a default crosswalk table name derived
+// from the two compared tables.
+func suggestResultTableName(sourceTable, targetTable string) string {
+	if sourceTable == "" || targetTable == "" {
+		return ""
+	}
+	base := strings.ToLower(sourceTable + "_" + targetTable + "_matches")
+	return sanitizeIdentifier(strings.ReplaceAll(base, " ", "_"))
+}
+
+// runMatchHandler drives all three Matching wizard actions from one POST:
+// mode=preview scores and displays candidates, mode=export streams them as a
+// CSV download, and mode=save persists the (optionally filtered) results
+// into a crosswalk table. Preview/export deliberately stay available during
+// maintenance mode (they're read-only); only the save branch is gated.
+func (a *App) runMatchHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	sessionID := sessionIDFromContext(r.Context())
+	mode := strings.TrimSpace(r.Form.Get("mode"))
+	if mode == "" {
+		mode = "preview"
+	}
+
+	req := MatchRequest{
+		SourceConnID:    r.Form.Get("source_id"),
+		TargetConnID:    r.Form.Get("target_id"),
+		SourceTable:     r.Form.Get("source_table"),
+		TargetTable:     r.Form.Get("target_table"),
+		SourceKeyColumn: r.Form.Get("source_key_column"),
+		TargetKeyColumn: r.Form.Get("target_key_column"),
+		AutoThreshold:   parseMatchPercent(r.Form.Get("auto_threshold"), 90),
+		ReviewThreshold: parseMatchPercent(r.Form.Get("review_threshold"), 60),
+		NoBlocking:      r.Form.Get("no_blocking") == "on",
+		Fields:          parseMatchFieldSpecs(r.Form),
+	}
+
+	saveConnID := strings.TrimSpace(r.Form.Get("save_conn_id"))
+	saveTable := strings.TrimSpace(r.Form.Get("save_table"))
+	saveScope := strings.TrimSpace(r.Form.Get("save_scope"))
+	if saveScope == "" {
+		saveScope = "auto_and_review"
+	}
+
+	data := a.matchPageData(r, req.SourceConnID, req.TargetConnID, req.SourceTable, req.TargetTable)
+	data["SourceKeyColumn"] = req.SourceKeyColumn
+	data["TargetKeyColumn"] = req.TargetKeyColumn
+	data["AutoThresholdPct"] = int(req.AutoThreshold * 100)
+	data["ReviewThresholdPct"] = int(req.ReviewThreshold * 100)
+	data["NoBlocking"] = req.NoBlocking
+	data["FieldRows"] = req.Fields
+	data["SaveConnID"] = saveConnID
+	data["SaveTable"] = saveTable
+	data["SaveScope"] = saveScope
+
+	summary, err := a.runMatch(r.Context(), sessionID, req)
+	if err != nil {
+		data["Error"] = err.Error()
+		a.render(w, r, "match", data)
+		return
+	}
+	data["Summary"] = summary
+	displayResults := summary.Results
+	if len(displayResults) > matchDisplayLimit {
+		data["Truncated"] = true
+		displayResults = displayResults[:matchDisplayLimit]
+	}
+	data["DisplayResults"] = displayResults
+
+	switch mode {
+	case "export":
+		columns := []string{"source_key", "source_label", "target_key", "target_label", "score", "status"}
+		rows := make([][]string, 0, len(summary.Results))
+		for _, res := range summary.Results {
+			rows = append(rows, []string{
+				res.SourceKey, res.SourceLabel, res.TargetKey, res.TargetLabel,
+				strconv.FormatFloat(res.Score, 'f', 4, 64), res.Status,
+			})
+		}
+		if a.writeExport(w, columns, rows, "csv", suggestResultTableName(summary.SourceTable, summary.TargetTable)) {
+			return
+		}
+		data["Error"] = "export failed"
+		a.render(w, r, "match", data)
+	case "save":
+		if a.currentReadOnlyMode() {
+			a.writeMaintenanceBlocked(w, r)
+			return
+		}
+		saveConn := a.conns.GetFor(sessionID, saveConnID)
+		if saveConn == nil {
+			data["Error"] = fmt.Sprintf("save connection %q not found", saveConnID)
+			a.render(w, r, "match", data)
+			return
+		}
+		filtered := filterMatchResultsByScope(summary.Results, saveScope)
+		written, err := a.saveMatchResults(r.Context(), saveConn, saveTable, filtered, time.Now())
+		if err != nil {
+			data["Error"] = err.Error()
+			a.render(w, r, "match", data)
+			return
+		}
+		data["Success"] = fmt.Sprintf("Saved %d match(es) to %q on %q.", written, saveTable, saveConn.Name)
+		a.render(w, r, "match", data)
+	default:
+		a.render(w, r, "match", data)
+	}
+}
+
+// parseMatchFieldSpecs reconstructs the dynamic per-row field rules from the
+// Matching form's parallel arrays (field_source[i] pairs with
+// field_target[i], field_method[i], ... at the same index i) — the standard
+// technique for a JS-managed variable-length row list without a client-side
+// framework. Rows missing either column name are dropped as blank leftovers.
+func parseMatchFieldSpecs(form url.Values) []MatchFieldSpec {
+	sources := form["field_source"]
+	targets := form["field_target"]
+	methods := form["field_method"]
+	weights := form["field_weight"]
+	tolerances := form["field_tolerance"]
+	groups := form["field_group"]
+
+	n := len(sources)
+	if len(targets) < n {
+		n = len(targets)
+	}
+	specs := make([]MatchFieldSpec, 0, n)
+	for i := 0; i < n; i++ {
+		// src/tgt are column identifiers, not free text: deliberately NOT
+		// trimmed (see canonicalColumn's doc comment) so a real column named
+		// e.g. "Name " with a trailing space still resolves correctly. Only
+		// the blank check below uses a trimmed copy.
+		src := sources[i]
+		tgt := targets[i]
+		if strings.TrimSpace(src) == "" || strings.TrimSpace(tgt) == "" {
+			continue
+		}
+		method := "token_set"
+		if i < len(methods) && strings.TrimSpace(methods[i]) != "" {
+			method = strings.TrimSpace(methods[i])
+		}
+		weight := 1.0
+		if i < len(weights) {
+			if w, err := strconv.ParseFloat(strings.TrimSpace(weights[i]), 64); err == nil && w > 0 {
+				weight = w
+			}
+		}
+		tolerance := 0.0
+		if i < len(tolerances) {
+			if t, err := strconv.ParseFloat(strings.TrimSpace(tolerances[i]), 64); err == nil {
+				tolerance = t / 100
+			}
+		}
+		group := ""
+		if i < len(groups) {
+			group = strings.TrimSpace(groups[i])
+		}
+		specs = append(specs, MatchFieldSpec{SourceColumn: src, TargetColumn: tgt, Method: method, Weight: weight, Tolerance: tolerance, Group: group})
+	}
+	return specs
+}
+
+// parseMatchPercent parses a 0-100 percentage form field into a 0..1
+// fraction, tolerating an already-fractional value and falling back to
+// defaultPct when blank or unparseable.
+func parseMatchPercent(s string, defaultPct float64) float64 {
+	s = strings.TrimSpace(s)
+	v := defaultPct
+	if s != "" {
+		if parsed, err := strconv.ParseFloat(s, 64); err == nil {
+			v = parsed
+		}
+	}
+	if v > 1 {
+		v /= 100
+	}
+	switch {
+	case v < 0:
+		return 0
+	case v > 1:
+		return 1
+	default:
+		return v
+	}
+}
+
+func filterMatchResultsByScope(results []MatchResultRow, scope string) []MatchResultRow {
+	if scope != "auto_only" {
+		return results
+	}
+	out := make([]MatchResultRow, 0, len(results))
+	for _, res := range results {
+		if res.Status == match.StatusAuto {
+			out = append(out, res)
+		}
+	}
+	return out
+}
+
+// matchUploadSentinel is the special "connection" a Matching wizard side
+// can be set to instead of a real registered connection: it tells
+// matchTablesHandler to import an uploaded file into a new tinySQL table
+// and use that as the side's effective connection/table, rather than
+// reading one from a pre-existing table. Modeled after the
+// "__datadock_"-prefixed reserved system-object names elsewhere in the
+// app, so it's extremely unlikely to collide with a real connection ID a
+// user picked.
+const matchUploadSentinel = "__upload__"
+
+// matchTablesHandler is the single submit target for the Matching wizard's
+// "2. Tables" step, covering all four combinations of "pick an existing
+// table" vs. "upload a file" for the source and target sides. A plain
+// dropdown change re-submits with no file attached (cheap, read-only); a
+// side set to matchUploadSentinel imports whatever file was attached for
+// that side (via the same importUploadedFile path as the Manage Tables
+// import tab) and resolves to (default connection, that table), exactly as
+// if the user had picked it from the dropdown to begin with.
+func (a *App) matchTablesHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(16 << 20); err != nil {
+		data := a.matchPageData(r, r.Form.Get("source_id"), r.Form.Get("target_id"), "", "")
+		data["Error"] = "Could not read upload: " + err.Error()
+		a.render(w, r, "match", data)
+		return
+	}
+	sourceID := r.Form.Get("source_id")
+	targetID := r.Form.Get("target_id")
+
+	// Uploading a file always creates a table, so — unlike a plain
+	// dropdown resubmit, which only re-reads existing metadata — that
+	// specific case must respect maintenance mode.
+	if (sourceID == matchUploadSentinel || targetID == matchUploadSentinel) && a.currentReadOnlyMode() {
+		a.writeMaintenanceBlocked(w, r)
+		return
+	}
+
+	resolvedSourceID, sourceTable, sourceErr := a.resolveMatchTableSide(r, sourceID, "source")
+	resolvedTargetID, targetTable, targetErr := a.resolveMatchTableSide(r, targetID, "target")
+
+	data := a.matchPageData(r, resolvedSourceID, resolvedTargetID, sourceTable, targetTable)
+	switch {
+	case sourceErr != nil:
+		data["Error"] = sourceErr.Error()
+	case targetErr != nil:
+		data["Error"] = targetErr.Error()
+	}
+	a.render(w, r, "match", data)
+}
+
+// resolveMatchTableSide figures out the actual connection ID and table for
+// one side ("source" or "target") of the Tables step. When connID is the
+// matchUploadSentinel, it imports the "<side>_file" upload into a new
+// tinySQL table; otherwise it passes connID through unchanged and reads the
+// table from the ordinary "<side>_table" field.
+func (a *App) resolveMatchTableSide(r *http.Request, connID, side string) (resolvedConnID, table string, err error) {
+	if connID != matchUploadSentinel {
+		return connID, strings.TrimSpace(r.Form.Get(side + "_table")), nil
+	}
+	file, header, ferr := r.FormFile(side + "_file")
+	if ferr != nil {
+		return connID, "", fmt.Errorf("choose a file to upload for the %s table", side)
+	}
+	defer file.Close()
+
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	importedTable, _, ierr := a.importUploadedFile(ctx, file, header.Filename, "", "", "auto")
+	if ierr != nil {
+		return connID, "", ierr
+	}
+	return defaultConnectionID, importedTable, nil
+}
+
 // tableRowsSorted fetches a page of rows, optionally sorted by a known column.
 // meta must already be validated (obtained from a.tableMeta). The SQL query is
 // built entirely from DB-sourced values (meta.Name, validated column names).
@@ -1300,7 +1750,6 @@ func (a *App) importFileHandler(w http.ResponseWriter, r *http.Request) {
 		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "Could not read upload: " + err.Error()})
 		return
 	}
-	table := strings.TrimSpace(r.Form.Get("table"))
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "Choose a file to import."})
@@ -1308,47 +1757,11 @@ func (a *App) importFileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	if table == "" {
-		table = tableNameFromFilename(header.Filename)
-	}
-	if !isValidIdentifier(table) {
-		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "Table name may only contain letters, digits, and underscores."})
-		return
-	}
-	table = sanitizeIdentifier(table)
-
-	content, err := io.ReadAll(io.LimitReader(file, 16<<20))
-	if err != nil {
-		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "Could not read upload: " + err.Error()})
-		return
-	}
-	format := importFormatFromName(header.Filename, r.Form.Get("format"))
-	if format == "xlsx" {
-		content, err = xlsxToCSV(content)
-		if err != nil {
-			a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "Could not read XLSX file: " + err.Error()})
-			return
-		}
-		format = "csv"
-	}
-	opts := &dbimporter.ImportOptions{
-		CreateTable:         true,
-		HeaderMode:          strings.TrimSpace(r.Form.Get("header_mode")),
-		TypeInference:       true,
-		DelimiterCandidates: nil,
-	}
-	if opts.HeaderMode == "" {
-		opts.HeaderMode = "auto"
-	}
-	if format == "tsv" {
-		opts.DelimiterCandidates = []rune{'\t'}
-		format = "csv"
-	}
 	ctx, cancel := a.withQueryTimeout(r.Context())
 	defer cancel()
-	res, err := importContent(ctx, a.nativeDB, a.tenant, table, format, bytes.NewReader(content), opts)
+	table, res, err := a.importUploadedFile(ctx, file, header.Filename, r.Form.Get("table"), r.Form.Get("format"), r.Form.Get("header_mode"))
 	if err != nil {
-		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "Import failed: " + err.Error(), "TableName": table})
+		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": err.Error(), "TableName": table})
 		return
 	}
 	a.render(w, r, "manage_table", map[string]interface{}{
@@ -1357,6 +1770,54 @@ func (a *App) importFileHandler(w http.ResponseWriter, r *http.Request) {
 		"Table":     table,
 		"Result":    res,
 	})
+}
+
+// importUploadedFile parses a multipart file upload (CSV/TSV/JSON/NDJSON/
+// XLSX/XML/YAML/GeoJSON) and imports it into a new table on the local
+// tinySQL database — the only backend file import currently supports.
+// Shared by the Manage Tables import tab (importFileHandler) and the
+// Matching wizard's "File Upload" connection option (resolveMatchTableSide,
+// called from matchTablesHandler), so both go through the exact same,
+// already-tested parsing/type-inference path.
+func (a *App) importUploadedFile(ctx context.Context, file multipart.File, filename, tableOverride, formatOverride, headerMode string) (string, *dbimporter.ImportResult, error) {
+	table := strings.TrimSpace(tableOverride)
+	if table == "" {
+		table = tableNameFromFilename(filename)
+	}
+	if !isValidIdentifier(table) {
+		return "", nil, fmt.Errorf("table name may only contain letters, digits, and underscores")
+	}
+	table = sanitizeIdentifier(table)
+
+	content, err := io.ReadAll(io.LimitReader(file, 16<<20))
+	if err != nil {
+		return table, nil, fmt.Errorf("could not read upload: %w", err)
+	}
+	format := importFormatFromName(filename, formatOverride)
+	if format == "xlsx" {
+		content, err = xlsxToCSV(content)
+		if err != nil {
+			return table, nil, fmt.Errorf("could not read XLSX file: %w", err)
+		}
+		format = "csv"
+	}
+	opts := &dbimporter.ImportOptions{
+		CreateTable:   true,
+		HeaderMode:    strings.TrimSpace(headerMode),
+		TypeInference: true,
+	}
+	if opts.HeaderMode == "" {
+		opts.HeaderMode = "auto"
+	}
+	if format == "tsv" {
+		opts.DelimiterCandidates = []rune{'\t'}
+		format = "csv"
+	}
+	res, err := importContent(ctx, a.nativeDB, a.tenant, table, format, bytes.NewReader(content), opts)
+	if err != nil {
+		return table, nil, fmt.Errorf("import failed: %w", err)
+	}
+	return table, res, nil
 }
 
 // exportFormHandler renders the Export tab of the combined table management
@@ -1993,6 +2454,7 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			LLMTimeout     string `json:"llm_timeout"`
 			ReadOnlyMode   bool   `json:"read_only_mode"`
 			PageSize       int    `json:"page_size"`
+			MatchMaxRows   int    `json:"match_max_rows"`
 			DefaultTheme   string `json:"default_theme"`
 			DefaultDensity string `json:"default_density"`
 		}
@@ -2004,6 +2466,10 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		if body.PageSize > 0 {
 			pageSize = strconv.Itoa(body.PageSize)
 		}
+		matchMaxRows := ""
+		if body.MatchMaxRows > 0 {
+			matchMaxRows = strconv.Itoa(body.MatchMaxRows)
+		}
 		settings, err := runtimeSettingsFromInput(runtimeSettingsInput{
 			Dialect:        body.Dialect,
 			ConnectTimeout: body.ConnectTimeout,
@@ -2014,6 +2480,7 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			LLMTimeout:     body.LLMTimeout,
 			ReadOnlyMode:   body.ReadOnlyMode,
 			PageSize:       pageSize,
+			MatchMaxRows:   matchMaxRows,
 			DefaultTheme:   body.DefaultTheme,
 			DefaultDensity: body.DefaultDensity,
 		})
@@ -2677,6 +3144,7 @@ type runtimeSettingsInput struct {
 	LLMTimeout     string
 	ReadOnlyMode   bool
 	PageSize       string
+	MatchMaxRows   string
 	DefaultTheme   string
 	DefaultDensity string
 }
@@ -2692,6 +3160,7 @@ func runtimeSettingsFromForm(r *http.Request) (RuntimeSettings, error) {
 		LLMTimeout:     r.Form.Get("llm_timeout"),
 		ReadOnlyMode:   r.Form.Get("read_only_mode") != "",
 		PageSize:       r.Form.Get("page_size"),
+		MatchMaxRows:   r.Form.Get("match_max_rows"),
 		DefaultTheme:   r.Form.Get("default_theme"),
 		DefaultDensity: r.Form.Get("default_density"),
 	})
@@ -2718,6 +3187,14 @@ func runtimeSettingsFromInput(in runtimeSettingsInput) (RuntimeSettings, error) 
 		}
 		pageSize = n
 	}
+	matchMaxRows := 0
+	if raw := strings.TrimSpace(in.MatchMaxRows); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			return RuntimeSettings{}, fmt.Errorf("match_max_rows must be a positive integer")
+		}
+		matchMaxRows = n
+	}
 	return RuntimeSettings{
 		Dialect:        in.Dialect,
 		ConnectTimeout: connect,
@@ -2728,6 +3205,7 @@ func runtimeSettingsFromInput(in runtimeSettingsInput) (RuntimeSettings, error) 
 		LLMTimeout:     llm,
 		ReadOnlyMode:   in.ReadOnlyMode,
 		PageSize:       pageSize,
+		MatchMaxRows:   matchMaxRows,
 		DefaultTheme:   in.DefaultTheme,
 		DefaultDensity: in.DefaultDensity,
 	}, nil

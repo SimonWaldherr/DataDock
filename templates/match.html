@@ -1,0 +1,342 @@
+{{define "match"}}
+{{template "base_start" .}}
+
+<div class="page-hdr">
+  <h1><i class="bi bi-intersect text-primary"></i>Matching</h1>
+</div>
+<p class="text-muted small">
+  Compare two tables — from the same or different connections — and find rows that likely describe the
+  same real-world entity (customers, articles, anything else) even when names, addresses, or spelling differ
+  between systems.
+</p>
+
+{{template "alert" .}}
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6 mb-3">1. Connections</h2>
+    <form method="get" action="/match" class="row g-2 align-items-end">
+      <input type="hidden" name="source_table" value="{{.SourceTable}}">
+      <input type="hidden" name="target_table" value="{{.TargetTable}}">
+      <div class="col-md-5">
+        <label class="form-label small">Source connection</label>
+        <select class="form-select form-select-sm" name="source" onchange="this.form.requestSubmit()">
+          <option value="__upload__" {{if eq .SelectedSourceID "__upload__"}}selected{{end}}>📁 File Upload</option>
+          {{range .Connections}}
+          <option value="{{.ID}}" {{if eq $.SelectedSourceID .ID}}selected{{end}}>{{.Name}} ({{.Kind}})</option>
+          {{end}}
+        </select>
+      </div>
+      <div class="col-md-5">
+        <label class="form-label small">Target connection</label>
+        <select class="form-select form-select-sm" name="target" onchange="this.form.requestSubmit()">
+          <option value="__upload__" {{if eq .SelectedTargetID "__upload__"}}selected{{end}}>📁 File Upload</option>
+          {{range .Connections}}
+          <option value="{{.ID}}" {{if eq $.SelectedTargetID .ID}}selected{{end}}>{{.Name}} ({{.Kind}})</option>
+          {{end}}
+        </select>
+      </div>
+      <div class="col-md-2">
+        <button class="btn btn-outline-secondary btn-sm w-100" title="Load the tables available on each connection">
+          <i class="bi bi-arrow-repeat me-1"></i>Load Tables
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6 mb-3">2. Tables</h2>
+    <form method="post" action="/match/tables" enctype="multipart/form-data" class="row g-2 align-items-end">
+      <input type="hidden" name="source_id" value="{{.SelectedSourceID}}">
+      <input type="hidden" name="target_id" value="{{.SelectedTargetID}}">
+      <div class="col-md-5">
+        {{if eq .SelectedSourceID "__upload__"}}
+        <label class="form-label small">Upload source file</label>
+        <input type="file" class="form-control form-control-sm" name="source_file" onchange="this.form.requestSubmit()"
+               accept=".csv,.tsv,.xlsx,.json,.ndjson,.xml,.yaml,.yml,.geojson" required>
+        <div class="form-text">Imported into the local tinySQL database on submit.</div>
+        {{else}}
+        <label class="form-label small">Source table</label>
+        <select class="form-select form-select-sm" name="source_table" onchange="this.form.requestSubmit()">
+          <option value="">Choose a table…</option>
+          {{range .SourceTables}}
+          <option value="{{.}}" {{if eq $.SourceTable .}}selected{{end}}>{{.}}</option>
+          {{end}}
+        </select>
+        {{end}}
+      </div>
+      <div class="col-md-5">
+        {{if eq .SelectedTargetID "__upload__"}}
+        <label class="form-label small">Upload target file</label>
+        <input type="file" class="form-control form-control-sm" name="target_file" onchange="this.form.requestSubmit()"
+               accept=".csv,.tsv,.xlsx,.json,.ndjson,.xml,.yaml,.yml,.geojson" required>
+        <div class="form-text">Imported into the local tinySQL database on submit.</div>
+        {{else}}
+        <label class="form-label small">Target table</label>
+        <select class="form-select form-select-sm" name="target_table" onchange="this.form.requestSubmit()">
+          <option value="">Choose a table…</option>
+          {{range .TargetTables}}
+          <option value="{{.}}" {{if eq $.TargetTable .}}selected{{end}}>{{.}}</option>
+          {{end}}
+        </select>
+        {{end}}
+      </div>
+      <div class="col-md-2">
+        <button class="btn btn-outline-secondary btn-sm w-100" title="Load the columns of both tables, or import an uploaded file">
+          <i class="bi bi-arrow-repeat me-1"></i>Continue
+        </button>
+      </div>
+    </form>
+
+    {{if .SourceTablesError}}
+    <div class="alert alert-danger small py-2 mt-2 mb-0">
+      <i class="bi bi-exclamation-triangle-fill me-1"></i>Could not list source tables: {{.SourceTablesError}}
+    </div>
+    {{end}}
+    {{if .TargetTablesError}}
+    <div class="alert alert-danger small py-2 mt-2 mb-0">
+      <i class="bi bi-exclamation-triangle-fill me-1"></i>Could not list target tables: {{.TargetTablesError}}
+    </div>
+    {{end}}
+    {{if .SourceColumnsError}}
+    <div class="alert alert-danger small py-2 mt-2 mb-0">
+      <i class="bi bi-exclamation-triangle-fill me-1"></i>Could not load source columns: {{.SourceColumnsError}}
+    </div>
+    {{end}}
+    {{if .TargetColumnsError}}
+    <div class="alert alert-danger small py-2 mt-2 mb-0">
+      <i class="bi bi-exclamation-triangle-fill me-1"></i>Could not load target columns: {{.TargetColumnsError}}
+    </div>
+    {{end}}
+  </div>
+</div>
+
+{{if and .SourceColumns .TargetColumns}}
+<div class="card">
+  <div class="card-body">
+    <form method="post" action="/match" id="matchForm">
+      <input type="hidden" name="source_id" value="{{.SelectedSourceID}}">
+      <input type="hidden" name="target_id" value="{{.SelectedTargetID}}">
+      <input type="hidden" name="source_table" value="{{.SourceTable}}">
+      <input type="hidden" name="target_table" value="{{.TargetTable}}">
+      <input type="hidden" name="mode" id="matchMode" value="preview">
+
+      <h2 class="h6 mb-3">3. Key columns</h2>
+      <div class="row g-2 mb-3">
+        <div class="col-md-6">
+          <label class="form-label small">Source key column <span class="text-muted">(identifies a row, e.g. id)</span></label>
+          <select class="form-select form-select-sm" name="source_key_column">
+            {{range .SourceColumns}}
+            <option value="{{.Name}}" {{if eq $.SourceKeyColumn .Name}}selected{{end}}>{{.Name}}</option>
+            {{end}}
+          </select>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label small">Target key column</label>
+          <select class="form-select form-select-sm" name="target_key_column">
+            {{range .TargetColumns}}
+            <option value="{{.Name}}" {{if eq $.TargetKeyColumn .Name}}selected{{end}}>{{.Name}}</option>
+            {{end}}
+          </select>
+        </div>
+      </div>
+
+      <h2 class="h6 mb-3">4. Fields to compare</h2>
+      <div class="table-responsive mb-2">
+        <table class="table table-sm align-middle">
+          <thead>
+            <tr>
+              <th style="width:19%">Source column</th>
+              <th style="width:19%">Target column</th>
+              <th style="width:22%">Method</th>
+              <th style="width:9%">Weight</th>
+              <th style="width:10%">Tolerance %</th>
+              <th style="width:18%">Group</th>
+              <th style="width:3%"></th>
+            </tr>
+          </thead>
+          <tbody id="fieldRowsBody"></tbody>
+        </table>
+      </div>
+      <button type="button" class="btn btn-outline-secondary btn-sm mb-3" onclick="addFieldRow()">
+        <i class="bi bi-plus me-1"></i>Add field
+      </button>
+      <div class="form-text mb-3">
+        <strong>Word match</strong> and <strong>Similarity</strong> already ignore case, punctuation, and common
+        legal-form suffixes (GmbH, AG, Inc., Ltd., ...), so "ACME Trading GmbH" and "acme trading" compare as equal.
+        Tolerance % only applies to the Numeric method.
+        <br>
+        <strong>Group:</strong> give two or more fields the exact same group name to combine them into a single
+        composite key — e.g. <em>street</em> + <em>postal code</em>, or <em>manufacturer</em> + <em>part number</em>.
+        A strong match on one member of a group can never make up for a mismatch on another: the same street name
+        in a different city, or the same part number from a different manufacturer, correctly scores as no match.
+        Leave empty for fields that should count on their own.
+      </div>
+
+      <h2 class="h6 mb-3">5. Thresholds</h2>
+      <div class="row g-2 mb-3">
+        <div class="col-md-3">
+          <label class="form-label small">Auto-match at (%)</label>
+          <input type="number" min="1" max="100" class="form-control form-control-sm" name="auto_threshold" value="{{.AutoThresholdPct}}">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label small">Review at (%)</label>
+          <input type="number" min="1" max="100" class="form-control form-control-sm" name="review_threshold" value="{{.ReviewThresholdPct}}">
+        </div>
+        <div class="col-md-6 d-flex align-items-end">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="no_blocking" id="noBlocking" {{if .NoBlocking}}checked{{end}}>
+            <label class="form-check-label small" for="noBlocking">
+              Compare every row against every row (skip blocking; small tables only)
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <h2 class="h6 mb-3">6. Save matches (optional)</h2>
+      <div class="row g-2 mb-3">
+        <div class="col-md-4">
+          <label class="form-label small">Save to connection</label>
+          <select class="form-select form-select-sm" name="save_conn_id">
+            {{range .Connections}}
+            <option value="{{.ID}}" {{if eq $.SaveConnID .ID}}selected{{end}}>{{.Name}} ({{.Kind}})</option>
+            {{end}}
+          </select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label small">Result table name</label>
+          <input type="text" class="form-control form-control-sm" name="save_table" value="{{.SaveTable}}">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label small">Which matches to save</label>
+          <select class="form-select form-select-sm" name="save_scope">
+            <option value="auto_only" {{if eq .SaveScope "auto_only"}}selected{{end}}>Auto-matches only</option>
+            <option value="auto_and_review" {{if eq .SaveScope "auto_and_review"}}selected{{end}}>Auto + review candidates</option>
+          </select>
+        </div>
+        <div class="form-text">
+          Repeated runs append to the same table (with a <code>matched_at</code> timestamp) instead of overwriting it.
+        </div>
+      </div>
+
+      <div class="d-flex gap-2">
+        <button type="submit" class="btn btn-primary btn-sm" onclick="document.getElementById('matchMode').value='preview'">
+          <i class="bi bi-play-fill me-1"></i>Run Preview
+        </button>
+        <button type="submit" class="btn btn-outline-secondary btn-sm" onclick="document.getElementById('matchMode').value='export'">
+          <i class="bi bi-filetype-csv me-1"></i>Run &amp; Export CSV
+        </button>
+        <button type="submit" class="btn btn-outline-success btn-sm" onclick="document.getElementById('matchMode').value='save'">
+          <i class="bi bi-save me-1"></i>Run &amp; Save as Table
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+{{end}}
+
+{{with .Summary}}
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6 mb-3">Results</h2>
+    <div class="row g-3 small mb-3">
+      <div class="col-6 col-md-2"><div class="metric"><div class="text-muted">Source rows</div><div class="fs-5 fw-semibold">{{.TotalSource}}</div></div></div>
+      <div class="col-6 col-md-2"><div class="metric"><div class="text-muted">Target rows</div><div class="fs-5 fw-semibold">{{.TotalTarget}}</div></div></div>
+      <div class="col-6 col-md-2"><div class="metric"><div class="text-muted">Auto matches</div><div class="fs-5 fw-semibold text-success">{{.AutoCount}}</div></div></div>
+      <div class="col-6 col-md-2"><div class="metric"><div class="text-muted">Review candidates</div><div class="fs-5 fw-semibold text-warning">{{.ReviewCount}}</div></div></div>
+      <div class="col-6 col-md-2"><div class="metric"><div class="text-muted">Unmatched source rows</div><div class="fs-5 fw-semibold">{{.UnmatchedSources}}</div></div></div>
+      <div class="col-6 col-md-2"><div class="metric"><div class="text-muted">Blocking</div><div class="fs-5 fw-semibold">{{if .BlockingUsed}}On{{else}}Off{{end}}</div></div></div>
+    </div>
+
+    {{if $.Truncated}}
+    <div class="alert alert-warning small py-2">
+      Showing the first {{len $.DisplayResults}} of {{len .Results}} candidates. Use "Run &amp; Export CSV" to get all of them.
+    </div>
+    {{end}}
+
+    <div class="table-responsive">
+      <table class="table table-sm table-hover">
+        <thead>
+          <tr>
+            <th>Source</th>
+            <th>Target</th>
+            <th>Score</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range $.DisplayResults}}
+          <tr>
+            <td><div class="fw-semibold">{{.SourceLabel}}</div><div class="text-muted small">key: {{.SourceKey}}</div></td>
+            <td><div class="fw-semibold">{{.TargetLabel}}</div><div class="text-muted small">key: {{.TargetKey}}</div></td>
+            <td>{{.ScorePct}}%</td>
+            <td>
+              {{if eq .Status "auto"}}<span class="badge text-bg-success">auto</span>
+              {{else}}<span class="badge text-bg-warning">review</span>{{end}}
+            </td>
+          </tr>
+          {{else}}
+          <tr><td colspan="4" class="text-muted">No candidates at or above the review threshold.</td></tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{{end}}
+
+<script>
+var SOURCE_COLUMNS = [{{range .SourceColumns}}"{{.Name}}",{{end}}];
+var TARGET_COLUMNS = [{{range .TargetColumns}}"{{.Name}}",{{end}}];
+var MATCH_METHODS = [{{range .MatchMethods}}{value:"{{.Value}}",label:"{{.Label}}",hint:"{{.Hint}}"},{{end}}];
+var INITIAL_FIELD_ROWS = [{{range .FieldRows}}{source:"{{.SourceColumn}}",target:"{{.TargetColumn}}",method:"{{.Method}}",weight:{{.Weight}},tolerance:{{.Tolerance}},group:"{{.Group}}"},{{end}}];
+
+function mescape(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+function columnOptionsHTML(list, selected) {
+  return list.map(function (name) {
+    return '<option value="' + mescape(name) + '"' + (name === selected ? ' selected' : '') + '>' + mescape(name) + '</option>';
+  }).join('');
+}
+function methodOptionsHTML(selected) {
+  return MATCH_METHODS.map(function (m) {
+    return '<option value="' + m.value + '" title="' + mescape(m.hint) + '"' + (m.value === selected ? ' selected' : '') + '>' + mescape(m.label) + '</option>';
+  }).join('');
+}
+function addFieldRow(row) {
+  row = row || {};
+  var tbody = document.getElementById('fieldRowsBody');
+  var tr = document.createElement('tr');
+  tr.innerHTML =
+    '<td><select class="form-select form-select-sm" name="field_source">' + columnOptionsHTML(SOURCE_COLUMNS, row.source) + '</select></td>' +
+    '<td><select class="form-select form-select-sm" name="field_target">' + columnOptionsHTML(TARGET_COLUMNS, row.target) + '</select></td>' +
+    '<td><select class="form-select form-select-sm" name="field_method">' + methodOptionsHTML(row.method || 'token_set') + '</select></td>' +
+    '<td><input type="number" step="0.1" min="0.1" class="form-control form-control-sm" name="field_weight" value="' + (row.weight || 1) + '"></td>' +
+    '<td><input type="number" step="1" min="0" max="100" class="form-control form-control-sm" name="field_tolerance" value="' + Math.round((row.tolerance || 0) * 100) + '"></td>' +
+    '<td><input type="text" class="form-control form-control-sm" name="field_group" placeholder="optional" value="' + mescape(row.group || '') + '"></td>' +
+    '<td><button type="button" class="btn btn-outline-danger btn-sm" onclick="removeFieldRow(this)" title="Remove field"><i class="bi bi-dash"></i></button></td>';
+  tbody.appendChild(tr);
+}
+function removeFieldRow(btn) {
+  var rows = document.querySelectorAll('#fieldRowsBody tr');
+  if (rows.length <= 1) return;
+  btn.closest('tr').remove();
+}
+document.addEventListener('DOMContentLoaded', function () {
+  if (document.getElementById('fieldRowsBody')) {
+    if (INITIAL_FIELD_ROWS.length === 0) {
+      addFieldRow();
+    } else {
+      INITIAL_FIELD_ROWS.forEach(addFieldRow);
+    }
+  }
+});
+</script>
+
+{{template "base_end" .}}
+{{end}}

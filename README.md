@@ -29,6 +29,7 @@ administrator-managed shared connections or per-user credentials.
 | **Connection Manager** | Register managed database connections and switch the active connection from the GUI |
 | **Session-scoped Active Connection** | Each browser session can use a different active connection |
 | **Table Migration** | Copy a table from one registered connection into another, with optional target table creation |
+| **Matching** | Compare two tables — from the same or different connections, or an uploaded CSV/XLSX file — and find rows that likely describe the same entity (customers, articles, or anything else) despite differing spelling, casing, legal-form suffixes, or address abbreviations; save confirmed matches as a queryable crosswalk table or export as CSV |
 | **LLM Assistant** | Optional OpenAI-compatible assistant for SQL generation, schema context preview, and natural-language explanations |
 | **Runtime Admin Settings** | Dialect, timeouts, LLM provider, page size, and default theme/density can be changed from the Admin UI or API without YAML/JSON config files |
 | **Admin Catalog View** | Authenticated Admin sessions can see DataDock/system tables such as `__datadock_settings`; normal sessions keep them hidden |
@@ -167,6 +168,7 @@ In addition to dialect/timeouts/LLM provider settings, Admin also controls:
 | Setting | Description |
 |---|---|
 | `page_size` | Rows per page in the datasheet view (default `50`, max `1000`) |
+| `match_max_rows` | Rows per side, per Matching run, the interactive matcher will load into memory (default `2,000,000`, max `50,000,000`) — raise this for large master-data tables |
 | `default_theme` | Fallback UI theme for browsers without a saved preference (`workbench`, `midnight`, `forest`, `contrast`, `solaris`, `xp`, `classic2000`, `kde`) |
 | `default_density` | Fallback table density for browsers without a saved preference (`comfortable`, `compact`) |
 | `read_only_mode` | Maintenance mode: blocks record edits, table/DDL changes, imports, migrations, and non-`SELECT` SQL editor statements for every user until turned off |
@@ -191,6 +193,7 @@ curl -X POST http://localhost:8080/api/admin/settings \
     "llm_model": "",
     "llm_timeout": "45s",
     "page_size": 50,
+    "match_max_rows": 2000000,
     "default_theme": "workbench",
     "default_density": "comfortable",
     "read_only_mode": false
@@ -256,6 +259,72 @@ connection. The first implementation supports:
 
 It does not yet preserve indexes, foreign keys, triggers, views, generated
 columns, or table-specific permissions.
+
+## Matching
+
+Open **Matching** to compare two tables — from the same or different
+registered connections, e.g. two customer master-data exports from different
+ERP systems — and find rows that likely describe the same real-world entity.
+The feature is intentionally domain-agnostic: nothing about it is specific to
+customers, so the same wizard works for articles, contacts, or any other
+entity type.
+
+The wizard walks through:
+
+1. choosing a source and target connection (any two registered connections,
+   including two different database engines) and a table on each — or
+   picking the special **File Upload** entry instead of a connection, which
+   swaps that side's table dropdown for a file picker: choosing a
+   CSV/TSV/JSON/XLSX/XML/YAML/GeoJSON file imports it into the local tinySQL
+   database (via the same import path as **Manage Tables → Import**) and
+   uses it immediately as that side's table, no separate import step and no
+   loss of whatever table is already selected on the other side,
+2. picking a key column on each side (used to identify a row in the results),
+3. mapping the columns to compare, each with its own comparison method and
+   weight,
+4. auto-match / review score thresholds and an optional "compare every row"
+   mode for small tables,
+5. running a preview, exporting the candidates as CSV, or saving them into a
+   new/append-only crosswalk table (`source_key`, `source_label`,
+   `target_key`, `target_label`, `score`, `status`, `matched_at`) on any
+   registered connection — an ordinary table, immediately browsable,
+   queryable, and exportable like any other.
+
+Comparison methods, applied per field pair:
+
+| Method | Description |
+|---|---|
+| `exact` | Byte-for-byte identical values |
+| `exact_ci` | Case-insensitive exact match |
+| `normalized` | Case, diacritics, punctuation, and common company legal-form suffixes (GmbH, AG, Inc., Ltd., ...) folded away, then compared exactly |
+| `similarity` | Typo-tolerant Jaro-Winkler similarity on the normalized value |
+| `token_set` | Word-set comparison, ignoring word order — "Elektro Müller" matches "Müller Elektro" |
+| `address` | Splits a free-text "street + house number" column and normalizes the German Str./Straße abbreviation before scoring |
+| `numeric` | Compares two numbers within a relative tolerance |
+
+To stay fast without loading a full cross join, non-exact string fields are
+used to build a token-based blocking index (candidates share at least one
+normalized word), which can be disabled for small tables to guarantee full
+recall at the cost of comparing every row against every row.
+
+Matching runs synchronously within one request and loads both sides fully
+into memory, bounded by the admin-configurable `match_max_rows` setting
+(default 2,000,000 rows per side — see [Admin Settings](#admin-settings)).
+Raise it if a table legitimately has more rows than that; there is no
+background-job variant of Matching yet.
+
+### Composite keys (field groups)
+
+A single field is often not a reliable identifier on its own: the same street
+name exists in many cities, and the same manufacturer part number can exist
+at a different manufacturer. Giving two or more fields the exact same
+**Group** name combines them into one composite key — e.g. `street` +
+`postal_code`, or `manufacturer` + `part_number` — scored as the *minimum* of
+their individual scores rather than a weighted average. A strong match on one
+member can never make up for a mismatch on another: "Hauptstraße 3" matching
+perfectly in the wrong city, or a part number matching for the wrong
+manufacturer, correctly scores the whole group as no match. Fields without a
+Group continue to count individually, exactly as before this existed.
 
 ## LLM Assistant
 
@@ -347,9 +416,12 @@ cmd/datadock/
 ├── settings.go      # Runtime settings stored in the embedded tinySQL DB
 ├── llm.go           # OpenAI-compatible assistant client and workflows
 ├── migration.go     # Table-copy migration between managed connections
+├── matching.go      # Cross-table/cross-connection record matching orchestration
 ├── rag.go           # Schema retrieval and result profiling for LLM context
 ├── handlers.go      # HTTP route handlers
 ├── main_test.go     # HTTP integration tests
+├── internal/
+│   └── match/       # Domain-agnostic normalization, similarity, and matching engine
 ├── static/
 │   └── app.js       # Minimal client-side helpers
 └── templates/
@@ -362,6 +434,7 @@ cmd/datadock/
     ├── jobs.html    # Job overview and manual execution
     ├── connections.html  # Managed connection UI
     ├── migration.html    # Table migration UI
+    ├── match.html         # Record matching wizard
     └── create_table.html # Table design wizard
 ```
 
@@ -407,6 +480,9 @@ cmd/datadock/
 | `POST` | `/api/jobs/run` | Run a registered job manually (Admin session) |
 | `GET` | `/migrate` | Table migration wizard |
 | `POST` | `/migrate` | Run table migration |
+| `GET` | `/match` | Record matching wizard |
+| `POST` | `/match` | Run a match (`mode=preview\|export\|save`) |
+| `POST` | `/match/tables` | Submit target for the Tables step: resolves each side's connection/table, importing an uploaded file first if that side is set to "File Upload" |
 | `GET` | `/create-table` | Table designer |
 | `POST` | `/create-table` | Create table |
 | `GET` | `/export` | Export query form |
@@ -421,7 +497,12 @@ in Admin, returning `503 Service Unavailable`. Session-local connection changes,
 Admin settings, the maintenance toggle itself, login/logout, and read-only query
 execution stay available so an administrator can turn maintenance mode off again
 and users can continue inspecting data with `SELECT`, `WITH`, `SHOW`, or
-`EXPLAIN`.
+`EXPLAIN`. `POST /match` is a partial exception: previewing candidates and
+exporting them as CSV are read-only and stay available, like the SQL editor's
+read-only queries; only `mode=save` (which creates/inserts into a real table)
+is blocked. `POST /match/tables` follows the same pattern: a plain table
+dropdown resubmit is read-only and stays available, but resolving a "File
+Upload" side (which creates a table) is blocked, like other imports.
 
 ### JSON API
 

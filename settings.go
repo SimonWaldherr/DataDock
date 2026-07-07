@@ -17,6 +17,17 @@ const (
 	defaultPageSize  = 50
 	defaultUITheme   = "workbench"
 	defaultUIDensity = "comfortable"
+	// defaultMatchMaxRows bounds how many rows per side the Matching
+	// feature (see matching.go) will load into memory for one synchronous
+	// request. 2,000,000 comfortably covers typical master-data tables
+	// (customers, articles) with room to spare; admins can raise it further
+	// in Admin Settings for larger tables, at the cost of more memory and
+	// request time per match run.
+	defaultMatchMaxRows = 2_000_000
+	// maxMatchMaxRows is a sanity ceiling against fat-finger settings input
+	// (an extra zero) causing the server to try to load an unreasonable
+	// number of rows into memory at once.
+	maxMatchMaxRows = 50_000_000
 )
 
 var allowedUIThemes = []string{"workbench", "midnight", "forest", "contrast", "solaris", "xp", "classic2000", "kde"}
@@ -32,6 +43,7 @@ type RuntimeSettings struct {
 	LLMTimeout        time.Duration
 	ReadOnlyMode      bool
 	PageSize          int
+	MatchMaxRows      int
 	DefaultTheme      string
 	DefaultDensity    string
 	Port              int
@@ -50,6 +62,7 @@ type RuntimeSettingsView struct {
 	LLMAPIKeyDisplay string `json:"llm_api_key_display"`
 	ReadOnlyMode     bool   `json:"read_only_mode"`
 	PageSize         int    `json:"page_size"`
+	MatchMaxRows     int    `json:"match_max_rows"`
 	DefaultTheme     string `json:"default_theme"`
 	DefaultDensity   string `json:"default_density"`
 	Port             int    `json:"port"`
@@ -97,6 +110,15 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 	if s.PageSize > 1000 {
 		return fmt.Errorf("page size must not exceed 1000")
 	}
+	if s.MatchMaxRows < 0 {
+		return fmt.Errorf("match max rows must not be negative")
+	}
+	if s.MatchMaxRows == 0 {
+		s.MatchMaxRows = defaultMatchMaxRows
+	}
+	if s.MatchMaxRows > maxMatchMaxRows {
+		return fmt.Errorf("match max rows must not exceed %d", maxMatchMaxRows)
+	}
 	if strings.TrimSpace(s.DefaultTheme) == "" {
 		s.DefaultTheme = defaultUITheme
 	} else if !isAllowedValue(s.DefaultTheme, allowedUIThemes) {
@@ -133,6 +155,7 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 	a.llm = llm
 	a.readOnlyMode = s.ReadOnlyMode
 	a.pageSize = s.PageSize
+	a.matchMaxRows = s.MatchMaxRows
 	a.defaultTheme = s.DefaultTheme
 	a.defaultDensity = s.DefaultDensity
 	a.port = s.Port
@@ -155,6 +178,7 @@ func (a *App) saveRuntimeSettings(ctx context.Context) error {
 		"llm_timeout":         s.LLMTimeout.String(),
 		"read_only_mode":      strconv.FormatBool(s.ReadOnlyMode),
 		"page_size":           strconv.Itoa(s.PageSize),
+		"match_max_rows":      strconv.Itoa(s.MatchMaxRows),
 		"default_theme":       s.DefaultTheme,
 		"default_density":     s.DefaultDensity,
 		"port":                strconv.Itoa(s.Port),
@@ -327,6 +351,7 @@ func (a *App) currentRuntimeSettings() RuntimeSettings {
 		LLMTimeout:        a.llmConfig.Timeout,
 		ReadOnlyMode:      a.readOnlyMode,
 		PageSize:          a.pageSize,
+		MatchMaxRows:      a.matchMaxRows,
 		DefaultTheme:      a.defaultTheme,
 		DefaultDensity:    a.defaultDensity,
 		Port:              a.port,
@@ -349,6 +374,7 @@ func (a *App) runtimeSettingsView() RuntimeSettingsView {
 		LLMAPIKeyDisplay: maskedSecret(a.llmConfig.APIKey),
 		ReadOnlyMode:     a.readOnlyMode,
 		PageSize:         a.pageSize,
+		MatchMaxRows:     a.matchMaxRows,
 		DefaultTheme:     a.defaultTheme,
 		DefaultDensity:   a.defaultDensity,
 		Port:             a.port,
@@ -385,6 +411,15 @@ func (a *App) currentPageSize() int {
 		return defaultPageSize
 	}
 	return a.pageSize
+}
+
+func (a *App) currentMatchMaxRows() int {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	if a.matchMaxRows <= 0 {
+		return defaultMatchMaxRows
+	}
+	return a.matchMaxRows
 }
 
 func (a *App) currentDefaultTheme() string {
@@ -454,6 +489,12 @@ func runtimeSettingsFromStoredValues(values map[string]string) (RuntimeSettings,
 			pageSize = n
 		}
 	}
+	matchMaxRows := defaultMatchMaxRows
+	if raw := strings.TrimSpace(values["match_max_rows"]); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			matchMaxRows = n
+		}
+	}
 	readOnlyMode, _ := strconv.ParseBool(values["read_only_mode"])
 	defaultTheme := strings.TrimSpace(values["default_theme"])
 	if defaultTheme == "" {
@@ -479,6 +520,7 @@ func runtimeSettingsFromStoredValues(values map[string]string) (RuntimeSettings,
 		LLMTimeout:        llmTimeout,
 		ReadOnlyMode:      readOnlyMode,
 		PageSize:          pageSize,
+		MatchMaxRows:      matchMaxRows,
 		DefaultTheme:      defaultTheme,
 		DefaultDensity:    defaultDensity,
 		Port:              port,

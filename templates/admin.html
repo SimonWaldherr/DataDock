@@ -139,6 +139,11 @@
         <label class="form-label small text-muted">Datasheet Page Size</label>
         <input class="form-control form-control-sm" type="number" min="1" max="1000" name="page_size" value="{{.Settings.PageSize}}" placeholder="50">
       </div>
+      <div class="col-md-3">
+        <label class="form-label small text-muted">Matching Max Rows/Table</label>
+        <input class="form-control form-control-sm" type="number" min="1" max="50000000" name="match_max_rows" value="{{.Settings.MatchMaxRows}}" placeholder="2000000">
+        <div class="form-text">Per side, per Matching run. Raise for large master-data tables.</div>
+      </div>
 
       <div class="col-12 admin-section-title mt-2">Appearance</div>
       <div class="col-md-3">
