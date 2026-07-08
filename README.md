@@ -1,14 +1,15 @@
 # DataDock
 
-DataDock is a server-side web GUI starting point for a future standalone SQL
-database manager. It was split from a tinySQL example, keeps the implementation
-self-contained, and now includes a local connection layer so it can grow toward
-a separate repository without broad changes to the parent project's `internal`
-packages.
+DataDock is a SQL-first web workspace for browsing databases, importing messy
+files, matching records, visualizing query results, and exporting data in
+analysis-friendly formats. It starts with an embedded tinySQL database and can
+connect to SQLite, PostgreSQL, MariaDB/MySQL, and Microsoft SQL Server.
 
-The near-term target is a browser-based database manager for tinySQL, SQLite,
-PostgreSQL, MariaDB/MySQL, and Microsoft SQL Server with two credential modes:
-administrator-managed shared connections or per-user credentials.
+The project is intentionally self-contained: the browser UI, import/export
+pipeline, matching tools, local scheduler, and optional OpenAI-compatible LLM
+assistant run from one Go process. This makes it useful as a local data dock for
+CSV/JSON/office/geospatial files, while still leaving a path toward a standalone
+database manager with administrator-managed or per-user credentials.
 
 ## Features
 
@@ -20,7 +21,7 @@ administrator-managed shared connections or per-user credentials.
 | **Table Design** | Create new tables with a visual column designer (INT, FLOAT, TEXT, BOOL) |
 | **Broad File Import** | Import HTML tables, SQLite databases, MessagePack/CBOR/BSON, iCalendar, vCard, and file manifests for Parquet/Arrow/Feather/DuckDB |
 | **Map Data Import** | Import GeoJSON, GeoPackage, GPX, KML, OSM XML/PBF, Shapefile ZIPs, MBTiles indexes, and JSON/NDJSON routing graphs into queryable tables with GeoJSON geometry columns |
-| **Export** | Download whole tables/views or SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, XML, HTML, SQLite, GeoJSON, GeoJSON summaries, KML, GPX, or Shapefile ZIP |
+| **Export** | Download whole tables/views or SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, NDJSON, XML, HTML, SQLite, GeoJSON, GeoJSON summaries, KML, GPX, or Shapefile ZIP |
 | **Drop Table** | Delete any table with a one-click confirmation |
 | **SQL Editor** | Monaco-enhanced SQL editor with SQL syntax highlighting and textarea fallback; selected text can be executed with Run, export, Ctrl+Enter, or F5 |
 | **Example Queries & Prompts** | One-click sample SQL queries and natural-language prompts against the demo dataset, so the editor and LLM assistant can be tried immediately with zero setup; picking an example query auto-imports the demo dataset first if it isn't loaded yet |
@@ -56,6 +57,43 @@ Credential handling is intentionally still simple: managed connections are
 process-local and shared by all users, but the active connection is scoped to
 the browser session. Authentication, secret storage, and per-user credentials
 are the next larger product boundary.
+
+## Import And Export
+
+Imports currently target the local embedded tinySQL database. That keeps file
+normalization predictable and lets uploaded data immediately participate in SQL
+queries, matching, maps, exports, and migration into another registered
+connection.
+
+Supported import families:
+
+- **Tabular and structured:** CSV, TSV, JSON, NDJSON, YAML, XML, multi-sheet
+  XLSX, HTML tables, SQLite tables/views, MessagePack, CBOR, BSON, iCalendar,
+  and vCard.
+- **Columnar manifests:** Parquet, Arrow, Feather, and DuckDB files are recorded
+  as file-level manifest rows. Full row-group/page decoding is intentionally not
+  bundled yet.
+- **Map data:** GeoJSON, GeoPackage, GPX, KML, OSM XML, OSM PBF, Shapefile ZIP,
+  MBTiles metadata/tile indexes, and JSON/NDJSON routing graphs.
+
+Exports are available from table/view pages, the Manage Tables export tab, and
+`POST /api/export`. Standard table exports include CSV, Excel-safe CSV, TSV,
+XLSX, JSON, NDJSON, XML, HTML, and SQLite. Map-aware exports derive geometries
+from a GeoJSON geometry column or latitude/longitude columns and can output
+GeoJSON, GeoJSON summary JSON, KML, GPX, or Shapefile ZIP.
+
+GeoJSON-derived exports support native, mapshaper-like options for practical
+workflows: `explode`, `simplify`, `bbox`, `fields`, and `drop`. Topology-heavy
+operations such as robust clip/erase/dissolve still belong behind a dedicated
+geometry engine or optional mapshaper CLI integration. Shapefile exports are
+limited by the format to one geometry type per ZIP; DataDock writes the first
+compatible geometry family it finds.
+
+With tinySQL v0.15.x, map tables can also be queried directly with native geo
+functions. `GEO_POINT`/`ST_MAKEPOINT` creates GeoJSON points, `ST_X`/`ST_Y`
+extract longitude/latitude, `GEO_DISTANCE`/`ST_DISTANCE` computes haversine
+distance in meters, and `GEO_WITHIN_BBOX` / `GEO_DWITHIN` cover common spatial
+filters.
 
 ## Quick Start
 
@@ -124,9 +162,9 @@ enable it where operational stdout access is appropriately restricted.
 The SQL editor supports multiple result views per tab: table, live logs, cards,
 JSON/XML trees, pivot summaries, column profiles, schema graph, and notebook.
 Query share links include the active SQL, tab title, view mode, live settings,
-and log filter. `-watch-dir` imports CSV/TSV/JSON/NDJSON/XML/YAML/XLSX/HTML/SQLite/MessagePack/CBOR/BSON/iCalendar/vCard/GeoJSON/GeoPackage/GPX/KML/OSM XML/PBF/Shapefile ZIP/MBTiles/RG
-files on startup and whenever their size or modification time changes; the table
-name is derived from the filename and refreshed on update.
+and log filter. `-watch-dir` imports supported structured and map files on
+startup and whenever their size or modification time changes; the table name is
+derived from the filename and refreshed on update.
 
 ## Admin Settings
 
@@ -219,9 +257,12 @@ datadock uses stable web and data interchange standards for external integration
 - Parquet, Arrow, Feather, and DuckDB imports currently create file-level manifest rows rather than fully decoding row groups/pages.
 - GeoJSON exports use RFC 7946 FeatureCollection output where geometry or lat/lon columns are present.
 - Map data imports normalize GeoJSON/GeoPackage/GPX/KML/OSM/Shapefile geometries into GeoJSON text columns; MBTiles imports metadata and tile indexes; RG imports JSON/NDJSON routing graph nodes and edges.
-- DataDock tracks tinySQL v0.14.x and exposes its read-only PRAGMA support,
+- DataDock tracks tinySQL v0.15.x and exposes its read-only PRAGMA support,
   result-producing stored procedure calls in the SQL editor, and native agent
   context generation for the local tinySQL connection.
+- tinySQL geo functions such as `ST_MAKEPOINT`, `ST_X`, `ST_Y`,
+  `ST_DISTANCE`, `GEO_DWITHIN`, and `GEO_WITHIN_BBOX` work in the SQL editor
+  against imported map tables.
 - tinySQL-facing error classes can use ISO/IEC 9075 SQLSTATE helpers exposed by
   the public tinySQL API.
 
@@ -284,10 +325,10 @@ The wizard walks through:
    including two different database engines) and a table on each — or
    picking the special **File Upload** entry instead of a connection, which
    swaps that side's table dropdown for a file picker: choosing a
-   CSV/TSV/JSON/XLSX/XML/YAML/HTML/SQLite/MessagePack/CBOR/BSON/iCalendar/vCard/GeoJSON/GeoPackage/GPX/KML/OSM/Shapefile ZIP/MBTiles/RG file imports it into the local tinySQL
-   database (via the same import path as **Manage Tables → Import**) and
-   uses it immediately as that side's table, no separate import step and no
-   loss of whatever table is already selected on the other side,
+   supported structured or map file imports it into the local tinySQL database
+   (via the same import path as **Manage Tables → Import**) and uses it
+   immediately as that side's table, no separate import step and no loss of
+   whatever table is already selected on the other side,
 2. picking a key column on each side (used to identify a row in the results),
 3. mapping the columns to compare, each with its own comparison method and
    weight,
@@ -467,7 +508,7 @@ cmd/datadock/
 | `POST` | `/drop-table/{table}` | Drop table |
 | `GET` | `/query` | SQL editor page |
 | `POST` | `/api/query` | Execute SQL (JSON API) |
-| `POST` | `/api/export` | Download SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, XML, HTML, SQLite, GeoJSON, KML, GPX, or Shapefile ZIP |
+| `POST` | `/api/export` | Download SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, NDJSON, XML, HTML, SQLite, GeoJSON, GeoJSON summary, KML, GPX, or Shapefile ZIP |
 | `GET` | `/api/schema` | Return the compact active-connection schema snapshot used for LLM context |
 | `GET` | `/api/tinysql/agent-context?max_tables=12&max_chars=6000` | Return tinySQL's native agent-context profile for the local tinySQL connection |
 | `GET` | `/api/catalog` | Return async catalog roots for non-tinySQL connections |

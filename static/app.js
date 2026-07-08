@@ -1015,6 +1015,12 @@ var sampleQueries = [
     'SELECT name, category, lon, lat\nFROM datadock_demo_locations\nORDER BY name' },
   { label: 'GeoJSON geometry export sample', viewMode: 'map', sql:
     'SELECT name, category, geometry\nFROM datadock_demo_locations\nORDER BY name' },
+  { label: 'tinySQL geo functions', viewMode: 'map', sql:
+    'SELECT name, category, ST_X(geometry) AS lon, ST_Y(geometry) AS lat,\n' +
+    "       ST_DISTANCE(geometry, ST_MakePoint(11.5755, 48.1372)) AS meters_from_munich\n" +
+    'FROM datadock_demo_locations\n' +
+    'WHERE GEO_WITHIN_BBOX(geometry, 5.5, 47.0, 15.5, 55.5)\n' +
+    'ORDER BY meters_from_munich' },
   { label: 'JSON/XML payload tree', viewMode: 'json', sql:
     'SELECT source, external_id, imported_at, payload_json, payload_xml\nFROM datadock_demo_payloads\nORDER BY imported_at' },
   { label: 'XML payload tree', viewMode: 'xml', sql:

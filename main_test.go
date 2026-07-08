@@ -1135,7 +1135,7 @@ func TestAPIQueryHandlerWindow(t *testing.T) {
 	}
 }
 
-func TestTinySQLV014PragmaAndAgentContext(t *testing.T) {
+func TestTinySQLPragmaAndAgentContext(t *testing.T) {
 	app := newTestApp(t)
 	if _, err := app.sqlDB.Exec("CREATE TABLE vals (id INT, name TEXT)"); err != nil {
 		t.Fatalf("create: %v", err)
@@ -1171,6 +1171,44 @@ func TestTinySQLV014PragmaAndAgentContext(t *testing.T) {
 	}
 	if !strings.Contains(ctxRec.Body.String(), "vals") || !strings.Contains(ctxRec.Body.String(), `"max_tables":4`) {
 		t.Fatalf("unexpected agent context response: %s", ctxRec.Body.String())
+	}
+}
+
+func TestTinySQLV015GeoFunctions(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE places (name TEXT, geometry JSON)"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for _, stmt := range []string{
+		`INSERT INTO places VALUES ('Berlin', GEO_POINT(13.4050, 52.5200))`,
+		`INSERT INTO places VALUES ('Munich', GEO_POINT(11.5755, 48.1372))`,
+	} {
+		if _, err := app.sqlDB.Exec(stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	body := strings.NewReader(`{"sql":"SELECT name, ST_X(geometry) AS lon, ST_Y(geometry) AS lat, GEO_DWITHIN(geometry, ST_MakePoint(13.4050, 52.5200), 1000) AS near_berlin, ST_DISTANCE(geometry, ST_MakePoint(11.5755, 48.1372)) AS meters FROM places WHERE GEO_WITHIN_BBOX(geometry, 13.0, 52.0, 14.0, 53.0)"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/query", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	app.apiQueryHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected geo query 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Columns []string   `json:"columns"`
+		Rows    [][]string `json:"rows"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode geo query response: %v\n%s", err, rec.Body.String())
+	}
+	if len(got.Rows) != 1 || len(got.Rows[0]) != 5 {
+		t.Fatalf("unexpected geo query rows: %#v", got.Rows)
+	}
+	row := got.Rows[0]
+	if row[0] != "Berlin" || row[1] != "13.405" || row[2] != "52.52" || row[3] != "true" {
+		t.Fatalf("unexpected geo function values: columns=%#v rows=%#v", got.Columns, got.Rows)
 	}
 }
 

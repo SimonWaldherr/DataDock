@@ -79,6 +79,11 @@ GROUP BY pr.name;
 SELECT name, category, lon, lat
 FROM datadock_demo_locations
 ORDER BY name;
+SELECT name, category, ST_X(geometry) AS lon, ST_Y(geometry) AS lat,
+       ST_DISTANCE(geometry, ST_MakePoint(11.5755, 48.1372)) AS meters_from_munich
+FROM datadock_demo_locations
+WHERE GEO_WITHIN_BBOX(geometry, 5.5, 47.0, 15.5, 55.5)
+ORDER BY meters_from_munich;
 SELECT source, external_id, imported_at, payload_json, payload_xml
 FROM datadock_demo_payloads
 ORDER BY imported_at;

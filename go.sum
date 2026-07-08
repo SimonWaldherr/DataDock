@@ -12,8 +12,8 @@ github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/internal v1.2.0 h1:nCYfg
 github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/internal v1.2.0/go.mod h1:ucUjca2JtSZboY8IoUqyQyuuXvwbMBVwFOm0vdQPNhA=
 github.com/AzureAD/microsoft-authentication-library-for-go v1.6.0 h1:XRzhVemXdgvJqCH0sFfrBUTnUJSBrBf7++ypk+twtRs=
 github.com/AzureAD/microsoft-authentication-library-for-go v1.6.0/go.mod h1:HKpQxkWaGLJ+D/5H8QRpyQXA1eKjxkFlOMwck5+33Jk=
-github.com/SimonWaldherr/tinySQL v0.14.0 h1:L3c+hEsWtafhNp9U+J26nXAAQVH0hMag30C80Chj89Q=
-github.com/SimonWaldherr/tinySQL v0.14.0/go.mod h1:SLqky+KqtudMbliw3PrMWfK9pE5+0yDpwjxsW5P8oqw=
+github.com/SimonWaldherr/tinySQL v0.15.0 h1:XKKJeULmsczD1iOMwo7EGDGE3cZYPgucqoJ19A0FsXI=
+github.com/SimonWaldherr/tinySQL v0.15.0/go.mod h1:6QKAUVK1Yyl0vPZCdHCLB8474naC/sqIj8IAAZWjA6M=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=

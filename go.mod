@@ -1,9 +1,9 @@
 module github.com/SimonWaldherr/datadock
 
-go 1.25.11
+go 1.25.12
 
 require (
-	github.com/SimonWaldherr/tinySQL v0.14.0
+	github.com/SimonWaldherr/tinySQL v0.15.0
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jonas-p/go-shp v0.1.1
 	github.com/lib/pq v1.12.3
