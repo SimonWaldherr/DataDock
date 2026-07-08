@@ -2,12 +2,10 @@ package main
 
 import (
 	"encoding/json"
-	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/SimonWaldherr/datadock/internal/standards"
 	"github.com/SimonWaldherr/datadock/internal/typed"
 )
 
@@ -36,12 +34,6 @@ var (
 	latColumnRE      = regexp.MustCompile(`(?i)^(lat|latitude|y)$`)
 	geometryColumnRE = regexp.MustCompile(`(?i)(geojson|geometry|geom|shape)`)
 )
-
-func writeGeoJSONExport(w http.ResponseWriter, columns []string, rows [][]string, kinds []typed.Kind, filenameBase string) error {
-	w.Header().Set("Content-Type", standards.MediaTypeGeoJSON)
-	w.Header().Set("Content-Disposition", exportContentDisposition(filenameBase, "geojson"))
-	return json.NewEncoder(w).Encode(buildGeoJSONFeatureCollection(columns, rows, kinds))
-}
 
 func buildGeoJSONFeatureCollection(columns []string, rows [][]string, kinds []typed.Kind) geoJSONFeatureCollection {
 	fc := geoJSONFeatureCollection{Type: "FeatureCollection"}

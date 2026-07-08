@@ -649,11 +649,36 @@ connection. Optional query parameters `max_tables` and `max_chars` control the
 profile size. For SQL-only workflows, `CALL datadock_agent_context(12, 6000)`
 returns a compact non-reentrant context summary in the query result grid.
 
-## Running Tests
+## Development Workflows
 
 ```bash
-go test ./...
+make fmt-check
+make test
+make vet
+make build-check
+make vulncheck
 ```
+
+`make ci` runs the local CI subset (`fmt-check`, tests, vet, and build) without
+requiring optional external linters. `make check` runs the full local quality
+gate: formatting checks, tests, vet, build, `staticcheck`, and `govulncheck`.
+Install the optional tools with:
+
+```bash
+go install honnef.co/go/tools/cmd/staticcheck@latest
+go install golang.org/x/vuln/cmd/govulncheck@latest
+```
+
+GitHub Actions mirrors these checks:
+
+- **CI** runs on pushes to `main`, pull requests, and manual dispatch. It checks
+  Go and asset formatting, runs `go test ./...`, `go vet ./...`,
+  `go build ./...`, and `staticcheck ./...`.
+- **Security** runs on pushes to `main`, pull requests, a weekly schedule, and
+  manual dispatch. It runs `govulncheck` for every Go package.
+
+The workflows intentionally use read-only repository permissions and cancel
+superseded runs on the same ref.
 
 ## ChatSQL Notes
 

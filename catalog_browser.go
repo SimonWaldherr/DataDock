@@ -36,12 +36,6 @@ type CatalogDatabase struct {
 	Schemas    []CatalogSchema `json:"schemas,omitempty"`
 }
 
-// catalogTree returns the full server-wide catalog (every database/schema
-// the active connection's credentials can see) for the sidebar tree.
-func (a *App) catalogTree(ctx context.Context) ([]CatalogDatabase, error) {
-	return a.catalogTreeWithSystem(ctx, false)
-}
-
 func (a *App) catalogTreeWithSystem(ctx context.Context, includeSystem bool) ([]CatalogDatabase, error) {
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
@@ -59,7 +53,7 @@ func (a *App) catalogTreeWithSystem(ctx context.Context, includeSystem bool) ([]
 func catalogSchemaFromObjects(schema string, objects []TableObject) CatalogSchema {
 	s := CatalogSchema{Name: schema}
 	for _, o := range objects {
-		item := CatalogItem{Name: o.Name, Kind: o.Kind}
+		item := CatalogItem(o)
 		if o.Kind == "view" {
 			s.Views = append(s.Views, item)
 		} else {

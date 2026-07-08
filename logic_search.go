@@ -124,15 +124,6 @@ func (a *App) startReindexConnectionLogic(sessionID, connID string) error {
 	return nil
 }
 
-// logicIndexStatusFor returns the last completed reindex report for connID
-// (zero value if none has ever run) and whether a run is currently in
-// progress, for the connections page to display.
-func (a *App) logicIndexStatusFor(connID string) (LogicIndexReport, bool) {
-	a.logicIndexMu.Lock()
-	defer a.logicIndexMu.Unlock()
-	return a.logicIndexStatus[connID], a.logicIndexing[connID]
-}
-
 // logicObjectTarget is one view/procedure/function enumerated for reindexing.
 type logicObjectTarget struct {
 	name string // fully qualified, matching fetchViewDefinition/fetchRoutineDefinition's expectations

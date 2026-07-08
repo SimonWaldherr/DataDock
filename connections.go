@@ -577,11 +577,11 @@ func buildDSNFromFields(f QuickConnectFields) (string, error) {
 			// Leave u.User unset: go-mssqldb's winsspi/ntlm integrated-auth
 			// provider then authenticates as the OS user running DataDock.
 			if user != "" || f.Password != "" {
-				return "", fmt.Errorf("Windows authentication (current user) does not take a username or password; clear those fields or switch authentication mode")
+				return "", fmt.Errorf("windows authentication (current user) does not take a username or password; clear those fields or switch authentication mode")
 			}
 		case "windows-account":
 			if !strings.Contains(user, `\`) {
-				return "", fmt.Errorf(`Windows authentication needs a "DOMAIN\username" user name`)
+				return "", fmt.Errorf(`windows authentication needs a "DOMAIN\username" user name`)
 			}
 			u.User = url.UserPassword(user, f.Password)
 		default: // "sql": plain SQL Server authentication

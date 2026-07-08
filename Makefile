@@ -12,7 +12,7 @@ SHELL       := bash
 # ignores it. Multi-line shell logic must be continued explicitly or moved into
 # scripts/make-menu.sh.
 
-.PHONY: all build run run-memory test vet staticcheck vulncheck check fmt format menu tui help findport clean
+.PHONY: all build build-check run run-memory test vet staticcheck vulncheck check ci fmt format fmt-check format-check menu tui help findport clean
 
 GO     ?= go
 NPM    ?= npm
@@ -42,12 +42,15 @@ help:
 	@echo "  make run          start the server   [DB=..] [TENANT=..] [PORT=..|ADDR=host:port]"
 	@echo "  make run-memory   start the server with an in-memory database"
 	@echo "  make build        build ./$(APP)"
+	@echo "  make build-check  compile every Go package without writing a binary"
 	@echo "  make test         run the Go test suite"
 	@echo "  make vet          run go vet"
 	@echo "  make staticcheck  run staticcheck when installed"
 	@echo "  make vulncheck    run govulncheck when installed"
-	@echo "  make check        run test, vet, staticcheck and govulncheck"
+	@echo "  make check        run fmt-check, test, vet, build, staticcheck and govulncheck"
+	@echo "  make ci           run the local CI subset without optional external linters"
 	@echo "  make fmt          run go fmt and npm run format when package.json exists"
+	@echo "  make fmt-check    check gofmt and npm asset formatting without modifying files"
 	@echo "  make findport     print a free TCP port between 8000-8100"
 	@echo "  make clean        remove the built binary"
 	@echo ""
@@ -57,6 +60,10 @@ help:
 build:
 	@echo "==> building $(BIN)"
 	$(GO) build -o $(BIN) .
+
+build-check:
+	@echo "==> checking package builds"
+	$(GO) build ./...
 
 test:
 	@echo "==> running tests"
@@ -84,7 +91,9 @@ vulncheck:
 		exit 1; \
 	fi
 
-check: test vet staticcheck vulncheck
+check: fmt-check test vet build-check staticcheck vulncheck
+
+ci: fmt-check test vet build-check
 
 fmt format:
 	@echo "==> formatting Go sources"
@@ -94,6 +103,21 @@ fmt format:
 		$(NPM) run format; \
 	else \
 		echo "==> no package.json; skipping npm run format"; \
+	fi
+
+fmt-check format-check:
+	@echo "==> checking Go formatting"
+	@files="$$(gofmt -l $$(find . -name '*.go' -not -path './.git/*'))"; \
+	if [ -n "$$files" ]; then \
+		echo "$$files"; \
+		echo "Go files need gofmt; run: make fmt"; \
+		exit 1; \
+	fi
+	@if [ -f package.json ]; then \
+		echo "==> checking npm formatter"; \
+		$(NPM) run format:check; \
+	else \
+		echo "==> no package.json; skipping npm format check"; \
 	fi
 
 clean:

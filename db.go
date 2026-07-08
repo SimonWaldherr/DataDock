@@ -425,21 +425,12 @@ func (a *App) tableNames(ctx context.Context) []string {
 	return tableObjectNames(objects)
 }
 
-func (a *App) tableNamesWithSystem(ctx context.Context, includeSystem bool) []string {
-	objects := a.tableObjectsWithSystem(ctx, includeSystem)
-	return tableObjectNames(objects)
-}
-
 func tableObjectNames(objects []TableObject) []string {
 	names := make([]string, 0, len(objects))
 	for _, obj := range objects {
 		names = append(names, obj.Name)
 	}
 	return names
-}
-
-func (a *App) tableObjectKind(ctx context.Context, name string) string {
-	return a.tableObjectKindWithSystem(ctx, name, false)
 }
 
 func (a *App) tableObjectKindWithSystem(ctx context.Context, name string, includeSystem bool) string {
@@ -554,52 +545,6 @@ func (a *App) queryBackedMeta(ctx context.Context, name, kind string) (TableMeta
 		rows.Close()
 	}
 	return meta, nil
-}
-
-// tableRows returns a page of rows from a table.
-func (a *App) tableRows(ctx context.Context, name string, page int) ([]Column, [][]string, error) {
-	ctx, cancel := a.withQueryTimeout(ctx)
-	defer cancel()
-	if page < 1 {
-		page = 1
-	}
-	pageSize := a.currentPageSize()
-	offset := (page - 1) * pageSize
-
-	conn := a.activeConn(ctx)
-	query := conn.selectPageSQL(name, "", "asc", pageSize, offset)
-	rows, err := a.queryConn(ctx, conn, "table.rows", query)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer rows.Close()
-
-	colTypes, err := rows.ColumnTypes()
-	if err != nil {
-		return nil, nil, err
-	}
-	cols := make([]Column, len(colTypes))
-	for i, ct := range colTypes {
-		cols[i] = Column{Name: ct.Name(), TypeName: ct.DatabaseTypeName()}
-	}
-
-	var result [][]string
-	for rows.Next() {
-		vals := make([]interface{}, len(cols))
-		ptrs := make([]interface{}, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			return nil, nil, err
-		}
-		row := make([]string, len(cols))
-		for i, v := range vals {
-			row[i] = anyToString(v)
-		}
-		result = append(result, row)
-	}
-	return cols, result, rows.Err()
 }
 
 // getRecord fetches a single record by id.
@@ -952,18 +897,6 @@ func (c *DBConnection) tableObjects(ctx context.Context) ([]TableObject, error) 
 	}
 	sortTableObjects(objects)
 	return objects, nil
-}
-
-func (c *DBConnection) tableNames(ctx context.Context) ([]string, error) {
-	objects, err := c.tableObjects(ctx)
-	if err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(objects))
-	for _, obj := range objects {
-		names = append(names, obj.Name)
-	}
-	return names, nil
 }
 
 func (c *DBConnection) tableMeta(ctx context.Context, name string) (TableMeta, error) {
