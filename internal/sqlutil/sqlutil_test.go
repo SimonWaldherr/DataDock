@@ -9,6 +9,8 @@ func TestClassify(t *testing.T) {
 		want StatementClass
 	}{
 		{name: "select", sql: "SELECT * FROM people", want: StatementReadQuery},
+		{name: "pragma", sql: "PRAGMA table_info(people)", want: StatementReadQuery},
+		{name: "describe", sql: "DESCRIBE people", want: StatementReadQuery},
 		{name: "read cte", sql: "WITH x AS (SELECT 1) SELECT * FROM x", want: StatementReadQuery},
 		{name: "write cte", sql: "WITH x AS (SELECT 1) DELETE FROM people", want: StatementWriteDML},
 		{name: "ddl", sql: "CREATE TABLE people (id INT)", want: StatementDDL},

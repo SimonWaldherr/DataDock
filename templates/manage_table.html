@@ -86,7 +86,7 @@
         </div>
         <div>
           <label class="form-label small">File</label>
-          <input class="form-control form-control-sm" type="file" name="file" accept=".csv,.tsv,.json,.ndjson,.xlsx,.xml,.yaml,.yml,.geojson,.kml,.osm,.mbtiles,.rg,.zip,.shp" required>
+          <input class="form-control form-control-sm" type="file" name="file" accept=".csv,.tsv,.json,.ndjson,.xlsx,.xml,.yaml,.yml,.geojson,.gpkg,.gpx,.kml,.osm,.pbf,.mbtiles,.rg,.zip,.shp,.sqlite,.sqlite3,.db,.duckdb,.parquet,.arrow,.feather,.html,.htm,.msgpack,.mpack,.msg,.cbor,.bson,.ics,.ical,.vcf,.vcard" required>
         </div>
         <div class="row g-2">
           <div class="col-md-6">
@@ -100,9 +100,23 @@
               <option value="xlsx">XLSX first sheet</option>
               <option value="xml">XML</option>
               <option value="yaml">YAML</option>
+              <option value="html">HTML tables</option>
+              <option value="sqlite">SQLite database</option>
+              <option value="duckdb">DuckDB manifest</option>
+              <option value="parquet">Parquet manifest</option>
+              <option value="arrow">Arrow manifest</option>
+              <option value="feather">Feather manifest</option>
+              <option value="msgpack">MessagePack</option>
+              <option value="cbor">CBOR</option>
+              <option value="bson">BSON</option>
+              <option value="ics">iCalendar</option>
+              <option value="vcf">vCard</option>
               <option value="geojson">GeoJSON</option>
+              <option value="gpkg">GeoPackage</option>
+              <option value="gpx">GPX</option>
               <option value="kml">KML</option>
               <option value="osm">OSM XML</option>
+              <option value="pbf">OSM PBF</option>
               <option value="shp">Shapefile ZIP</option>
               <option value="mbtiles">MBTiles</option>
               <option value="rg">Routing graph (RG)</option>
@@ -173,6 +187,24 @@
         </button>
         <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('geojson')">
           <i class="bi bi-geo-alt me-1"></i>GeoJSON
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('geojson-summary')">
+          <i class="bi bi-bar-chart-line me-1"></i>GeoJSON Summary
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('kml')">
+          <i class="bi bi-globe2 me-1"></i>KML
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('gpx')">
+          <i class="bi bi-signpost-split me-1"></i>GPX
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('shp')">
+          <i class="bi bi-map me-1"></i>SHP ZIP
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('sqlite')">
+          <i class="bi bi-database me-1"></i>SQLite
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('html')">
+          <i class="bi bi-filetype-html me-1"></i>HTML
         </button>
         <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('xlsx')">
           <i class="bi bi-file-earmark-spreadsheet me-1"></i>XLSX

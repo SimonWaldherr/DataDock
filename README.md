@@ -18,8 +18,9 @@ administrator-managed shared connections or per-user credentials.
 | **Datasheet View** | View, sort, and page through table rows |
 | **Record CRUD** | Add, edit, and delete records from any table with an `id INT` column |
 | **Table Design** | Create new tables with a visual column designer (INT, FLOAT, TEXT, BOOL) |
-| **Map Data Import** | Import GeoJSON, KML, OSM XML, Shapefile ZIPs, MBTiles indexes, and JSON/NDJSON routing graphs into queryable tables with GeoJSON geometry columns |
-| **Export** | Download whole tables/views or SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, XML, or GeoJSON |
+| **Broad File Import** | Import HTML tables, SQLite databases, MessagePack/CBOR/BSON, iCalendar, vCard, and file manifests for Parquet/Arrow/Feather/DuckDB |
+| **Map Data Import** | Import GeoJSON, GeoPackage, GPX, KML, OSM XML/PBF, Shapefile ZIPs, MBTiles indexes, and JSON/NDJSON routing graphs into queryable tables with GeoJSON geometry columns |
+| **Export** | Download whole tables/views or SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, XML, HTML, SQLite, GeoJSON, GeoJSON summaries, KML, GPX, or Shapefile ZIP |
 | **Drop Table** | Delete any table with a one-click confirmation |
 | **SQL Editor** | Monaco-enhanced SQL editor with SQL syntax highlighting and textarea fallback; selected text can be executed with Run, export, Ctrl+Enter, or F5 |
 | **Example Queries & Prompts** | One-click sample SQL queries and natural-language prompts against the demo dataset, so the editor and LLM assistant can be tried immediately with zero setup; picking an example query auto-imports the demo dataset first if it isn't loaded yet |
@@ -123,7 +124,7 @@ enable it where operational stdout access is appropriately restricted.
 The SQL editor supports multiple result views per tab: table, live logs, cards,
 JSON/XML trees, pivot summaries, column profiles, schema graph, and notebook.
 Query share links include the active SQL, tab title, view mode, live settings,
-and log filter. `-watch-dir` imports CSV/TSV/JSON/NDJSON/XML/YAML/XLSX/GeoJSON/KML/OSM/Shapefile ZIP/MBTiles/RG
+and log filter. `-watch-dir` imports CSV/TSV/JSON/NDJSON/XML/YAML/XLSX/HTML/SQLite/MessagePack/CBOR/BSON/iCalendar/vCard/GeoJSON/GeoPackage/GPX/KML/OSM XML/PBF/Shapefile ZIP/MBTiles/RG
 files on startup and whenever their size or modification time changes; the table
 name is derived from the filename and refreshed on update.
 
@@ -172,7 +173,7 @@ In addition to dialect/timeouts/LLM provider settings, Admin also controls:
 | `match_max_rows` | Rows per side, per Matching run, the interactive matcher will load into memory (default `2,000,000`, max `50,000,000`) — raise this for large master-data tables |
 | `default_theme` | Fallback UI theme for browsers without a saved preference (`workbench`, `midnight`, `forest`, `contrast`, `solaris`, `xp`, `classic2000`, `kde`) |
 | `default_density` | Fallback table density for browsers without a saved preference (`comfortable`, `compact`) |
-| `read_only_mode` | Maintenance mode: blocks record edits, table/DDL changes, imports, migrations, and non-`SELECT` SQL editor statements for every user until turned off |
+| `read_only_mode` | Maintenance mode: blocks record edits, table/DDL changes, imports, migrations, and non-result SQL editor statements for every user until turned off |
 
 The Admin page also has a **Demo Data** section to load or remove the built-in
 demo dataset (`POST /demo-data`, `POST /demo-data/remove`) without needing an
@@ -213,8 +214,14 @@ datadock uses stable web and data interchange standards for external integration
 - CSV/TSV exports use RFC 4180-style CSV handling.
 - Excel-safe CSV is an explicit export mode that rewrites ambiguous text and ISO date/time values for Excel import while leaving standard CSV unchanged.
 - XLSX exports use Office Open XML spreadsheet packages with typed numeric, boolean, date, time, and datetime cells.
+- XLSX imports merge multiple worksheets into one table with a `sheet` column; single-sheet imports keep the traditional first-sheet shape.
+- HTML, SQLite, MessagePack, CBOR, BSON, iCalendar, and vCard imports normalize common non-geospatial files into queryable tables.
+- Parquet, Arrow, Feather, and DuckDB imports currently create file-level manifest rows rather than fully decoding row groups/pages.
 - GeoJSON exports use RFC 7946 FeatureCollection output where geometry or lat/lon columns are present.
-- Map data imports normalize GeoJSON/KML/OSM/Shapefile geometries into GeoJSON text columns; MBTiles imports metadata and tile indexes; RG imports JSON/NDJSON routing graph nodes and edges.
+- Map data imports normalize GeoJSON/GeoPackage/GPX/KML/OSM/Shapefile geometries into GeoJSON text columns; MBTiles imports metadata and tile indexes; RG imports JSON/NDJSON routing graph nodes and edges.
+- DataDock tracks tinySQL v0.14.x and exposes its read-only PRAGMA support,
+  result-producing stored procedure calls in the SQL editor, and native agent
+  context generation for the local tinySQL connection.
 - tinySQL-facing error classes can use ISO/IEC 9075 SQLSTATE helpers exposed by
   the public tinySQL API.
 
@@ -277,7 +284,7 @@ The wizard walks through:
    including two different database engines) and a table on each — or
    picking the special **File Upload** entry instead of a connection, which
    swaps that side's table dropdown for a file picker: choosing a
-   CSV/TSV/JSON/XLSX/XML/YAML/GeoJSON/KML/OSM/Shapefile ZIP/MBTiles/RG file imports it into the local tinySQL
+   CSV/TSV/JSON/XLSX/XML/YAML/HTML/SQLite/MessagePack/CBOR/BSON/iCalendar/vCard/GeoJSON/GeoPackage/GPX/KML/OSM/Shapefile ZIP/MBTiles/RG file imports it into the local tinySQL
    database (via the same import path as **Manage Tables → Import**) and
    uses it immediately as that side's table, no separate import step and no
    loss of whatever table is already selected on the other side,
@@ -339,8 +346,8 @@ The SQL editor can call an OpenAI-compatible `/v1/chat/completions` endpoint to:
 
 Generated SQL is placed in the editor for review. It is not executed
 automatically unless the user chooses **Ask & Run**. Automatic execution is
-limited to result-producing SQL (`SELECT`, `WITH`, `SHOW`, `EXPLAIN`) and blocks
-common DDL/DML operations.
+limited to result-producing SQL (`SELECT`, `WITH`, `SHOW`, `EXPLAIN`,
+`DESCRIBE`, `PRAGMA`) and blocks common DDL/DML operations.
 
 DataDock teaches the LLM the active database shape and SQL dialect on every request
 by sending a compact schema snapshot containing:
@@ -359,6 +366,11 @@ training.
 The SQL editor exposes the same schema snapshot through **Schema** / `GET
 /api/schema`, so users can inspect the exact compact context that will be sent
 to the LLM.
+
+For the local tinySQL connection, `GET /api/tinysql/agent-context` exposes
+tinySQL's native prompt-ready database profile. The SQL editor also registers a
+read-only helper procedure, `CALL datadock_agent_context(max_tables, max_chars)`,
+which returns a compact table/column context from inside SQL.
 
 ### Skills And RAG
 
@@ -446,7 +458,7 @@ cmd/datadock/
 |---|---|---|
 | `GET` | `/` | Redirect to first table, or empty-state |
 | `GET` | `/t/{table}` | Datasheet view (query params: `page`, `sort`, `dir`) |
-| `GET` | `/t/{table}/export?format=csv\|csv-excel\|tsv\|xlsx\|json\|xml\|geojson` | Download a full table/view export |
+| `GET` | `/t/{table}/export?format=csv\|csv-excel\|tsv\|xlsx\|json\|xml\|html\|sqlite\|geojson\|geojson-summary\|kml\|gpx\|shp` | Download a full table/view export |
 | `GET` | `/t/{table}/new` | New record form |
 | `POST` | `/t/{table}/new` | Create record |
 | `GET` | `/t/{table}/{id}/edit` | Edit record form |
@@ -455,8 +467,9 @@ cmd/datadock/
 | `POST` | `/drop-table/{table}` | Drop table |
 | `GET` | `/query` | SQL editor page |
 | `POST` | `/api/query` | Execute SQL (JSON API) |
-| `POST` | `/api/export` | Download SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, XML, or GeoJSON |
+| `POST` | `/api/export` | Download SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, XML, HTML, SQLite, GeoJSON, KML, GPX, or Shapefile ZIP |
 | `GET` | `/api/schema` | Return the compact active-connection schema snapshot used for LLM context |
+| `GET` | `/api/tinysql/agent-context?max_tables=12&max_chars=6000` | Return tinySQL's native agent-context profile for the local tinySQL connection |
 | `GET` | `/api/catalog` | Return async catalog roots for non-tinySQL connections |
 | `GET` | `/api/catalog/expand` | Expand an async catalog node |
 | `GET` | `/api/llm/health` | Test server-side connectivity to the configured LLM provider (Admin session) |
@@ -498,8 +511,8 @@ Every data-mutating route above is blocked while **maintenance mode** is enabled
 in Admin, returning `503 Service Unavailable`. Session-local connection changes,
 Admin settings, the maintenance toggle itself, login/logout, and read-only query
 execution stay available so an administrator can turn maintenance mode off again
-and users can continue inspecting data with `SELECT`, `WITH`, `SHOW`, or
-`EXPLAIN`. `POST /match` is a partial exception: previewing candidates and
+and users can continue inspecting data with `SELECT`, `WITH`, `SHOW`,
+`EXPLAIN`, `DESCRIBE`, or `PRAGMA`. `POST /match` is a partial exception: previewing candidates and
 exporting them as CSV are read-only and stay available, like the SQL editor's
 read-only queries; only `mode=save` (which creates/inserts into a real table)
 is blocked. `POST /match/tables` follows the same pattern: a plain table
@@ -552,13 +565,32 @@ Request:
 { "sql": "SELECT * FROM my_table", "format": "xlsx" }
 ```
 
-The endpoint accepts result-producing SQL (`SELECT`, `WITH`, `SHOW`, `EXPLAIN`) and returns an attachment in `csv`, `csv-excel`, `tsv`, `xlsx`, `json`, `xml`, or `geojson` format.
+The endpoint accepts result-producing SQL (`SELECT`, `WITH`, `SHOW`,
+`EXPLAIN`, `DESCRIBE`, `PRAGMA`) and returns an attachment in `csv`, `csv-excel`, `tsv`, `xlsx`,
+`json`, `ndjson`, `xml`, `html`, `sqlite`, `geojson`, `geojson-summary`, `kml`,
+`gpx`, or `shp` format.
+
+GeoJSON-derived exports support a small native, mapshaper-like option set:
+table exports accept query params such as `explode=1`, `simplify=0.001`,
+`bbox=minx,miny,maxx,maxy`, `fields=name,type`, and `drop=internal_id`.
+`POST /api/export` accepts matching JSON fields: `explode`,
+`simplify_tolerance`, `bbox`, `fields`, and `drop_fields`. The native
+implementation covers practical export transforms; topology-heavy operations
+such as robust clip/erase/dissolve remain better suited to a dedicated
+geometry engine or the mapshaper CLI.
 
 **GET /api/schema**
 
 Returns the active connection's compact dialect/schema/context snapshot as
 JSON. The query editor uses this for the schema preview, and the LLM assistant
 uses the same shape for prompt grounding.
+
+**GET /api/tinysql/agent-context**
+
+Returns tinySQL's native `BuildAgentContext` profile for the local tinySQL
+connection. Optional query parameters `max_tables` and `max_chars` control the
+profile size. For SQL-only workflows, `CALL datadock_agent_context(12, 6000)`
+returns a compact non-reentrant context summary in the query result grid.
 
 ## Running Tests
 

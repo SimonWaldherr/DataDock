@@ -34,7 +34,7 @@ func classifyTokens(tokens []string) StatementClass {
 		first = cteMainVerb(tokens)
 	}
 	switch first {
-	case "SELECT", "SHOW", "EXPLAIN", "DESCRIBE", "DESC":
+	case "SELECT", "SHOW", "EXPLAIN", "DESCRIBE", "DESC", "PRAGMA":
 		return StatementReadQuery
 	case "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "TRUNCATE":
 		return StatementWriteDML

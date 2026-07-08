@@ -54,7 +54,7 @@ const (
 // column N — the mapping itself is the caller's responsibility) contributes
 // to the overall match score.
 type FieldRule struct {
-	Label  string  // human-readable name, for display only
+	Label  string // human-readable name, for display only
 	Method Method
 	// Weight is the field's share of the overall score; weights are
 	// normalized against each other, so they don't need to sum to 1.

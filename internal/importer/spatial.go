@@ -2,14 +2,17 @@ package importer
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -246,11 +249,128 @@ func parseKMLCoordinates(raw string) []any {
 	return coords
 }
 
+func ImportGPX(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *ImportOptions) (*ImportResult, error) {
+	var doc gpxDoc
+	dec := xml.NewDecoder(src)
+	if err := dec.Decode(&doc); err != nil {
+		return nil, err
+	}
+	records := [][]string{{"record_type", "name", "description", "time", "geometry", "geometry_type", "properties"}}
+	for _, wpt := range doc.Waypoints {
+		geom := pointGeometry(wpt.Lon, wpt.Lat)
+		records = append(records, []string{"waypoint", strings.TrimSpace(wpt.Name), strings.TrimSpace(wpt.Description), strings.TrimSpace(wpt.Time), mustJSON(geom), "Point", mustJSON(wpt.Properties())})
+	}
+	for _, rte := range doc.Routes {
+		coords := gpxCoords(rte.Points)
+		if len(coords) >= 2 {
+			geom := map[string]any{"type": "LineString", "coordinates": coords}
+			records = append(records, []string{"route", strings.TrimSpace(rte.Name), strings.TrimSpace(rte.Description), "", mustJSON(geom), "LineString", mustJSON(rte.Properties())})
+		}
+	}
+	for _, trk := range doc.Tracks {
+		var lines []any
+		for _, seg := range trk.Segments {
+			if coords := gpxCoords(seg.Points); len(coords) >= 2 {
+				lines = append(lines, coords)
+			}
+		}
+		if len(lines) == 0 {
+			continue
+		}
+		geomType := "LineString"
+		geom := map[string]any{"type": geomType, "coordinates": lines[0]}
+		if len(lines) > 1 {
+			geomType = "MultiLineString"
+			geom = map[string]any{"type": geomType, "coordinates": lines}
+		}
+		records = append(records, []string{"track", strings.TrimSpace(trk.Name), strings.TrimSpace(trk.Description), "", mustJSON(geom), geomType, mustJSON(trk.Properties())})
+	}
+	if len(records) == 1 {
+		return nil, fmt.Errorf("gpx contains no importable waypoints, routes, or tracks")
+	}
+	return importSpatialRecords(ctx, db, tenant, tableName, records, opts)
+}
+
+type gpxDoc struct {
+	Waypoints []gpxPoint `xml:"wpt"`
+	Routes    []gpxRoute `xml:"rte"`
+	Tracks    []gpxTrack `xml:"trk"`
+}
+
+type gpxPoint struct {
+	Lat         float64 `xml:"lat,attr"`
+	Lon         float64 `xml:"lon,attr"`
+	Name        string  `xml:"name"`
+	Description string  `xml:"desc"`
+	Time        string  `xml:"time"`
+	Elevation   string  `xml:"ele"`
+}
+
+type gpxRoute struct {
+	Name        string     `xml:"name"`
+	Description string     `xml:"desc"`
+	Points      []gpxPoint `xml:"rtept"`
+}
+
+type gpxTrack struct {
+	Name        string       `xml:"name"`
+	Description string       `xml:"desc"`
+	Segments    []gpxSegment `xml:"trkseg"`
+}
+
+type gpxSegment struct {
+	Points []gpxPoint `xml:"trkpt"`
+}
+
+func (p gpxPoint) Properties() map[string]string {
+	props := map[string]string{}
+	if value := strings.TrimSpace(p.Elevation); value != "" {
+		props["ele"] = value
+	}
+	return props
+}
+
+func (r gpxRoute) Properties() map[string]any {
+	return map[string]any{"point_count": len(r.Points)}
+}
+
+func (t gpxTrack) Properties() map[string]any {
+	n := 0
+	for _, seg := range t.Segments {
+		n += len(seg.Points)
+	}
+	return map[string]any{"segment_count": len(t.Segments), "point_count": n}
+}
+
+func gpxCoords(points []gpxPoint) []any {
+	coords := make([]any, 0, len(points))
+	for _, point := range points {
+		coord := []float64{point.Lon, point.Lat}
+		if ele, err := strconv.ParseFloat(strings.TrimSpace(point.Elevation), 64); err == nil {
+			coord = append(coord, ele)
+		}
+		coords = append(coords, coord)
+	}
+	return coords
+}
+
 func ImportOSM(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *ImportOptions) (*ImportResult, error) {
 	doc, err := readOSM(src)
 	if err != nil {
 		return nil, err
 	}
+	return importOSMDoc(ctx, db, tenant, tableName, doc, opts)
+}
+
+func ImportOSMPBF(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *ImportOptions) (*ImportResult, error) {
+	doc, err := readOSMPBF(src)
+	if err != nil {
+		return nil, err
+	}
+	return importOSMDoc(ctx, db, tenant, tableName, doc, opts)
+}
+
+func importOSMDoc(ctx context.Context, db *tinysql.DB, tenant, tableName string, doc *osmDoc, opts *ImportOptions) (*ImportResult, error) {
 	records := [][]string{{"record_type", "osm_id", "geometry", "geometry_type", "name", "highway", "amenity", "natural", "building", "tags"}}
 	for _, node := range doc.Nodes {
 		if len(node.Tags) == 0 {
@@ -469,6 +589,201 @@ func osmRecord(recordType, id string, geom map[string]any, tags map[string]strin
 	}
 	body, _ := json.Marshal(tags)
 	return []string{recordType, id, geometryText, geometryType, tags["name"], tags["highway"], tags["amenity"], tags["natural"], tags["building"], string(body)}
+}
+
+func readOSMPBF(src io.Reader) (*osmDoc, error) {
+	doc := &osmDoc{NodeIndex: map[string]osmNode{}}
+	for {
+		var sizeBytes [4]byte
+		if _, err := io.ReadFull(src, sizeBytes[:]); err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return doc, nil
+			}
+			return nil, err
+		}
+		headerSize := binary.BigEndian.Uint32(sizeBytes[:])
+		if headerSize == 0 || headerSize > 64<<20 {
+			return nil, fmt.Errorf("invalid osm pbf blob header size %d", headerSize)
+		}
+		headerBody := make([]byte, headerSize)
+		if _, err := io.ReadFull(src, headerBody); err != nil {
+			return nil, err
+		}
+		header := parseProtoFields(headerBody)
+		blobType := string(firstBytesField(header, 1))
+		blobSize := int(firstVarintField(header, 3))
+		if blobSize <= 0 || blobSize > 512<<20 {
+			return nil, fmt.Errorf("invalid osm pbf blob size %d", blobSize)
+		}
+		blobBody := make([]byte, blobSize)
+		if _, err := io.ReadFull(src, blobBody); err != nil {
+			return nil, err
+		}
+		if blobType != "OSMData" {
+			continue
+		}
+		data, err := pbfBlobData(blobBody)
+		if err != nil {
+			return nil, err
+		}
+		if err := readPBFPrimitiveBlock(data, doc); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func pbfBlobData(blobBody []byte) ([]byte, error) {
+	fields := parseProtoFields(blobBody)
+	if raw := firstBytesField(fields, 1); len(raw) > 0 {
+		return raw, nil
+	}
+	compressed := firstBytesField(fields, 3)
+	if len(compressed) == 0 {
+		return nil, fmt.Errorf("osm pbf blob has no raw or zlib payload")
+	}
+	zr, err := zlib.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return nil, err
+	}
+	defer zr.Close()
+	return io.ReadAll(zr)
+}
+
+func readPBFPrimitiveBlock(data []byte, doc *osmDoc) error {
+	fields := parseProtoFields(data)
+	stringsTable := pbfStringTable(firstBytesField(fields, 1))
+	granularity := int64(firstVarintFieldDefault(fields, 17, 100))
+	latOffset := int64(firstVarintField(fields, 19))
+	lonOffset := int64(firstVarintField(fields, 20))
+	for _, groupBody := range bytesFields(fields, 2) {
+		group := parseProtoFields(groupBody)
+		for _, nodeBody := range bytesFields(group, 1) {
+			node := pbfNode(nodeBody, stringsTable, granularity, latOffset, lonOffset)
+			doc.Nodes = append(doc.Nodes, node)
+			doc.NodeIndex[node.ID] = node
+		}
+		if denseBody := firstBytesField(group, 2); len(denseBody) > 0 {
+			nodes := pbfDenseNodes(denseBody, stringsTable, granularity, latOffset, lonOffset)
+			for _, node := range nodes {
+				doc.Nodes = append(doc.Nodes, node)
+				doc.NodeIndex[node.ID] = node
+			}
+		}
+		for _, wayBody := range bytesFields(group, 3) {
+			doc.Ways = append(doc.Ways, pbfWay(wayBody, stringsTable))
+		}
+	}
+	return nil
+}
+
+func pbfStringTable(data []byte) []string {
+	var out []string
+	for _, field := range parseProtoFields(data) {
+		if field.num == 1 && field.wire == 2 {
+			out = append(out, string(field.bytes))
+		}
+	}
+	return out
+}
+
+func pbfNode(data []byte, stringsTable []string, granularity, latOffset, lonOffset int64) osmNode {
+	fields := parseProtoFields(data)
+	id := zigZag(firstVarintField(fields, 1))
+	keys := packedVarints(bytes.Join(bytesFields(fields, 2), nil))
+	vals := packedVarints(bytes.Join(bytesFields(fields, 3), nil))
+	latRaw := zigZag(firstVarintField(fields, 8))
+	lonRaw := zigZag(firstVarintField(fields, 9))
+	return osmNode{
+		ID:   strconv.FormatInt(id, 10),
+		Lat:  pbfCoord(latRaw, granularity, latOffset),
+		Lon:  pbfCoord(lonRaw, granularity, lonOffset),
+		Tags: pbfTags(stringsTable, keys, vals),
+	}
+}
+
+func pbfDenseNodes(data []byte, stringsTable []string, granularity, latOffset, lonOffset int64) []osmNode {
+	fields := parseProtoFields(data)
+	ids := packedSVarints(bytes.Join(bytesFields(fields, 1), nil))
+	lats := packedSVarints(bytes.Join(bytesFields(fields, 8), nil))
+	lons := packedSVarints(bytes.Join(bytesFields(fields, 9), nil))
+	keysVals := packedVarints(bytes.Join(bytesFields(fields, 10), nil))
+	var nodes []osmNode
+	var id, latRaw, lonRaw int64
+	tagPos := 0
+	for i := range ids {
+		id += ids[i]
+		if i < len(lats) {
+			latRaw += lats[i]
+		}
+		if i < len(lons) {
+			lonRaw += lons[i]
+		}
+		tags := map[string]string{}
+		for tagPos < len(keysVals) {
+			keyID := keysVals[tagPos]
+			tagPos++
+			if keyID == 0 {
+				break
+			}
+			if tagPos >= len(keysVals) {
+				break
+			}
+			valID := keysVals[tagPos]
+			tagPos++
+			key := pbfString(stringsTable, int(keyID))
+			if key != "" {
+				tags[key] = pbfString(stringsTable, int(valID))
+			}
+		}
+		node := osmNode{
+			ID:   strconv.FormatInt(id, 10),
+			Lat:  pbfCoord(latRaw, granularity, latOffset),
+			Lon:  pbfCoord(lonRaw, granularity, lonOffset),
+			Tags: tags,
+		}
+		nodes = append(nodes, node)
+	}
+	return nodes
+}
+
+func pbfWay(data []byte, stringsTable []string) osmWay {
+	fields := parseProtoFields(data)
+	id := int64(firstVarintField(fields, 1))
+	keys := packedVarints(bytes.Join(bytesFields(fields, 2), nil))
+	vals := packedVarints(bytes.Join(bytesFields(fields, 3), nil))
+	refDeltas := packedSVarints(bytes.Join(bytesFields(fields, 8), nil))
+	refs := make([]string, 0, len(refDeltas))
+	var ref int64
+	for _, delta := range refDeltas {
+		ref += delta
+		refs = append(refs, strconv.FormatInt(ref, 10))
+	}
+	return osmWay{ID: strconv.FormatInt(id, 10), Refs: refs, Tags: pbfTags(stringsTable, keys, vals)}
+}
+
+func pbfTags(stringsTable []string, keys, vals []uint64) map[string]string {
+	tags := map[string]string{}
+	for i, keyID := range keys {
+		if i >= len(vals) {
+			break
+		}
+		key := pbfString(stringsTable, int(keyID))
+		if key != "" {
+			tags[key] = pbfString(stringsTable, int(vals[i]))
+		}
+	}
+	return tags
+}
+
+func pbfString(stringsTable []string, idx int) string {
+	if idx < 0 || idx >= len(stringsTable) {
+		return ""
+	}
+	return stringsTable[idx]
+}
+
+func pbfCoord(raw, granularity, offset int64) float64 {
+	return float64(offset+granularity*raw) / 1e9
 }
 
 func ImportShapefileZip(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *ImportOptions) (*ImportResult, error) {
@@ -710,6 +1025,140 @@ func ImportMBTiles(ctx context.Context, db *tinysql.DB, tenant, tableName string
 	return importSpatialRecords(ctx, db, tenant, tableName, records, opts)
 }
 
+func ImportGeoPackage(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *ImportOptions) (*ImportResult, error) {
+	data, err := io.ReadAll(src)
+	if err != nil {
+		return nil, err
+	}
+	tmp, err := os.CreateTemp("", "datadock-geopackage-*.gpkg")
+	if err != nil {
+		return nil, err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	sqlDB, err := sql.Open("sqlite", tmpName)
+	if err != nil {
+		return nil, err
+	}
+	defer sqlDB.Close()
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return nil, err
+	}
+	layers, err := geopackageLayers(ctx, sqlDB)
+	if err != nil {
+		return nil, err
+	}
+	if len(layers) == 0 {
+		return nil, fmt.Errorf("geopackage contains no feature layers")
+	}
+	records := [][]string{{"layer", "feature_id", "geometry", "geometry_type", "properties"}}
+	for _, layer := range layers {
+		rows, err := sqlDB.QueryContext(ctx, "SELECT * FROM "+quoteIdent(layer.Table))
+		if err != nil {
+			return nil, fmt.Errorf("read geopackage layer %q: %w", layer.Table, err)
+		}
+		cols, err := rows.Columns()
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		for rows.Next() {
+			values := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range values {
+				ptrs[i] = &values[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			props := map[string]any{}
+			featureID := ""
+			geometryText := ""
+			geometryType := ""
+			for i, col := range cols {
+				value := values[i]
+				if strings.EqualFold(col, layer.GeometryColumn) {
+					if body, ok := value.([]byte); ok {
+						if geom, err := geoPackageGeometry(body); err == nil && geom != nil {
+							geometryText = mustJSON(geom)
+							geometryType = geoJSONString(geom["type"])
+						}
+					}
+					continue
+				}
+				if strings.EqualFold(col, "fid") || strings.EqualFold(col, "id") {
+					featureID = fmt.Sprint(value)
+				}
+				props[col] = sqliteValue(value)
+			}
+			records = append(records, []string{layer.Table, featureID, geometryText, geometryType, mustJSON(props)})
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	if len(records) == 1 {
+		return nil, fmt.Errorf("geopackage contains no features")
+	}
+	return importSpatialRecords(ctx, db, tenant, tableName, records, opts)
+}
+
+type geopackageLayer struct {
+	Table          string
+	GeometryColumn string
+}
+
+func geopackageLayers(ctx context.Context, db *sql.DB) ([]geopackageLayer, error) {
+	rows, err := db.QueryContext(ctx, `SELECT table_name, column_name FROM gpkg_geometry_columns ORDER BY table_name, column_name`)
+	if err == nil {
+		defer rows.Close()
+		var layers []geopackageLayer
+		for rows.Next() {
+			var layer geopackageLayer
+			if err := rows.Scan(&layer.Table, &layer.GeometryColumn); err != nil {
+				return nil, err
+			}
+			if layer.Table != "" && layer.GeometryColumn != "" {
+				layers = append(layers, layer)
+			}
+		}
+		return layers, rows.Err()
+	}
+	rows, err = db.QueryContext(ctx, `SELECT table_name FROM gpkg_contents WHERE data_type = 'features' ORDER BY table_name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var layers []geopackageLayer
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			return nil, err
+		}
+		layers = append(layers, geopackageLayer{Table: table, GeometryColumn: "geom"})
+	}
+	return layers, rows.Err()
+}
+
+func sqliteValue(v any) any {
+	switch x := v.(type) {
+	case []byte:
+		return string(x)
+	default:
+		return x
+	}
+}
+
 func ImportRoutingGraph(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *ImportOptions) (*ImportResult, error) {
 	data, err := io.ReadAll(src)
 	if err != nil {
@@ -921,6 +1370,347 @@ func mustJSON(v any) string {
 		return fmt.Sprint(v)
 	}
 	return string(body)
+}
+
+func geoPackageGeometry(data []byte) (map[string]any, error) {
+	if len(data) < 8 || string(data[:2]) != "GP" {
+		return wkbGeometry(data)
+	}
+	flags := data[3]
+	envelopeCode := (flags >> 1) & 0x07
+	offset := 8 + geoPackageEnvelopeSize(envelopeCode)
+	if offset > len(data) {
+		return nil, fmt.Errorf("invalid geopackage geometry header")
+	}
+	return wkbGeometry(data[offset:])
+}
+
+func geoPackageEnvelopeSize(code byte) int {
+	switch code {
+	case 1:
+		return 32
+	case 2, 3:
+		return 48
+	case 4:
+		return 64
+	default:
+		return 0
+	}
+}
+
+func wkbGeometry(data []byte) (map[string]any, error) {
+	r := &wkbReader{data: data}
+	return r.geometry()
+}
+
+type wkbReader struct {
+	data  []byte
+	pos   int
+	order binary.ByteOrder
+}
+
+func (r *wkbReader) geometry() (map[string]any, error) {
+	orderByte, err := r.byte()
+	if err != nil {
+		return nil, err
+	}
+	switch orderByte {
+	case 0:
+		r.order = binary.BigEndian
+	case 1:
+		r.order = binary.LittleEndian
+	default:
+		return nil, fmt.Errorf("invalid wkb byte order %d", orderByte)
+	}
+	typRaw, err := r.uint32()
+	if err != nil {
+		return nil, err
+	}
+	typ := typRaw % 1000
+	switch typ {
+	case 1:
+		x, y, err := r.xy()
+		if err != nil {
+			return nil, err
+		}
+		return pointGeometry(x, y), nil
+	case 2:
+		coords, err := r.coordSeq()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"type": "LineString", "coordinates": coords}, nil
+	case 3:
+		rings, err := r.rings()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"type": "Polygon", "coordinates": rings}, nil
+	case 4:
+		points, err := r.childGeometries()
+		if err != nil {
+			return nil, err
+		}
+		coords := make([]any, 0, len(points))
+		for _, point := range points {
+			if c, ok := point["coordinates"]; ok {
+				coords = append(coords, c)
+			}
+		}
+		return map[string]any{"type": "MultiPoint", "coordinates": coords}, nil
+	case 5:
+		lines, err := r.childGeometries()
+		if err != nil {
+			return nil, err
+		}
+		coords := make([]any, 0, len(lines))
+		for _, line := range lines {
+			if c, ok := line["coordinates"]; ok {
+				coords = append(coords, c)
+			}
+		}
+		return map[string]any{"type": "MultiLineString", "coordinates": coords}, nil
+	case 6:
+		polys, err := r.childGeometries()
+		if err != nil {
+			return nil, err
+		}
+		coords := make([]any, 0, len(polys))
+		for _, poly := range polys {
+			if c, ok := poly["coordinates"]; ok {
+				coords = append(coords, c)
+			}
+		}
+		return map[string]any{"type": "MultiPolygon", "coordinates": coords}, nil
+	case 7:
+		children, err := r.childGeometries()
+		if err != nil {
+			return nil, err
+		}
+		geoms := make([]any, len(children))
+		for i := range children {
+			geoms[i] = children[i]
+		}
+		return map[string]any{"type": "GeometryCollection", "geometries": geoms}, nil
+	default:
+		return nil, fmt.Errorf("unsupported wkb geometry type %d", typRaw)
+	}
+}
+
+func (r *wkbReader) childGeometries() ([]map[string]any, error) {
+	n, err := r.uint32()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, n)
+	for i := uint32(0); i < n; i++ {
+		geom, err := r.geometry()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, geom)
+	}
+	return out, nil
+}
+
+func (r *wkbReader) rings() ([]any, error) {
+	n, err := r.uint32()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]any, 0, n)
+	for i := uint32(0); i < n; i++ {
+		coords, err := r.coordSeq()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, coords)
+	}
+	return out, nil
+}
+
+func (r *wkbReader) coordSeq() ([]any, error) {
+	n, err := r.uint32()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]any, 0, n)
+	for i := uint32(0); i < n; i++ {
+		x, y, err := r.xy()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, []float64{x, y})
+	}
+	return out, nil
+}
+
+func (r *wkbReader) xy() (float64, float64, error) {
+	x, err := r.float64()
+	if err != nil {
+		return 0, 0, err
+	}
+	y, err := r.float64()
+	if err != nil {
+		return 0, 0, err
+	}
+	return x, y, nil
+}
+
+func (r *wkbReader) byte() (byte, error) {
+	if r.pos >= len(r.data) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	b := r.data[r.pos]
+	r.pos++
+	return b, nil
+}
+
+func (r *wkbReader) uint32() (uint32, error) {
+	if r.pos+4 > len(r.data) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	v := r.order.Uint32(r.data[r.pos : r.pos+4])
+	r.pos += 4
+	return v, nil
+}
+
+func (r *wkbReader) float64() (float64, error) {
+	if r.pos+8 > len(r.data) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	v := math.Float64frombits(r.order.Uint64(r.data[r.pos : r.pos+8]))
+	r.pos += 8
+	return v, nil
+}
+
+type protoField struct {
+	num   int
+	wire  int
+	value uint64
+	bytes []byte
+}
+
+func parseProtoFields(data []byte) []protoField {
+	var fields []protoField
+	for pos := 0; pos < len(data); {
+		key, n := readUvarint(data[pos:])
+		if n <= 0 {
+			break
+		}
+		pos += n
+		field := protoField{num: int(key >> 3), wire: int(key & 0x7)}
+		switch field.wire {
+		case 0:
+			value, n := readUvarint(data[pos:])
+			if n <= 0 {
+				return fields
+			}
+			field.value = value
+			pos += n
+		case 1:
+			if pos+8 > len(data) {
+				return fields
+			}
+			field.bytes = data[pos : pos+8]
+			pos += 8
+		case 2:
+			length, n := readUvarint(data[pos:])
+			if n <= 0 {
+				return fields
+			}
+			pos += n
+			if length > uint64(len(data)-pos) {
+				return fields
+			}
+			field.bytes = data[pos : pos+int(length)]
+			pos += int(length)
+		case 5:
+			if pos+4 > len(data) {
+				return fields
+			}
+			field.bytes = data[pos : pos+4]
+			pos += 4
+		default:
+			return fields
+		}
+		fields = append(fields, field)
+	}
+	return fields
+}
+
+func firstBytesField(fields []protoField, num int) []byte {
+	for _, field := range fields {
+		if field.num == num && field.wire == 2 {
+			return field.bytes
+		}
+	}
+	return nil
+}
+
+func bytesFields(fields []protoField, num int) [][]byte {
+	var out [][]byte
+	for _, field := range fields {
+		if field.num == num && field.wire == 2 {
+			out = append(out, field.bytes)
+		}
+	}
+	return out
+}
+
+func firstVarintField(fields []protoField, num int) uint64 {
+	return firstVarintFieldDefault(fields, num, 0)
+}
+
+func firstVarintFieldDefault(fields []protoField, num int, fallback uint64) uint64 {
+	for _, field := range fields {
+		if field.num == num && field.wire == 0 {
+			return field.value
+		}
+	}
+	return fallback
+}
+
+func packedVarints(data []byte) []uint64 {
+	var out []uint64
+	for pos := 0; pos < len(data); {
+		value, n := readUvarint(data[pos:])
+		if n <= 0 {
+			break
+		}
+		out = append(out, value)
+		pos += n
+	}
+	return out
+}
+
+func packedSVarints(data []byte) []int64 {
+	raw := packedVarints(data)
+	out := make([]int64, len(raw))
+	for i, value := range raw {
+		out[i] = zigZag(value)
+	}
+	return out
+}
+
+func readUvarint(data []byte) (uint64, int) {
+	var x uint64
+	var s uint
+	for i, b := range data {
+		if b < 0x80 {
+			if i > 9 || i == 9 && b > 1 {
+				return 0, -1
+			}
+			return x | uint64(b)<<s, i + 1
+		}
+		x |= uint64(b&0x7f) << s
+		s += 7
+	}
+	return 0, 0
+}
+
+func zigZag(v uint64) int64 {
+	return int64(v>>1) ^ -int64(v&1)
 }
 
 func importSpatialRecords(ctx context.Context, db *tinysql.DB, tenant, tableName string, records [][]string, opts *ImportOptions) (*ImportResult, error) {

@@ -1035,7 +1035,7 @@ func (a *App) validateAutoRunnableSQL(ctx context.Context, sqlText string) error
 	}
 	class := classifySQL(sqlText)
 	if class != sqlutil.StatementReadQuery {
-		return errors.New("automatic execution is limited to SELECT, WITH, SHOW, or EXPLAIN")
+		return errors.New("automatic execution is limited to SELECT, WITH, SHOW, EXPLAIN, DESCRIBE, or PRAGMA")
 	}
 	dialect := a.currentDialect()
 	if conn := a.activeConn(ctx); conn != nil {

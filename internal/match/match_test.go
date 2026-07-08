@@ -276,7 +276,7 @@ func TestValidateEAN(t *testing.T) {
 		{"12345670", true},       // valid EAN-8
 		{"12345671", false},      // valid EAN-8 with the last digit flipped
 		{"1234567", false},       // too short
-		{"400638133393X", false},  // non-digit
+		{"400638133393X", false}, // non-digit
 		{"", false},
 	}
 	for _, c := range cases {

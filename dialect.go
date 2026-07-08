@@ -115,12 +115,17 @@ func tinySQLDialectProfile() DialectProfile {
 		Notes: []string{
 			"Use tinySQL's SQLite-like subset.",
 			"Prefer straightforward SELECT, JOIN, WHERE, GROUP BY, ORDER BY, LIMIT syntax.",
+			"tinySQL supports common SQLite-compatible PRAGMAs, system catalog views, materialized views, triggers, vector/FTS functions, and process-local stored procedures.",
 			"Avoid vendor-specific PostgreSQL, MySQL, or SQL Server functions unless explicitly supported by the schema/database.",
 		},
-		BlockedAutoWords: defaultBlockedAutoWords(),
+		BlockedAutoWords: tinySQLBlockedAutoWords(),
 	}
 }
 
 func defaultBlockedAutoWords() []string {
 	return []string{"DROP", "DELETE", "UPDATE", "ALTER", "TRUNCATE", "ATTACH", "PRAGMA", "INSERT", "CREATE", "MERGE", "EXEC", "CALL"}
+}
+
+func tinySQLBlockedAutoWords() []string {
+	return []string{"DROP", "DELETE", "UPDATE", "ALTER", "TRUNCATE", "ATTACH", "INSERT", "CREATE", "MERGE", "EXEC", "CALL"}
 }

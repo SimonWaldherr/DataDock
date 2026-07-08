@@ -21,13 +21,13 @@
       <div class="col-md-4">
         <div class="metric">
           <div class="fw-semibold"><i class="bi bi-upload text-primary me-1"></i>Import</div>
-          <div class="small text-muted">Upload tabular files plus GeoJSON, KML, OSM, Shapefile ZIP, MBTiles, or RG data into a new tinySQL table.</div>
+          <div class="small text-muted">Upload tabular files, HTML tables, SQLite databases, compact binary data, calendars/contacts, and map formats into a new tinySQL table.</div>
         </div>
       </div>
       <div class="col-md-4">
         <div class="metric">
           <div class="fw-semibold"><i class="bi bi-terminal text-primary me-1"></i>Query</div>
-          <div class="small text-muted">Use the SQL editor for exploration, exports, charts, and LLM-assisted SQL.</div>
+          <div class="small text-muted">Use the SQL editor for exploration, map-aware exports, charts, and LLM-assisted SQL.</div>
         </div>
       </div>
     </div>
@@ -41,8 +41,13 @@
       <thead><tr><th>Format</th><th>Behavior</th></tr></thead>
       <tbody>
         <tr><td>CSV / TSV</td><td>Header row can be auto-detected, forced present, or forced absent.</td></tr>
-        <tr><td>JSON / NDJSON</td><td>Imports an array of objects into columns derived from object keys.</td></tr>
-        <tr><td>GeoJSON / KML / OSM</td><td>Imports features with GeoJSON geometry text, geometry type, and useful tags/properties.</td></tr>
+        <tr><td>JSON / NDJSON / MessagePack / CBOR / BSON</td><td>Imports objects into columns derived from object keys.</td></tr>
+        <tr><td>HTML</td><td>Imports table rows from HTML documents into a rectangular table.</td></tr>
+        <tr><td>SQLite</td><td>Imports rows from user tables/views into one combined table with a source_table column.</td></tr>
+        <tr><td>Parquet / Arrow / Feather / DuckDB</td><td>Imports file-level manifests so the files can be tracked in DataDock.</td></tr>
+        <tr><td>iCalendar / vCard</td><td>Imports events/tasks or contacts into queryable columns.</td></tr>
+        <tr><td>GeoJSON / GeoPackage / GPX / KML / OSM</td><td>Imports features with GeoJSON geometry text, geometry type, and useful tags/properties.</td></tr>
+        <tr><td>OSM PBF</td><td>Imports tagged nodes and ways from compact binary OSM extracts, building LineString/Polygon geometry from node references where possible.</td></tr>
         <tr><td>Shapefile ZIP</td><td>Reads the first .shp in a ZIP, converting shapes to GeoJSON geometry and DBF attributes to columns.</td></tr>
         <tr><td>MBTiles</td><td>Imports metadata plus a tile index with size, SHA-256, and base64 tile data for small tiles.</td></tr>
         <tr><td>RG</td><td>Imports JSON/NDJSON routing graphs as node and edge rows with geometry where present.</td></tr>
@@ -76,7 +81,9 @@ FROM datadock_demo_locations
 ORDER BY name;
 SELECT source, external_id, imported_at, payload_json, payload_xml
 FROM datadock_demo_payloads
-ORDER BY imported_at;</pre>
+ORDER BY imported_at;
+PRAGMA table_info(datadock_demo_people);
+CALL datadock_agent_context(12, 6000);</pre>
   </div>
 </div>
 

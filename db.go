@@ -12,6 +12,7 @@ import (
 	"time"
 
 	dbcatalog "github.com/SimonWaldherr/datadock/internal/catalog"
+	"github.com/SimonWaldherr/datadock/internal/resultutil"
 	"github.com/SimonWaldherr/datadock/internal/sqlutil"
 	tinysql "github.com/SimonWaldherr/tinySQL"
 	"github.com/robfig/cron/v3"
@@ -724,12 +725,12 @@ func (a *App) executeSQL(ctx context.Context, query string) QueryResult { //noli
 	result := QueryResult{StatementClass: classifySQL(query)}
 
 	if !isResultQuerySQL(query) && a.currentReadOnlyMode() {
-		result.Err = "maintenance mode is active: only SELECT/WITH/SHOW/EXPLAIN queries are allowed"
+		result.Err = resultQueryRequiredMessage("maintenance mode is active")
 		result.Elapsed = time.Since(start)
 		return result
 	}
 
-	if isResultQuerySQL(query) {
+	if queryReturnsRowsInEditor(result.StatementClass) {
 		cols, rows, err := a.queryRows(ctx, query)
 		if err != nil {
 			result.Err = err.Error()
@@ -765,12 +766,12 @@ func (a *App) executeSQLWindow(ctx context.Context, query string, offset, limit 
 	}
 
 	if !isResultQuerySQL(query) && a.currentReadOnlyMode() {
-		result.Err = "maintenance mode is active: only SELECT/WITH/SHOW/EXPLAIN queries are allowed"
+		result.Err = resultQueryRequiredMessage("maintenance mode is active")
 		result.Elapsed = time.Since(start)
 		return result
 	}
 
-	if isResultQuerySQL(query) {
+	if queryReturnsRowsInEditor(result.StatementClass) {
 		cols, rows, hasMore, err := a.queryRowsWindow(ctx, query, offset, limit)
 		if err != nil {
 			result.Err = err.Error()
@@ -800,6 +801,9 @@ func (a *App) queryRows(ctx context.Context, query string) ([]string, [][]string
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
 	conn := a.activeConn(ctx)
+	if conn != nil && conn.IsTinySQL() {
+		return a.queryTinySQLRows(ctx, query)
+	}
 	rows, err := a.queryConn(ctx, conn, "query.rows", query)
 	if err != nil {
 		return nil, nil, err
@@ -812,12 +816,33 @@ func (a *App) queryRowsWindow(ctx context.Context, query string, offset, limit i
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
 	conn := a.activeConn(ctx)
+	if conn != nil && conn.IsTinySQL() {
+		cols, rows, err := a.queryTinySQLRows(ctx, query)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		outCols, outRows, hasMore := sliceRowsWindow(cols, rows, offset, limit)
+		return outCols, outRows, hasMore, nil
+	}
 	rows, err := a.queryConn(ctx, conn, "query.rows", query)
 	if err != nil {
 		return nil, nil, false, err
 	}
 	defer rows.Close()
 	return scanRowsWindow(rows, offset, limit)
+}
+
+func (a *App) queryTinySQLRows(ctx context.Context, query string) ([]string, [][]string, error) {
+	stmt, err := tinysql.ParseSQL(query)
+	if err != nil {
+		return nil, nil, err
+	}
+	rs, err := tinysql.Execute(ctx, a.nativeDB, a.tenant, stmt)
+	if err != nil {
+		return nil, nil, err
+	}
+	cols, rows := resultutil.ResultSetToStringMatrix(rs)
+	return cols, rows, nil
 }
 
 func scanRows(rows *sql.Rows) ([]string, [][]string, error) {
@@ -872,6 +897,24 @@ func scanRowsWindow(rows *sql.Rows, offset, limit int) ([]string, [][]string, bo
 		return nil, nil, false, err
 	}
 	return cols, result, hasMore, nil
+}
+
+func sliceRowsWindow(cols []string, rows [][]string, offset, limit int) ([]string, [][]string, bool) {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	if offset >= len(rows) {
+		return cols, nil, false
+	}
+	end := offset + limit
+	hasMore := end < len(rows)
+	if end > len(rows) {
+		end = len(rows)
+	}
+	return cols, rows[offset:end], hasMore
 }
 
 func scanSQLRow(rows *sql.Rows, cols []string) ([]string, error) {
@@ -1020,6 +1063,18 @@ func isDataDockSystemObject(name string) bool {
 
 func isResultQuerySQL(query string) bool {
 	return sqlutil.IsResultProducing(query)
+}
+
+func queryReturnsRowsInEditor(class sqlutil.StatementClass) bool {
+	return class == sqlutil.StatementReadQuery || class == sqlutil.StatementProcedureCall
+}
+
+func resultQueryRequiredMessage(prefix string) string {
+	msg := "only SELECT/WITH/SHOW/EXPLAIN/DESCRIBE/PRAGMA queries are allowed"
+	if strings.TrimSpace(prefix) == "" {
+		return msg
+	}
+	return prefix + ": " + msg
 }
 
 func classifySQL(query string) sqlutil.StatementClass {

@@ -1019,6 +1019,10 @@ var sampleQueries = [
     'SELECT source, external_id, imported_at, payload_json, payload_xml\nFROM datadock_demo_payloads\nORDER BY imported_at' },
   { label: 'XML payload tree', viewMode: 'xml', sql:
     'SELECT source, payload_xml\nFROM datadock_demo_payloads\nORDER BY imported_at' },
+  { label: 'tinySQL agent context', viewMode: 'json', sql:
+    'CALL datadock_agent_context(12, 6000)' },
+  { label: 'tinySQL table info PRAGMA', sql:
+    'PRAGMA table_info(datadock_demo_people)' },
   { label: 'Excel CSV edge cases', sql:
     'SELECT external_id, imported_at, source\nFROM datadock_demo_payloads\nORDER BY external_id' }
 ];
@@ -2284,6 +2288,18 @@ function exportFileExtension(format) {
       return 'excel.csv';
     case 'geojson':
       return 'geojson';
+    case 'geojson-summary':
+    case 'geojson-stats':
+      return 'geojson-summary.json';
+    case 'shp':
+    case 'shapefile':
+    case 'shpzip':
+      return 'shp.zip';
+    case 'sqlite3':
+    case 'db':
+      return 'sqlite';
+    case 'htm':
+      return 'html';
     default:
       return format || 'csv';
   }

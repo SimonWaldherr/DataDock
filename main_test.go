@@ -1135,6 +1135,45 @@ func TestAPIQueryHandlerWindow(t *testing.T) {
 	}
 }
 
+func TestTinySQLV014PragmaAndAgentContext(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE vals (id INT, name TEXT)"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	pragmaReq := httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(`{"sql":"PRAGMA table_info(vals)"}`))
+	pragmaReq.Header.Set("Content-Type", "application/json")
+	pragmaRec := httptest.NewRecorder()
+	app.apiQueryHandler(pragmaRec, pragmaReq)
+	if pragmaRec.Code != http.StatusOK {
+		t.Fatalf("expected PRAGMA 200, got %d; body: %s", pragmaRec.Code, pragmaRec.Body.String())
+	}
+	if !strings.Contains(pragmaRec.Body.String(), "read_query") || !strings.Contains(pragmaRec.Body.String(), "name") {
+		t.Fatalf("unexpected PRAGMA response: %s", pragmaRec.Body.String())
+	}
+
+	callReq := httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(`{"sql":"CALL datadock_agent_context(4, 2000)"}`))
+	callReq.Header.Set("Content-Type", "application/json")
+	callRec := httptest.NewRecorder()
+	app.apiQueryHandler(callRec, callReq)
+	if callRec.Code != http.StatusOK {
+		t.Fatalf("expected CALL 200, got %d; body: %s", callRec.Code, callRec.Body.String())
+	}
+	if !strings.Contains(callRec.Body.String(), "procedure_call") || !strings.Contains(callRec.Body.String(), "vals") {
+		t.Fatalf("unexpected CALL response: %s", callRec.Body.String())
+	}
+
+	ctxReq := httptest.NewRequest(http.MethodGet, "/api/tinysql/agent-context?max_tables=4&max_chars=2000", nil)
+	ctxRec := httptest.NewRecorder()
+	app.apiTinySQLAgentContextHandler(ctxRec, ctxReq)
+	if ctxRec.Code != http.StatusOK {
+		t.Fatalf("expected agent context 200, got %d; body: %s", ctxRec.Code, ctxRec.Body.String())
+	}
+	if !strings.Contains(ctxRec.Body.String(), "vals") || !strings.Contains(ctxRec.Body.String(), `"max_tables":4`) {
+		t.Fatalf("unexpected agent context response: %s", ctxRec.Body.String())
+	}
+}
+
 func TestTableExportCSVAndJSON(t *testing.T) {
 	app := newTestApp(t)
 	if _, err := app.sqlDB.Exec("CREATE TABLE people (id INT, name TEXT)"); err != nil {
@@ -1314,6 +1353,158 @@ func TestGeoJSONExportFromLonLat(t *testing.T) {
 	}
 }
 
+func TestGeoJSONExportOptionsMapshaperLike(t *testing.T) {
+	columns := []string{"geometry", "name", "kind", "drop_me"}
+	rows := [][]string{{
+		`{"type":"MultiLineString","coordinates":[[[0,0],[0.5,0.001],[1,0]],[[10,10],[11,11]]]}`,
+		"Main",
+		"road",
+		"hidden",
+	}}
+	kinds := typed.InferColumns(rows, len(columns))
+
+	fc := buildGeoJSONFeatureCollection(columns, rows, kinds)
+	transformed := applyGeoJSONExportOptions(fc, exportOptions{
+		Explode:           true,
+		SimplifyTolerance: 0.01,
+		BBox:              &geoBBox{MinX: -1, MinY: -1, MaxX: 2, MaxY: 2},
+		Fields:            []string{"name", "kind", "drop_me"},
+		DropFields:        []string{"drop_me"},
+	})
+
+	if len(transformed.Features) != 1 {
+		t.Fatalf("features after explode/bbox = %d, want 1: %#v", len(transformed.Features), transformed.Features)
+	}
+	if got := transformed.Features[0].Geometry["type"]; got != "LineString" {
+		t.Fatalf("geometry type = %v, want LineString", got)
+	}
+	points := toPointList(transformed.Features[0].Geometry["coordinates"])
+	if len(points) != 2 {
+		t.Fatalf("simplified points = %d, want 2: %#v", len(points), points)
+	}
+	props := transformed.Features[0].Properties
+	if props["name"] != "Main" || props["kind"] != "road" {
+		t.Fatalf("unexpected kept properties: %#v", props)
+	}
+	if _, ok := props["drop_me"]; ok {
+		t.Fatalf("drop_me should have been removed: %#v", props)
+	}
+}
+
+func TestTableExportMapFormats(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE places (name TEXT, lon TEXT, lat TEXT)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := app.sqlDB.Exec("INSERT INTO places (name, lon, lat) VALUES ('Munich', 11.5761, 48.1372)"); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	for _, tc := range []struct {
+		format      string
+		contentType string
+		body        string
+	}{
+		{"kml", "kml", "<coordinates>11.5761,48.1372,0</coordinates>"},
+		{"gpx", "gpx", `<wpt lat="48.1372" lon="11.5761">`},
+		{"html", "text/html", "<td>Munich</td>"},
+		{"geojson-summary", "application/json", `"Point":1`},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/t/places/export?format="+tc.format, nil)
+		req.SetPathValue("table", "places")
+		rec := httptest.NewRecorder()
+		app.exportTableHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s export code = %d; body: %s", tc.format, rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Content-Type"); !strings.Contains(got, tc.contentType) {
+			t.Fatalf("%s content type = %q, want %q", tc.format, got, tc.contentType)
+		}
+		if !strings.Contains(rec.Body.String(), tc.body) {
+			t.Fatalf("%s body missing %q: %s", tc.format, tc.body, rec.Body.String())
+		}
+	}
+}
+
+func TestTableExportSQLiteAndShapefile(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE places_export (name TEXT, lon TEXT, lat TEXT)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := app.sqlDB.Exec("INSERT INTO places_export (name, lon, lat) VALUES ('Munich', 11.5761, 48.1372)"); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	sqliteReq := httptest.NewRequest(http.MethodGet, "/t/places_export/export?format=sqlite", nil)
+	sqliteReq.SetPathValue("table", "places_export")
+	sqliteRec := httptest.NewRecorder()
+	app.exportTableHandler(sqliteRec, sqliteReq)
+	if sqliteRec.Code != http.StatusOK {
+		t.Fatalf("sqlite export code = %d; body: %s", sqliteRec.Code, sqliteRec.Body.String())
+	}
+	sqlitePath := writeTempTestFile(t, "datadock-export-*.sqlite", sqliteRec.Body.Bytes())
+	exportedDB, err := sql.Open("sqlite", sqlitePath)
+	if err != nil {
+		t.Fatalf("open exported sqlite: %v", err)
+	}
+	defer exportedDB.Close()
+	var name string
+	if err := exportedDB.QueryRow(`SELECT name FROM places_export`).Scan(&name); err != nil {
+		t.Fatalf("query exported sqlite: %v", err)
+	}
+	if name != "Munich" {
+		t.Fatalf("sqlite name = %q, want Munich", name)
+	}
+
+	shpReq := httptest.NewRequest(http.MethodGet, "/t/places_export/export?format=shp", nil)
+	shpReq.SetPathValue("table", "places_export")
+	shpRec := httptest.NewRecorder()
+	app.exportTableHandler(shpRec, shpReq)
+	if shpRec.Code != http.StatusOK {
+		t.Fatalf("shp export code = %d; body: %s", shpRec.Code, shpRec.Body.String())
+	}
+	if got := shpRec.Header().Get("Content-Type"); !strings.Contains(got, "application/zip") {
+		t.Fatalf("shp content type = %q", got)
+	}
+	for _, name := range []string{"places_export.shp", "places_export.shx", "places_export.dbf"} {
+		if !zipContainsFile(t, shpRec.Body.Bytes(), name) {
+			t.Fatalf("shapefile zip missing %s", name)
+		}
+	}
+}
+
+func writeTempTestFile(t *testing.T, pattern string, data []byte) string {
+	t.Helper()
+	file, err := os.CreateTemp("", pattern)
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	path := file.Name()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		t.Fatalf("write temp file: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close temp file: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+	return path
+}
+
+func zipContainsFile(t *testing.T, data []byte, want string) bool {
+	t.Helper()
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("read zip: %v", err)
+	}
+	for _, file := range zr.File {
+		if file.Name == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestViewsAppearAsBrowsableObjects(t *testing.T) {
 	app := newTestApp(t)
 	if _, err := app.sqlDB.Exec("CREATE TABLE base_people (id INT, name TEXT)"); err != nil {
@@ -1429,9 +1620,26 @@ func TestExportContentDisposition(t *testing.T) {
 func TestImportFormatFromNameMapFormats(t *testing.T) {
 	tests := map[string]string{
 		"places.geojson":        "geojson",
+		"places.gpkg":           "gpkg",
+		"track.gpx":             "gpx",
+		"warehouse.sqlite":      "sqlite",
+		"warehouse.sqlite3":     "sqlite3",
+		"warehouse.db":          "db",
+		"warehouse.duckdb":      "duckdb",
+		"dataset.parquet":       "parquet",
+		"dataset.arrow":         "arrow",
+		"dataset.feather":       "feather",
+		"table.html":            "html",
+		"records.msgpack":       "msgpack",
+		"records.cbor":          "cbor",
+		"records.bson":          "bson",
+		"calendar.ics":          "ics",
+		"contacts.vcf":          "vcf",
 		"route.kml":             "kml",
 		"berlin.osm":            "osm",
 		"berlin.osm.xml":        "osm",
+		"berlin.osm.pbf":        "pbf",
+		"extract.pbf":           "pbf",
 		"roads.zip":             "shp",
 		"tiles.mbtiles":         "mbtiles",
 		"network.rg":            "rg",
@@ -1449,9 +1657,23 @@ func TestMapImportsUseLargerUploadLimit(t *testing.T) {
 	if got := importUploadLimit("csv"); got != maxImportUploadBytes {
 		t.Fatalf("csv upload limit = %d, want %d", got, maxImportUploadBytes)
 	}
-	for _, format := range []string{"geojson", "kml", "osm", "shp", "mbtiles", "rg"} {
+	for _, format := range []string{"geojson", "gpkg", "gpx", "kml", "osm", "pbf", "shp", "mbtiles", "rg", "sqlite", "duckdb", "parquet", "arrow", "feather"} {
 		if got := importUploadLimit(format); got != maxMapImportUploadBytes {
 			t.Fatalf("%s upload limit = %d, want %d", format, got, maxMapImportUploadBytes)
+		}
+	}
+}
+
+func TestXLSXToCSVMergesMultipleSheets(t *testing.T) {
+	data := testMultiSheetXLSX(t)
+	csvData, err := xlsxToCSV(data)
+	if err != nil {
+		t.Fatalf("xlsxToCSV: %v", err)
+	}
+	got := strings.TrimSpace(string(csvData))
+	for _, want := range []string{"sheet,name", "sheet1,Ada", "sheet2,Grace"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("converted CSV %q does not contain %q", got, want)
 		}
 	}
 }
@@ -1560,4 +1782,27 @@ func xlsxZipContains(t *testing.T, data []byte, want string) bool {
 	}
 	t.Fatalf("xlsx sheet not found")
 	return false
+}
+
+func testMultiSheetXLSX(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	sheets := map[string]string{
+		"xl/worksheets/sheet1.xml": `<worksheet><sheetData><row><c r="A1" t="inlineStr"><is><t>name</t></is></c></row><row><c r="A2" t="inlineStr"><is><t>Ada</t></is></c></row></sheetData></worksheet>`,
+		"xl/worksheets/sheet2.xml": `<worksheet><sheetData><row><c r="A1" t="inlineStr"><is><t>name</t></is></c></row><row><c r="A2" t="inlineStr"><is><t>Grace</t></is></c></row></sheetData></worksheet>`,
+	}
+	for name, body := range sheets {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close xlsx zip: %v", err)
+	}
+	return buf.Bytes()
 }

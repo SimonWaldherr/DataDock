@@ -15,6 +15,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -40,7 +41,7 @@ func newApp(nativeDB *tinysql.DB, sqlDB *sql.DB, tenant string, tpl *template.Te
 		DB:      sqlDB,
 		Native:  nativeDB,
 	}
-	return &App{
+	app := &App{
 		nativeDB:       nativeDB,
 		sqlDB:          sqlDB,
 		tenant:         tenant,
@@ -55,6 +56,8 @@ func newApp(nativeDB *tinysql.DB, sqlDB *sql.DB, tenant string, tpl *template.Te
 		defaultTheme:   defaultUITheme,
 		defaultDensity: defaultUIDensity,
 	}
+	app.registerTinySQLProcedures()
+	return app
 }
 
 // registerRoutes wires up all HTTP routes.
@@ -152,6 +155,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /api/query", a.apiQueryHandler)
 	handle("POST /api/export", a.apiExportHandler)
 	handle("GET /api/schema", a.apiSchemaHandler)
+	handle("GET /api/tinysql/agent-context", a.apiTinySQLAgentContextHandler)
 	handle("GET /api/catalog", a.apiCatalogHandler)
 	handle("GET /api/catalog/expand", a.apiCatalogExpandHandler)
 	handle("POST /api/logic-search", a.apiLogicSearchHandler)
@@ -266,8 +270,12 @@ func (a *App) writeProblem(w http.ResponseWriter, r *http.Request, status int, t
 	standards.WriteProblem(w, standards.NewProblem(status, title, detail, r.URL.Path))
 }
 
-func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]string, format, filenameBase string) bool {
+func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]string, format, filenameBase string, opts ...exportOptions) bool {
 	kinds := typed.InferColumns(rows, len(columns))
+	exportOpts := exportOptions{}
+	if len(opts) > 0 {
+		exportOpts = opts[0]
+	}
 	switch strings.ToLower(strings.TrimSpace(format)) {
 	case "", "csv":
 		w.Header().Set("Content-Type", standards.MediaTypeCSV)
@@ -332,7 +340,19 @@ func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]stri
 		_ = xml.NewEncoder(w).Encode(exportXMLDocument(columns, rows, kinds))
 		return true
 	case "geojson":
-		return writeGeoJSONExport(w, columns, rows, kinds, filenameBase) == nil
+		return writeGeoJSONExportWithOptions(w, columns, rows, kinds, filenameBase, exportOpts) == nil
+	case "geojson-summary", "geojson-stats":
+		return writeGeoJSONSummaryExport(w, columns, rows, kinds, filenameBase, exportOpts) == nil
+	case "kml":
+		return writeKMLExport(w, columns, rows, kinds, filenameBase, exportOpts) == nil
+	case "gpx":
+		return writeGPXExport(w, columns, rows, kinds, filenameBase, exportOpts) == nil
+	case "shp", "shapefile", "shpzip", "shp.zip":
+		return writeShapefileZipExport(w, columns, rows, kinds, filenameBase, exportOpts) == nil
+	case "sqlite", "sqlite3", "db":
+		return writeSQLiteExport(w, columns, rows, filenameBase) == nil
+	case "html", "htm":
+		return writeHTMLExport(w, columns, rows, filenameBase) == nil
 	case "xlsx":
 		w.Header().Set("Content-Type", standards.MediaTypeXLSX)
 		w.Header().Set("Content-Disposition", exportContentDisposition(filenameBase, "xlsx"))
@@ -795,7 +815,12 @@ func (a *App) exportTableHandler(w http.ResponseWriter, r *http.Request) {
 		a.serverError(w, err)
 		return
 	}
-	if ok := a.writeExport(w, cols, rows, r.URL.Query().Get("format"), meta.Name); !ok {
+	opts, err := exportOptionsFromValues(r.URL.Query())
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid export option", err.Error())
+		return
+	}
+	if ok := a.writeExport(w, cols, rows, r.URL.Query().Get("format"), meta.Name, opts); !ok {
 		http.Error(w, "unsupported export format", http.StatusBadRequest)
 	}
 }
@@ -2149,7 +2174,8 @@ func (a *App) importFileHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // importUploadedFile parses a multipart file upload (CSV/TSV/JSON/NDJSON/
-// XLSX/XML/YAML/GeoJSON/KML/OSM/Shapefile ZIP/MBTiles/RG) and imports it into a new table on the local
+// XLSX/XML/YAML plus supported geodata, database, calendar, contact, HTML,
+// and compact binary data formats) and imports it into a new table on the local
 // tinySQL database — the only backend file import currently supports.
 // Shared by the Manage Tables import tab (importFileHandler) and the
 // Matching wizard's "File Upload" connection option (resolveMatchTableSide,
@@ -2204,7 +2230,7 @@ const (
 
 func importUploadLimit(format string) int64 {
 	switch strings.ToLower(strings.TrimSpace(format)) {
-	case "geojson", "kml", "osm", "shp", "shapefile", "shpzip", "mbtiles", "rg", "routing-graph", "routing_graph":
+	case "geojson", "gpkg", "geopackage", "gpx", "kml", "osm", "pbf", "osmpbf", "osm-pbf", "shp", "shapefile", "shpzip", "mbtiles", "rg", "routing-graph", "routing_graph", "sqlite", "sqlite3", "db", "duckdb", "parquet", "arrow", "feather":
 		return maxMapImportUploadBytes
 	default:
 		return maxImportUploadBytes
@@ -2780,8 +2806,14 @@ func clampQueryWindowLimit(limit int) int {
 // apiExportHandler streams the result of a read-only SQL query as CSV or JSON.
 func (a *App) apiExportHandler(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		SQL    string `json:"sql"`
-		Format string `json:"format"`
+		SQL               string    `json:"sql"`
+		Format            string    `json:"format"`
+		Explode           bool      `json:"explode"`
+		Simplify          float64   `json:"simplify"`
+		SimplifyTolerance float64   `json:"simplify_tolerance"`
+		BBox              []float64 `json:"bbox"`
+		Fields            []string  `json:"fields"`
+		DropFields        []string  `json:"drop_fields"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
@@ -2794,7 +2826,7 @@ func (a *App) apiExportHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !isResultQuerySQL(query) {
-		a.writeProblem(w, r, http.StatusBadRequest, "Unsupported SQL", "export requires SELECT, WITH, SHOW, or EXPLAIN")
+		a.writeProblem(w, r, http.StatusBadRequest, "Unsupported SQL", "export requires SELECT, WITH, SHOW, EXPLAIN, DESCRIBE, or PRAGMA")
 		return
 	}
 
@@ -2803,7 +2835,27 @@ func (a *App) apiExportHandler(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, r, http.StatusInternalServerError, "Query failed", err.Error())
 		return
 	}
-	if ok := a.writeExport(w, cols, rows, body.Format, "query"); !ok {
+	opts := exportOptions{
+		Explode:           body.Explode,
+		SimplifyTolerance: body.SimplifyTolerance,
+		Fields:            body.Fields,
+		DropFields:        body.DropFields,
+	}
+	if opts.SimplifyTolerance == 0 && body.Simplify > 0 {
+		opts.SimplifyTolerance = body.Simplify
+	}
+	if opts.SimplifyTolerance < 0 {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid export option", "simplify_tolerance must be non-negative")
+		return
+	}
+	if len(body.BBox) > 0 {
+		if len(body.BBox) != 4 || body.BBox[0] > body.BBox[2] || body.BBox[1] > body.BBox[3] {
+			a.writeProblem(w, r, http.StatusBadRequest, "Invalid export option", "bbox must be [minx,miny,maxx,maxy]")
+			return
+		}
+		opts.BBox = &geoBBox{MinX: body.BBox[0], MinY: body.BBox[1], MaxX: body.BBox[2], MaxY: body.BBox[3]}
+	}
+	if ok := a.writeExport(w, cols, rows, body.Format, "query", opts); !ok {
 		a.writeProblem(w, r, http.StatusBadRequest, "Unsupported export format", "unsupported export format")
 	}
 }
@@ -2811,6 +2863,47 @@ func (a *App) apiExportHandler(w http.ResponseWriter, r *http.Request) {
 func (a *App) apiSchemaHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", standards.MediaTypeJSON)
 	_, _ = w.Write([]byte(a.schemaSnapshot(r.Context())))
+}
+
+func (a *App) apiTinySQLAgentContextHandler(w http.ResponseWriter, r *http.Request) {
+	if conn := a.activeConn(r.Context()); conn != nil && !conn.IsTinySQL() {
+		a.writeProblem(w, r, http.StatusBadRequest, "Unsupported connection", "tinySQL agent context is available for the local tinySQL connection only")
+		return
+	}
+	maxTables, err := optionalPositiveIntQuery(r, "max_tables", 12)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid query parameter", err.Error())
+		return
+	}
+	maxChars, err := optionalPositiveIntQuery(r, "max_chars", 6000)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid query parameter", err.Error())
+		return
+	}
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	profile, err := a.buildTinySQLAgentContext(ctx, maxTables, maxChars)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusInternalServerError, "Agent context failed", err.Error())
+		return
+	}
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"context":    profile,
+		"max_tables": maxTables,
+		"max_chars":  maxChars,
+	})
+}
+
+func optionalPositiveIntQuery(r *http.Request, name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return value, nil
 }
 
 // apiCatalogHandler returns the full server-wide catalog tree (every
@@ -3371,10 +3464,34 @@ func importContent(ctx context.Context, db *tinysql.DB, tenant, table, format st
 		return dbimporter.ImportYAML(ctx, db, tenant, table, src, opts)
 	case "xml":
 		return dbimporter.ImportXML(ctx, db, tenant, table, src, opts)
+	case "html", "htm":
+		return dbimporter.ImportHTMLTables(ctx, db, tenant, table, src, opts)
+	case "msgpack", "mpack", "msg":
+		return dbimporter.ImportMessagePack(ctx, db, tenant, table, src, opts)
+	case "cbor":
+		return dbimporter.ImportCBOR(ctx, db, tenant, table, src, opts)
+	case "bson":
+		return dbimporter.ImportBSON(ctx, db, tenant, table, src, opts)
+	case "ics", "ical", "icalendar":
+		return dbimporter.ImportICalendar(ctx, db, tenant, table, src, opts)
+	case "vcf", "vcard":
+		return dbimporter.ImportVCard(ctx, db, tenant, table, src, opts)
+	case "sqlite", "sqlite3", "db":
+		return dbimporter.ImportSQLite(ctx, db, tenant, table, src, opts)
+	case "duckdb":
+		return dbimporter.ImportDuckDBManifest(ctx, db, tenant, table, src, opts)
+	case "parquet", "arrow", "feather":
+		return dbimporter.ImportColumnarManifest(ctx, db, tenant, table, format, src, opts)
 	case "kml":
 		return dbimporter.ImportKML(ctx, db, tenant, table, src, opts)
+	case "gpx":
+		return dbimporter.ImportGPX(ctx, db, tenant, table, src, opts)
 	case "osm":
 		return dbimporter.ImportOSM(ctx, db, tenant, table, src, opts)
+	case "pbf", "osmpbf", "osm-pbf":
+		return dbimporter.ImportOSMPBF(ctx, db, tenant, table, src, opts)
+	case "gpkg", "geopackage":
+		return dbimporter.ImportGeoPackage(ctx, db, tenant, table, src, opts)
 	case "shp", "shapefile", "shpzip":
 		return dbimporter.ImportShapefileZip(ctx, db, tenant, table, src, opts)
 	case "mbtiles":
@@ -3421,12 +3538,15 @@ func importFormatFromName(filename, selected string) string {
 	if strings.HasSuffix(name, ".osm.xml") {
 		return "osm"
 	}
+	if strings.HasSuffix(name, ".osm.pbf") {
+		return "pbf"
+	}
 	if strings.HasSuffix(name, ".routing-graph") || strings.HasSuffix(name, ".routing_graph") || strings.HasSuffix(name, ".graph.json") {
 		return "rg"
 	}
 	if i := strings.LastIndex(name, "."); i >= 0 {
 		switch name[i+1:] {
-		case "csv", "tsv", "json", "ndjson", "xlsx", "xml", "yaml", "yml", "geojson", "kml", "osm", "mbtiles", "rg":
+		case "csv", "tsv", "json", "ndjson", "xlsx", "xml", "yaml", "yml", "geojson", "gpkg", "gpx", "kml", "osm", "pbf", "mbtiles", "rg", "sqlite", "sqlite3", "db", "duckdb", "parquet", "arrow", "feather", "html", "htm", "msgpack", "mpack", "msg", "cbor", "bson", "ics", "ical", "vcf", "vcard":
 			return name[i+1:]
 		case "zip", "shp":
 			return "shp"
@@ -3471,9 +3591,58 @@ func xlsxToCSV(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	sheet := files["xl/worksheets/sheet1.xml"]
+	var sheetNames []string
+	for name := range files {
+		if strings.HasPrefix(name, "xl/worksheets/sheet") && strings.HasSuffix(name, ".xml") {
+			sheetNames = append(sheetNames, name)
+		}
+	}
+	sort.Slice(sheetNames, func(i, j int) bool {
+		return xlsxSheetNumber(sheetNames[i]) < xlsxSheetNumber(sheetNames[j])
+	})
+	if len(sheetNames) == 0 {
+		return nil, fmt.Errorf("no xl/worksheets/sheet*.xml files found")
+	}
+	if len(sheetNames) == 1 {
+		return xlsxRowsToCSV(readXLSXSheetRows(files[sheetNames[0]], shared))
+	}
+
+	var allRows [][]string
+	var header []string
+	maxCols := 0
+	for _, name := range sheetNames {
+		rows, err := readXLSXSheetRows(files[name], shared)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			continue
+		}
+		if len(header) == 0 {
+			header = append([]string{"sheet"}, rows[0]...)
+			maxCols = len(header)
+		}
+		sheetLabel := strings.TrimSuffix(strings.TrimPrefix(name, "xl/worksheets/"), ".xml")
+		for _, row := range rows[1:] {
+			record := append([]string{sheetLabel}, row...)
+			if len(record) > maxCols {
+				maxCols = len(record)
+			}
+			allRows = append(allRows, record)
+		}
+	}
+	if len(header) == 0 {
+		return nil, fmt.Errorf("xlsx contains no worksheet rows")
+	}
+	for len(header) < maxCols {
+		header = append(header, fmt.Sprintf("col_%d", len(header)))
+	}
+	return xlsxRowsToCSV(append([][]string{header}, allRows...), nil)
+}
+
+func readXLSXSheetRows(sheet *zip.File, shared []string) ([][]string, error) {
 	if sheet == nil {
-		return nil, fmt.Errorf("xl/worksheets/sheet1.xml not found")
+		return nil, fmt.Errorf("worksheet not found")
 	}
 	rc, err := sheet.Open()
 	if err != nil {
@@ -3500,8 +3669,21 @@ func xlsxToCSV(data []byte) ([]byte, error) {
 		}
 		rows = append(rows, out)
 	}
+	return rows, nil
+}
+
+func xlsxRowsToCSV(rows [][]string, err error) ([]byte, error) {
+	if err != nil {
+		return nil, err
+	}
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
+	maxCols := 0
+	for _, row := range rows {
+		if len(row) > maxCols {
+			maxCols = len(row)
+		}
+	}
 	for _, row := range rows {
 		for len(row) < maxCols {
 			row = append(row, "")
@@ -3512,6 +3694,15 @@ func xlsxToCSV(data []byte) ([]byte, error) {
 	}
 	w.Flush()
 	return buf.Bytes(), w.Error()
+}
+
+func xlsxSheetNumber(name string) int {
+	base := strings.TrimSuffix(strings.TrimPrefix(name, "xl/worksheets/sheet"), ".xml")
+	n, err := strconv.Atoi(base)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func readXLSXSharedStrings(f *zip.File) ([]string, error) {
