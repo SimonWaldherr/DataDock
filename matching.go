@@ -22,6 +22,7 @@ var matchAllowedMethods = map[string]match.Method{
 	"token_set":  match.MethodTokenSet,
 	"address":    match.MethodAddress,
 	"numeric":    match.MethodNumeric,
+	"ean":        match.MethodEAN,
 }
 
 // MatchFieldSpec is the user-facing configuration for one compared column

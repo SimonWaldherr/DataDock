@@ -908,8 +908,11 @@ function renderCatalogRow(item, db, schemaName, ctx) {
   link.dataset.name = item.name;
   link.appendChild(sidebarTextNode('i', 'bi ' + meta.icon));
   link.appendChild(sidebarTextNode('span', 'tl-text', item.name));
+  var isRoutine = item.kind === 'procedure' || item.kind === 'function';
   if (qualified.navigable) {
-    link.href = '/t/' + encodeURIComponent(qualified.name);
+    link.href = isRoutine
+      ? '/r/' + encodeURIComponent(qualified.name) + '?kind=' + encodeURIComponent(item.kind)
+      : '/t/' + encodeURIComponent(qualified.name);
   } else {
     link.href = '#';
     link.title = 'PostgreSQL can\'t query across databases on one connection. Add "' + db.name + '" as a separate connection to browse it.';

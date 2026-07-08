@@ -41,6 +41,13 @@ const (
 	MethodAddress Method = "address"
 	// MethodNumeric compares two numbers within a relative Tolerance.
 	MethodNumeric Method = "numeric"
+	// MethodEAN compares EAN-8/EAN-13 product codes, but only counts a
+	// field where BOTH sides pass the standard EAN checksum: a garbled or
+	// placeholder code (a common data-quality issue in product master
+	// data) is excluded from scoring rather than compared literally, so it
+	// can't produce a false non-match against a field that would otherwise
+	// agree, or a false match between two equally-garbled codes.
+	MethodEAN Method = "ean"
 )
 
 // FieldRule configures how one pair of columns (source column N, target
@@ -287,6 +294,8 @@ func compareField(a, b string, f FieldRule) (float64, bool) {
 		return addressScore(a, b), true
 	case MethodNumeric:
 		return numericScore(a, b, f.Tolerance)
+	case MethodEAN:
+		return eanScore(a, b)
 	default:
 		return 0, false
 	}

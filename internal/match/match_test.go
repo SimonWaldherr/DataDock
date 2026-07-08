@@ -265,3 +265,53 @@ func TestMatchNoBlockingGuardsAgainstHugeCrossJoin(t *testing.T) {
 		t.Error("expected an error when the unblocked cross join exceeds the safety limit")
 	}
 }
+
+func TestValidateEAN(t *testing.T) {
+	cases := []struct {
+		code string
+		want bool
+	}{
+		{"4006381333931", true},  // valid EAN-13
+		{"4006381333930", false}, // valid EAN-13 with the last digit flipped
+		{"12345670", true},       // valid EAN-8
+		{"12345671", false},      // valid EAN-8 with the last digit flipped
+		{"1234567", false},       // too short
+		{"400638133393X", false},  // non-digit
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := validateEAN(c.code); got != c.want {
+			t.Errorf("validateEAN(%q) = %v, want %v", c.code, got, c.want)
+		}
+	}
+}
+
+func TestMatchEANIgnoresInvalidCodesInsteadOfFalseMatching(t *testing.T) {
+	source := []Row{
+		{Key: "S1", Values: []string{"4006381333931"}}, // valid
+		{Key: "S2", Values: []string{"0000000000001"}}, // invalid checksum — a classic garbled placeholder value
+	}
+	target := []Row{
+		{Key: "T1", Values: []string{"4006381333931"}}, // same valid code -> real match
+		{Key: "T2", Values: []string{"0000000000001"}}, // same invalid placeholder -> must NOT be treated as a match
+	}
+	opts := Options{
+		Fields:          []FieldRule{{Method: MethodEAN, Weight: 1}},
+		AutoThreshold:   0.9,
+		ReviewThreshold: 0.5,
+		NoBlocking:      true,
+	}
+	candidates, stats, err := Match(source, target, opts)
+	if err != nil {
+		t.Fatalf("Match returned error: %v", err)
+	}
+	if stats.UnmatchedSources != 1 {
+		t.Fatalf("expected S2 (invalid placeholder EAN on both sides) to be unmatched, got UnmatchedSources=%d", stats.UnmatchedSources)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("expected exactly 1 candidate (the valid EAN match), got %d: %+v", len(candidates), candidates)
+	}
+	if source[candidates[0].SourceIdx].Key != "S1" || target[candidates[0].TargetIdx].Key != "T1" {
+		t.Errorf("expected the single candidate to be S1->T1, got %s->%s", source[candidates[0].SourceIdx].Key, target[candidates[0].TargetIdx].Key)
+	}
+}

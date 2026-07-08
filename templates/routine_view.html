@@ -1,0 +1,89 @@
+{{define "routine_view"}}
+{{template "base_start" .}}
+
+<div class="page-hdr">
+  <h1>
+    <i class="bi bi-gear text-primary"></i>
+    {{if eq .RoutineKind "function"}}Function{{else}}Procedure{{end}}: {{.RoutineName}}
+  </h1>
+  <div class="toolbar">
+    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="openSQLInEditor(ROUTINE_DEFINITION, ROUTINE_TITLE, false)">
+      <i class="bi bi-terminal me-1"></i>Open in SQL Editor
+    </button>
+    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="copyRoutineDefinition(this)">
+      <i class="bi bi-clipboard me-1"></i>Copy
+    </button>
+  </div>
+</div>
+
+<p class="text-muted small">
+  Read-only source of this {{if eq .RoutineKind "function"}}function{{else}}procedure{{end}} on the active
+  connection. Routines don't have rows to browse, so this shows the definition instead of a datasheet.
+</p>
+
+<div class="card mb-2">
+  <div class="card-body">
+    <pre class="routine-definition mb-0"><code>{{.Definition}}</code></pre>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6 mb-2"><i class="bi bi-diagram-3 me-1"></i>Dependencies</h2>
+    {{if .DependenciesError}}
+    <div class="small text-muted">{{.DependenciesError}}</div>
+    {{else}}
+    <div class="row g-3">
+      <div class="col-md-6">
+        <div class="small text-muted mb-1">Depends on</div>
+        {{if .DependsOn}}
+        <ul class="list-unstyled small mb-0">
+          {{range .DependsOn}}
+          <li>
+            <a href="{{if or (eq .Kind "procedure") (eq .Kind "function")}}/r/{{.Name}}?kind={{.Kind}}{{else}}/t/{{.Name}}{{end}}">
+              <i class="bi {{if eq .Kind "view"}}bi-eye{{else if or (eq .Kind "procedure") (eq .Kind "function")}}bi-gear{{else}}bi-table{{end}} me-1"></i>{{.Name}}
+            </a>
+            <span class="badge bg-light text-secondary border fw-normal">{{.Kind}}</span>
+          </li>
+          {{end}}
+        </ul>
+        {{else}}
+        <div class="small text-muted">Nothing else on this connection.</div>
+        {{end}}
+      </div>
+      <div class="col-md-6">
+        <div class="small text-muted mb-1">Depended on by</div>
+        {{if .Dependents}}
+        <ul class="list-unstyled small mb-0">
+          {{range .Dependents}}
+          <li>
+            <a href="{{if or (eq .Kind "procedure") (eq .Kind "function")}}/r/{{.Name}}?kind={{.Kind}}{{else}}/t/{{.Name}}{{end}}">
+              <i class="bi {{if eq .Kind "view"}}bi-eye{{else if or (eq .Kind "procedure") (eq .Kind "function")}}bi-gear{{else}}bi-table{{end}} me-1"></i>{{.Name}}
+            </a>
+            <span class="badge bg-light text-secondary border fw-normal">{{.Kind}}</span>
+          </li>
+          {{end}}
+        </ul>
+        {{else}}
+        <div class="small text-muted">Nothing else on this connection references it.</div>
+        {{end}}
+      </div>
+    </div>
+    {{end}}
+  </div>
+</div>
+
+<script>
+var ROUTINE_DEFINITION = {{.Definition}};
+var ROUTINE_TITLE = {{.RoutineName}};
+function copyRoutineDefinition(btn) {
+  navigator.clipboard.writeText(ROUTINE_DEFINITION).then(function () {
+    var original = btn.innerHTML;
+    btn.innerHTML = '<i class="bi bi-check2 me-1"></i>Copied';
+    setTimeout(function () { btn.innerHTML = original; }, 1500);
+  });
+}
+</script>
+
+{{template "base_end" .}}
+{{end}}

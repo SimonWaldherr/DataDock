@@ -14,6 +14,7 @@ import (
 	dbcatalog "github.com/SimonWaldherr/datadock/internal/catalog"
 	"github.com/SimonWaldherr/datadock/internal/sqlutil"
 	tinysql "github.com/SimonWaldherr/tinySQL"
+	"github.com/robfig/cron/v3"
 )
 
 // App holds the shared application state.
@@ -61,6 +62,15 @@ type App struct {
 	// credential storage or server-wide settings can be changed.
 	adminAuthMu         sync.Mutex
 	adminAuthedSessions map[string]sessionAuth
+
+	// matchCron runs saved Match Configurations (see match_config.go) on a
+	// cron schedule (see match_schedule.go). It is DataDock's own scheduler,
+	// separate from tinySQL's built-in job scheduler, because that one only
+	// ever executes raw SQL text against the embedded tinySQL engine, not
+	// arbitrary Go operations like a cross-connection match run.
+	matchCronMu      sync.Mutex
+	matchCron        *cron.Cron
+	matchCronEntries map[string]cron.EntryID
 }
 
 // sessionAuth is the value stored per authenticated session: which user it
@@ -223,17 +233,20 @@ type ColumnDetail struct {
 // actions: "Select Top 1000 Rows", "Script as INSERT/UPDATE", the read-only
 // "Structure" view, and a view's CREATE/ALTER definition.
 type TableScript struct {
-	Name       string         `json:"name"`
-	Kind       string         `json:"kind"`
-	HasID      bool           `json:"hasId"`
-	Columns    []Column       `json:"columns"`
-	SelectTop  string         `json:"selectTop"`
-	InsertTmpl string         `json:"insertTmpl,omitempty"`
-	UpdateTmpl string         `json:"updateTmpl,omitempty"`
-	Structure  []ColumnDetail `json:"structure,omitempty"`
-	CreateSQL  string         `json:"createSQL,omitempty"` // views only: the view's CREATE statement
-	AlterSQL   string         `json:"alterSQL,omitempty"`  // views only: an ALTER VIEW variant, when the dialect supports it
-	DDLError   string         `json:"ddlError,omitempty"`  // views only: why CreateSQL couldn't be fetched
+	Name              string             `json:"name"`
+	Kind              string             `json:"kind"`
+	HasID             bool               `json:"hasId"`
+	Columns           []Column           `json:"columns"`
+	SelectTop         string             `json:"selectTop"`
+	InsertTmpl        string             `json:"insertTmpl,omitempty"`
+	UpdateTmpl        string             `json:"updateTmpl,omitempty"`
+	Structure         []ColumnDetail     `json:"structure,omitempty"`
+	CreateSQL         string             `json:"createSQL,omitempty"` // views only: the view's CREATE statement
+	AlterSQL          string             `json:"alterSQL,omitempty"`  // views only: an ALTER VIEW variant, when the dialect supports it
+	DDLError          string             `json:"ddlError,omitempty"`  // views only: why CreateSQL couldn't be fetched
+	DependsOn         []ObjectDependency `json:"dependsOn,omitempty"`         // what this object references
+	Dependents        []ObjectDependency `json:"dependents,omitempty"`        // what references this object
+	DependenciesError string             `json:"dependenciesError,omitempty"` // why dependency analysis wasn't available
 }
 
 // buildTableScript assembles the quick-action SQL snippets, structure, and
@@ -254,6 +267,13 @@ func (a *App) buildTableScript(ctx context.Context, meta TableMeta) TableScript 
 			script.CreateSQL = createSQL
 			script.AlterSQL = viewCreateToAlter(conn.Dialect.Name, createSQL)
 		}
+	}
+	dependsOn, dependents, err := conn.fetchDependencies(ctx, meta.Name, meta.Kind)
+	if err != nil {
+		script.DependenciesError = err.Error()
+	} else {
+		script.DependsOn = dependsOn
+		script.Dependents = dependents
 	}
 	return script
 }

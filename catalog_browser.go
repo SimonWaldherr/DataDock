@@ -737,23 +737,11 @@ func (c *DBConnection) fetchViewDefinition(ctx context.Context, qualifiedName st
 		return "", fmt.Errorf("view definition not found")
 
 	case "Microsoft SQL Server":
-		qualified := tbl
-		if schema != "" {
-			qualified = schema + "." + tbl
+		def, err := c.fetchMSSQLModuleDefinition(ctx, db, schema, tbl)
+		if err != nil {
+			return "", err
 		}
-		modulesTable := "sys.sql_modules"
-		objectIDArg := qualified
-		if db != "" {
-			modulesTable = "[" + strings.ReplaceAll(db, "]", "]]") + "].sys.sql_modules"
-			objectIDArg = db + "." + qualified
-		}
-		def := c.queryScalarArgs(ctx,
-			"SELECT definition FROM "+modulesTable+" WHERE object_id = OBJECT_ID("+c.Placeholder(1)+")",
-			objectIDArg)
-		if strings.TrimSpace(def) == "" {
-			return "", fmt.Errorf("view definition not found (insufficient privileges or the view doesn't exist)")
-		}
-		return strings.TrimSpace(def), nil
+		return def, nil
 
 	case "SQLite":
 		def := c.queryScalarArgs(ctx, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = "+c.Placeholder(1), tbl)
@@ -765,6 +753,278 @@ func (c *DBConnection) fetchViewDefinition(ctx context.Context, qualifiedName st
 	default:
 		return "", fmt.Errorf("view definitions aren't supported for %s", c.Dialect.Name)
 	}
+}
+
+// fetchMSSQLModuleDefinition reads sys.sql_modules.definition for any
+// SQL-text-defined object — view, stored procedure, or function — since
+// that catalog view isn't specific to one object type. Shared by
+// fetchViewDefinition and fetchRoutineDefinition.
+func (c *DBConnection) fetchMSSQLModuleDefinition(ctx context.Context, db, schema, name string) (string, error) {
+	qualified := name
+	if schema != "" {
+		qualified = schema + "." + name
+	}
+	modulesTable := "sys.sql_modules"
+	objectIDArg := qualified
+	if db != "" {
+		modulesTable = "[" + strings.ReplaceAll(db, "]", "]]") + "].sys.sql_modules"
+		objectIDArg = db + "." + qualified
+	}
+	def := c.queryScalarArgs(ctx,
+		"SELECT definition FROM "+modulesTable+" WHERE object_id = OBJECT_ID("+c.Placeholder(1)+")",
+		objectIDArg)
+	if strings.TrimSpace(def) == "" {
+		return "", fmt.Errorf("definition not found (insufficient privileges or the object doesn't exist)")
+	}
+	return strings.TrimSpace(def), nil
+}
+
+// fetchRoutineDefinition returns the CREATE-equivalent source of a stored
+// procedure or function, dialect by dialect. kind ("procedure" or
+// "function") only matters for MySQL/MariaDB, whose SHOW CREATE syntax and
+// result column name differ between the two; MSSQL and PostgreSQL resolve
+// either kind through the same catalog mechanism.
+func (c *DBConnection) fetchRoutineDefinition(ctx context.Context, qualifiedName, kind string) (string, error) {
+	db, schema, name := splitQualifiedName(qualifiedName)
+	switch c.Dialect.Name {
+	case "Microsoft SQL Server":
+		return c.fetchMSSQLModuleDefinition(ctx, db, schema, name)
+
+	case "PostgreSQL":
+		if schema == "" {
+			schema = "public"
+		}
+		def := c.queryScalarArgs(ctx,
+			"SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "+
+				"WHERE n.nspname = "+c.Placeholder(1)+" AND p.proname = "+c.Placeholder(2)+" LIMIT 1",
+			schema, name)
+		if strings.TrimSpace(def) == "" {
+			return "", fmt.Errorf("definition not found (insufficient privileges, an overload mismatch, or the routine doesn't exist)")
+		}
+		return strings.TrimSpace(def), nil
+
+	case "MariaDB/MySQL":
+		qname := c.QuoteIdent(name)
+		if schema != "" {
+			qname = c.QuoteIdent(schema) + "." + c.QuoteIdent(name)
+		}
+		showKeyword, resultColumn := "PROCEDURE", "Create Procedure"
+		if strings.EqualFold(kind, "function") {
+			showKeyword, resultColumn = "FUNCTION", "Create Function"
+		}
+		rows, err := c.queryContext(ctx, "catalog.show_create_routine", "SHOW CREATE "+showKeyword+" "+qname)
+		if err != nil {
+			return "", err
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			return "", fmt.Errorf("definition not found")
+		}
+		cols, err := rows.Columns()
+		if err != nil {
+			return "", err
+		}
+		vals := make([]sql.NullString, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return "", err
+		}
+		for i, colName := range cols {
+			if strings.EqualFold(colName, resultColumn) && vals[i].Valid {
+				return vals[i].String, nil
+			}
+		}
+		return "", fmt.Errorf("definition not found")
+
+	default:
+		return "", fmt.Errorf("routine definitions aren't supported for %s", c.Dialect.Name)
+	}
+}
+
+// ObjectDependency is one edge in an object's dependency graph: another
+// table, view, procedure, or function it references (or that references
+// it), used for impact analysis ("what breaks if I change this?").
+type ObjectDependency struct {
+	Name string `json:"name"` // schema-qualified where the dialect has schemas
+	Kind string `json:"kind"` // "table" | "view" | "procedure" | "function" | "object" (kind unknown)
+}
+
+// fetchDependencies returns qualifiedName's dependency graph: dependsOn is
+// what it references (so you know what else must exist for it to work),
+// dependents is what references it (so you know what breaks if you change
+// or drop it). kind ("table", "view", "procedure", or "function") narrows
+// which dialect-specific mechanism applies — on PostgreSQL and MySQL/
+// MariaDB only table/view dependencies are resolvable this way; SQL Server
+// resolves any object kind uniformly through the same catalog view.
+func (c *DBConnection) fetchDependencies(ctx context.Context, qualifiedName, kind string) (dependsOn, dependents []ObjectDependency, err error) {
+	db, schema, name := splitQualifiedName(qualifiedName)
+	switch c.Dialect.Name {
+	case "Microsoft SQL Server":
+		dependsOn, err = c.mssqlDependencyEdges(ctx, db, schema, name, false)
+		if err != nil {
+			return nil, nil, err
+		}
+		dependents, err = c.mssqlDependencyEdges(ctx, db, schema, name, true)
+		return dependsOn, dependents, err
+
+	case "PostgreSQL":
+		if kind != "table" && kind != "view" {
+			return nil, nil, fmt.Errorf("dependency analysis is only available for tables and views on %s", c.Dialect.Name)
+		}
+		if schema == "" {
+			schema = "public"
+		}
+		dependsOn, err = c.postgresViewDependencyEdges(ctx, schema, name, false)
+		if err != nil {
+			return nil, nil, err
+		}
+		dependents, err = c.postgresViewDependencyEdges(ctx, schema, name, true)
+		return dependsOn, dependents, err
+
+	case "MariaDB/MySQL":
+		if kind != "table" && kind != "view" {
+			return nil, nil, fmt.Errorf("dependency analysis is only available for tables and views on %s", c.Dialect.Name)
+		}
+		if schema == "" {
+			schema = db
+		}
+		dependsOn, err = c.mysqlViewDependencyEdges(ctx, schema, name, false)
+		if err != nil {
+			return nil, nil, err
+		}
+		dependents, err = c.mysqlViewDependencyEdges(ctx, schema, name, true)
+		return dependsOn, dependents, err
+
+	default:
+		return nil, nil, fmt.Errorf("dependency analysis isn't supported for %s", c.Dialect.Name)
+	}
+}
+
+// mssqlDependencyEdges queries sys.sql_expression_dependencies, the same
+// catalog view regardless of object kind: reversed=false finds what
+// referencing_id (db.schema.name) depends on; reversed=true finds what
+// depends on it.
+func (c *DBConnection) mssqlDependencyEdges(ctx context.Context, db, schema, name string, reversed bool) ([]ObjectDependency, error) {
+	qualified := name
+	if schema != "" {
+		qualified = schema + "." + name
+	}
+	depsTable, objectsTable, schemasTable := "sys.sql_expression_dependencies", "sys.objects", "sys.schemas"
+	objectIDArg := qualified
+	if db != "" {
+		quotedDB := "[" + strings.ReplaceAll(db, "]", "]]") + "]"
+		depsTable, objectsTable, schemasTable = quotedDB+".sys.sql_expression_dependencies", quotedDB+".sys.objects", quotedDB+".sys.schemas"
+		objectIDArg = db + "." + qualified
+	}
+	joinCol, selectCol := "d.referencing_id", "d.referenced_id"
+	if reversed {
+		joinCol, selectCol = "d.referenced_id", "d.referencing_id"
+	}
+	query := fmt.Sprintf(
+		`SELECT DISTINCT ISNULL(s.name, ''), o.name, `+
+			`CASE o.type WHEN 'V' THEN 'view' WHEN 'U' THEN 'table' WHEN 'P' THEN 'procedure' `+
+			`WHEN 'FN' THEN 'function' WHEN 'IF' THEN 'function' WHEN 'TF' THEN 'function' ELSE 'object' END `+
+			`FROM %s d JOIN %s o ON %s = o.object_id LEFT JOIN %s s ON o.schema_id = s.schema_id `+
+			`WHERE %s = OBJECT_ID(%s)`,
+		depsTable, objectsTable, selectCol, schemasTable, joinCol, c.Placeholder(1))
+	return c.scanDependencyEdges(ctx, "catalog.mssql.dependencies", query, objectIDArg)
+}
+
+// postgresViewDependencyEdges walks pg_depend/pg_rewrite, the mechanism
+// PostgreSQL uses to track which views read from which tables/views:
+// reversed=false finds what (schema, name) depends on; reversed=true finds
+// what depends on it. deptype = 'n' (normal) excludes internal/automatic
+// dependencies that aren't meaningful for impact analysis.
+func (c *DBConnection) postgresViewDependencyEdges(ctx context.Context, schema, name string, reversed bool) ([]ObjectDependency, error) {
+	resultCols, filterCols := "source_ns.nspname, source_table.relname, source_table.relkind", "dependent_ns.nspname = %s AND dependent_view.relname = %s"
+	if reversed {
+		resultCols, filterCols = "dependent_ns.nspname, dependent_view.relname, dependent_view.relkind", "source_ns.nspname = %s AND source_table.relname = %s"
+	}
+	query := fmt.Sprintf(
+		`SELECT DISTINCT %s FROM pg_depend `+
+			`JOIN pg_rewrite ON pg_depend.objid = pg_rewrite.oid `+
+			`JOIN pg_class dependent_view ON pg_rewrite.ev_class = dependent_view.oid `+
+			`JOIN pg_class source_table ON pg_depend.refobjid = source_table.oid `+
+			`JOIN pg_namespace dependent_ns ON dependent_ns.oid = dependent_view.relnamespace `+
+			`JOIN pg_namespace source_ns ON source_ns.oid = source_table.relnamespace `+
+			`WHERE %s AND source_table.oid <> dependent_view.oid AND pg_depend.deptype = 'n'`,
+		resultCols, fmt.Sprintf(filterCols, c.Placeholder(1), c.Placeholder(2)))
+	rows, err := c.queryContext(ctx, "catalog.postgres.dependencies", query, schema, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ObjectDependency
+	for rows.Next() {
+		var ns, relname, relkind string
+		if err := rows.Scan(&ns, &relname, &relkind); err != nil {
+			return nil, err
+		}
+		kind := "table"
+		if relkind == "v" || relkind == "m" {
+			kind = "view"
+		}
+		out = append(out, ObjectDependency{Name: qualifyDependencyName(ns, relname), Kind: kind})
+	}
+	return out, rows.Err()
+}
+
+// mysqlViewDependencyEdges queries information_schema.view_table_usage, the
+// only cross-object dependency tracking MySQL/MariaDB expose without
+// parsing view/routine bodies: reversed=false finds the tables/views
+// (schema, name) — assumed to be a view — reads from; reversed=true finds
+// the views that read from (schema, name).
+func (c *DBConnection) mysqlViewDependencyEdges(ctx context.Context, schema, name string, reversed bool) ([]ObjectDependency, error) {
+	selectCols, whereCols, kind := "table_schema, table_name", "view_schema = %s AND view_name = %s", "table"
+	if reversed {
+		selectCols, whereCols, kind = "view_schema, view_name", "table_schema = %s AND table_name = %s", "view"
+	}
+	query := fmt.Sprintf(
+		"SELECT DISTINCT %s FROM information_schema.view_table_usage WHERE %s",
+		selectCols, fmt.Sprintf(whereCols, c.Placeholder(1), c.Placeholder(2)))
+	rows, err := c.queryContext(ctx, "catalog.mysql.dependencies", query, schema, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ObjectDependency
+	for rows.Next() {
+		var edgeSchema, edgeName string
+		if err := rows.Scan(&edgeSchema, &edgeName); err != nil {
+			return nil, err
+		}
+		out = append(out, ObjectDependency{Name: qualifyDependencyName(edgeSchema, edgeName), Kind: kind})
+	}
+	return out, rows.Err()
+}
+
+// scanDependencyEdges runs query (schema, name, kind) and collects the
+// results — shared by every dialect's dependency query.
+func (c *DBConnection) scanDependencyEdges(ctx context.Context, op, query string, args ...any) ([]ObjectDependency, error) {
+	rows, err := c.queryContext(ctx, op, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ObjectDependency
+	for rows.Next() {
+		var schema, name, kind string
+		if err := rows.Scan(&schema, &name, &kind); err != nil {
+			return nil, err
+		}
+		out = append(out, ObjectDependency{Name: qualifyDependencyName(schema, name), Kind: kind})
+	}
+	return out, rows.Err()
+}
+
+func qualifyDependencyName(schema, name string) string {
+	if schema == "" {
+		return name
+	}
+	return schema + "." + name
 }
 
 func (c *DBConnection) queryScalarArgs(ctx context.Context, query string, args ...any) string {

@@ -213,13 +213,10 @@ func (a *App) saveSetting(ctx context.Context, key, value string) error {
 		return err
 	}
 	conn := a.localTinySQLConn()
-	if _, err := a.execConn(ctx, conn, "settings.delete", "DELETE FROM "+runtimeSettingsTable+" WHERE setting_key = ?", key); err != nil {
+	if _, err := a.execConn(ctx, conn, "settings.delete", settingsDeleteSQL, key); err != nil {
 		return err
 	}
-	_, err := a.execConn(ctx, conn, "settings.insert",
-		"INSERT INTO "+runtimeSettingsTable+" (setting_key, setting_value) VALUES (?, ?)",
-		key, value,
-	)
+	_, err := a.execConn(ctx, conn, "settings.insert", settingsInsertSQL, key, value)
 	return err
 }
 
@@ -227,7 +224,7 @@ func (a *App) loadRuntimeSettings(ctx context.Context) (RuntimeSettings, bool, e
 	if err := a.ensureRuntimeSettingsTable(ctx); err != nil {
 		return RuntimeSettings{}, false, err
 	}
-	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "settings.load", "SELECT setting_key, setting_value FROM "+runtimeSettingsTable)
+	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "settings.load", settingsSelectAllSQL)
 	if err != nil {
 		return RuntimeSettings{}, false, fmt.Errorf("load runtime settings: %w", err)
 	}
@@ -322,7 +319,7 @@ func (a *App) loadSetting(ctx context.Context, key string) (string, bool, error)
 		return "", false, err
 	}
 	var value string
-	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "settings.load_one", "SELECT setting_value FROM "+runtimeSettingsTable+" WHERE setting_key = ?", key)
+	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "settings.load_one", settingsSelectOneSQL, key)
 	if err == nil {
 		defer rows.Close()
 		if rows.Next() {
@@ -344,7 +341,7 @@ func (a *App) loadSetting(ctx context.Context, key string) (string, bool, error)
 }
 
 func (a *App) ensureRuntimeSettingsTable(ctx context.Context) error {
-	_, err := a.execConn(ctx, a.localTinySQLConn(), "settings.ensure_table", "CREATE TABLE "+runtimeSettingsTable+" (setting_key TEXT, setting_value TEXT)")
+	_, err := a.execConn(ctx, a.localTinySQLConn(), "settings.ensure_table", settingsEnsureTableSQL)
 	if err == nil {
 		return nil
 	}

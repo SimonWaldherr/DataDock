@@ -194,6 +194,9 @@ func main() {
 		log.Printf("auto-detect managed connections: %v", err)
 	}
 	connCancel()
+	if err := app.startMatchScheduler(context.Background()); err != nil {
+		log.Printf("start match scheduler: %v", err)
+	}
 	if strings.TrimSpace(*auditPath) != "" {
 		auditLogger, err := NewAuditLogger(*auditPath)
 		if err != nil {

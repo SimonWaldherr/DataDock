@@ -71,6 +71,11 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("GET /t/{table}/export", a.exportTableHandler)
 	handle("GET /api/tables/{table}/script", a.apiTableScriptHandler)
 
+	// Read-only stored procedure/function definition view (catalog tree
+	// "Procedures"/"Functions" folders link here instead of /t/{table},
+	// since a routine has no rows to browse).
+	handle("GET /r/{routine}", a.routineViewHandler)
+
 	// Record CRUD.
 	handle("GET /t/{table}/new", a.newRecordFormHandler)
 	handle("POST /t/{table}/new", a.requireWritable(a.createRecordHandler))
@@ -119,6 +124,8 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	// dropdown resubmit is read-only. Only the upload branch (creates a
 	// table) is gated, inline, inside matchTablesHandler.
 	handle("POST /match/tables", a.matchTablesHandler)
+	handle("POST /match/configs/delete", a.requireWritable(a.deleteMatchConfigHandler))
+	handle("POST /match/schedules", a.requireWritable(a.saveMatchScheduleHandler))
 	handle("GET /create-table", a.createTableFormHandler)
 	handle("POST /create-table", a.requireWritable(a.createTableHandler))
 	handle("GET /import", a.importFormHandler)
@@ -640,6 +647,44 @@ func (a *App) tableViewHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// routineViewHandler shows the read-only source of a stored procedure or
+// function on the active connection. Unlike tables/views, a routine has no
+// rows to page through, so it gets its own minimal template instead of
+// table_view.html. ?kind=function selects function lookup semantics
+// (matters for MySQL/MariaDB's SHOW CREATE syntax); anything else is
+// treated as a procedure.
+func (a *App) routineViewHandler(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("routine")
+	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	if kind != "function" {
+		kind = "procedure"
+	}
+	conn := a.activeConn(r.Context())
+	if conn == nil {
+		a.renderObjectMissing(w, r, name, fmt.Errorf("no active connection"))
+		return
+	}
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	definition, err := conn.fetchRoutineDefinition(ctx, name, kind)
+	if err != nil {
+		a.renderObjectMissing(w, r, name, err)
+		return
+	}
+	data := map[string]interface{}{
+		"RoutineName": name,
+		"RoutineKind": kind,
+		"Definition":  definition,
+	}
+	if dependsOn, dependents, err := conn.fetchDependencies(ctx, name, kind); err != nil {
+		data["DependenciesError"] = err.Error()
+	} else {
+		data["DependsOn"] = dependsOn
+		data["Dependents"] = dependents
+	}
+	a.render(w, r, "routine_view", data)
+}
+
 // pageSizeOptions is the shared list of selectable rows-per-page values,
 // offered identically by the table view and the SQL editor's result pager so
 // pagination feels the same throughout the app.
@@ -1003,13 +1048,63 @@ var matchMethodOptions = []matchMethodOption{
 	{"exact_ci", "Exact (ignore case)", "Case-insensitive exact match, no other normalization"},
 	{"exact", "Exact", "Byte-for-byte identical values only"},
 	{"numeric", "Numeric (tolerance %)", "Compares two numbers within a relative tolerance"},
+	{"ean", "EAN/GTIN (validated)", "Only compares EAN-8/EAN-13 codes that pass checksum validation; garbled or placeholder codes are ignored rather than falsely matched"},
 }
 
 const matchDisplayLimit = 500
 
+// matchHandler renders the Matching wizard. With ?config=<name>, it loads a
+// saved MatchConfig instead of reading source/target/table selections from
+// the query string, populating every step of the wizard (key columns,
+// field rules, thresholds, save target) from that configuration in one
+// shot — the "make it simple" path once a configuration has been saved.
 func (a *App) matchHandler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	data := a.matchPageData(r, q.Get("source"), q.Get("target"), q.Get("source_table"), q.Get("target_table"))
+	configName := strings.TrimSpace(q.Get("config"))
+	if configName == "" {
+		data := a.matchPageData(r, q.Get("source"), q.Get("target"), q.Get("source_table"), q.Get("target_table"))
+		a.render(w, r, "match", data)
+		return
+	}
+
+	cfg, ok, err := a.loadMatchConfig(r.Context(), configName)
+	if err != nil || !ok {
+		data := a.matchPageData(r, q.Get("source"), q.Get("target"), q.Get("source_table"), q.Get("target_table"))
+		if err != nil {
+			data["Error"] = "Could not load configuration: " + err.Error()
+		} else {
+			data["Error"] = fmt.Sprintf("Configuration %q not found.", configName)
+		}
+		a.render(w, r, "match", data)
+		return
+	}
+
+	data := a.matchPageData(r, cfg.SourceConnID, cfg.TargetConnID, cfg.SourceTable, cfg.TargetTable)
+	data["SourceKeyColumn"] = cfg.SourceKeyColumn
+	data["TargetKeyColumn"] = cfg.TargetKeyColumn
+	data["AutoThresholdPct"] = int(cfg.AutoThreshold*100 + 0.5)
+	data["ReviewThresholdPct"] = int(cfg.ReviewThreshold*100 + 0.5)
+	data["NoBlocking"] = cfg.NoBlocking
+	data["FieldRows"] = cfg.Fields
+	if cfg.SaveConnID != "" {
+		data["SaveConnID"] = cfg.SaveConnID
+	}
+	if cfg.SaveTable != "" {
+		data["SaveTable"] = cfg.SaveTable
+	}
+	if cfg.SaveScope != "" {
+		data["SaveScope"] = cfg.SaveScope
+	}
+	data["ConfigName"] = cfg.Name
+	// data["Schedule"] is a *MatchSchedule (not a value) specifically so a
+	// missing schedule leaves the key unset/nil: Go templates treat every
+	// non-pointer struct as truthy in {{if}}, so a zero-value MatchSchedule
+	// would otherwise make the "Recurring execution" status line render
+	// unconditionally.
+	if sched, ok, err := a.loadMatchSchedule(r.Context(), cfg.Name); err == nil && ok {
+		data["Schedule"] = &sched
+	}
+	data["Success"] = fmt.Sprintf("Loaded configuration %q.", cfg.Name)
 	a.render(w, r, "match", data)
 }
 
@@ -1047,6 +1142,9 @@ func (a *App) matchPageData(r *http.Request, sourceID, targetID, sourceTable, ta
 		"SaveScope":          "auto_and_review",
 		"SaveConnID":         defaultConnectionID,
 		"SaveTable":          suggestResultTableName(sourceTable, targetTable),
+	}
+	if configs, err := a.listMatchConfigs(r.Context()); err == nil {
+		data["MatchConfigs"] = configs
 	}
 
 	var sourceCols, targetCols []Column
@@ -1199,6 +1297,7 @@ func (a *App) runMatchHandler(w http.ResponseWriter, r *http.Request) {
 	if saveScope == "" {
 		saveScope = "auto_and_review"
 	}
+	configName := strings.TrimSpace(r.Form.Get("config_name"))
 
 	data := a.matchPageData(r, req.SourceConnID, req.TargetConnID, req.SourceTable, req.TargetTable)
 	data["SourceKeyColumn"] = req.SourceKeyColumn
@@ -1210,6 +1309,44 @@ func (a *App) runMatchHandler(w http.ResponseWriter, r *http.Request) {
 	data["SaveConnID"] = saveConnID
 	data["SaveTable"] = saveTable
 	data["SaveScope"] = saveScope
+	data["ConfigName"] = configName
+
+	// mode=save_config persists the setup itself rather than running it —
+	// the "make this simple to build again" action the wizard's field
+	// mapping/thresholds/etc. steps exist to support.
+	if mode == "save_config" {
+		if a.currentReadOnlyMode() {
+			a.writeMaintenanceBlocked(w, r)
+			return
+		}
+		cfg := MatchConfig{
+			Name:            configName,
+			SourceConnID:    req.SourceConnID,
+			TargetConnID:    req.TargetConnID,
+			SourceTable:     req.SourceTable,
+			TargetTable:     req.TargetTable,
+			SourceKeyColumn: req.SourceKeyColumn,
+			TargetKeyColumn: req.TargetKeyColumn,
+			Fields:          req.Fields,
+			AutoThreshold:   req.AutoThreshold,
+			ReviewThreshold: req.ReviewThreshold,
+			NoBlocking:      req.NoBlocking,
+			SaveConnID:      saveConnID,
+			SaveTable:       saveTable,
+			SaveScope:       saveScope,
+		}
+		if err := a.saveMatchConfig(r.Context(), cfg); err != nil {
+			data["Error"] = err.Error()
+			a.render(w, r, "match", data)
+			return
+		}
+		if configs, err := a.listMatchConfigs(r.Context()); err == nil {
+			data["MatchConfigs"] = configs
+		}
+		data["Success"] = fmt.Sprintf("Saved configuration %q.", cfg.Name)
+		a.render(w, r, "match", data)
+		return
+	}
 
 	summary, err := a.runMatch(r.Context(), sessionID, req)
 	if err != nil {
@@ -1401,6 +1538,62 @@ func (a *App) matchTablesHandler(w http.ResponseWriter, r *http.Request) {
 	case targetErr != nil:
 		data["Error"] = targetErr.Error()
 	}
+	a.render(w, r, "match", data)
+}
+
+// deleteMatchConfigHandler removes a saved Match Configuration, and — since
+// a Match Schedule only makes sense attached to a configuration that still
+// exists — its Match Schedule, if any.
+func (a *App) deleteMatchConfigHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(r.Form.Get("config_name"))
+	deleteErr := a.deleteMatchConfig(r.Context(), name)
+	var scheduleErr error
+	if deleteErr == nil {
+		scheduleErr = a.deleteMatchSchedule(r.Context(), name)
+	}
+
+	data := a.matchPageData(r, r.Form.Get("source_id"), r.Form.Get("target_id"), r.Form.Get("source_table"), r.Form.Get("target_table"))
+	switch {
+	case deleteErr != nil:
+		data["Error"] = deleteErr.Error()
+	case scheduleErr != nil:
+		data["Error"] = "Configuration deleted, but its schedule could not be removed: " + scheduleErr.Error()
+	default:
+		data["Success"] = fmt.Sprintf("Deleted configuration %q.", name)
+	}
+	a.render(w, r, "match", data)
+}
+
+// saveMatchScheduleHandler attaches (or updates) a recurring cron schedule
+// to an already-saved MatchConfig, so it re-runs and appends to its
+// crosswalk table on its own.
+func (a *App) saveMatchScheduleHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	configName := strings.TrimSpace(r.Form.Get("config_name"))
+	sched := MatchSchedule{
+		ConfigName: configName,
+		CronExpr:   strings.TrimSpace(r.Form.Get("cron_expr")),
+		Enabled:    r.Form.Get("enabled") == "on",
+	}
+
+	data := a.matchPageData(r, r.Form.Get("source_id"), r.Form.Get("target_id"), r.Form.Get("source_table"), r.Form.Get("target_table"))
+	data["ConfigName"] = configName
+	if err := a.saveMatchSchedule(r.Context(), sched); err != nil {
+		data["Error"] = err.Error()
+		a.render(w, r, "match", data)
+		return
+	}
+	if saved, ok, err := a.loadMatchSchedule(r.Context(), configName); err == nil && ok {
+		data["Schedule"] = &saved
+	}
+	data["Success"] = fmt.Sprintf("Saved schedule for %q.", configName)
 	a.render(w, r, "match", data)
 }
 

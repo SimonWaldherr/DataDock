@@ -1256,6 +1256,11 @@
      border-radius: var(--radius);
      padding: .85rem;
 }
+ .routine-definition {
+     overflow-x: auto;
+     max-height: 70vh;
+     overflow-y: auto;
+}
  .btn-xs {
      min-height: 26px;
      font-size: .75rem;

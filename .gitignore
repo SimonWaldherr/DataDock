@@ -6,3 +6,4 @@ ROADMAP.md
 datadock.db.wal
 .claude/
 /external/prodmapper
+/external/dbinfo

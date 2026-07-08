@@ -72,6 +72,9 @@
     <i class="bi bi-code-square me-1"></i>Definition
   </button>
   {{end}}
+  <button type="button" class="btn btn-sm btn-outline-secondary" id="dependenciesToggleBtn" onclick="toggleTableDependencies('{{$table}}')" title="Show what this object depends on and what depends on it">
+    <i class="bi bi-diagram-3 me-1"></i>Dependencies
+  </button>
 </div>
 
 <div id="structurePanel" class="card mb-2 d-none">
@@ -87,6 +90,12 @@
   </div>
 </div>
 {{end}}
+
+<div id="dependenciesPanel" class="card mb-2 d-none">
+  <div class="card-body py-2">
+    <div class="small text-muted">Loading dependencies…</div>
+  </div>
+</div>
 
 {{template "alert" .}}
 
@@ -288,6 +297,47 @@ function toggleViewDefinition(tableName) {
     body.innerHTML = html;
   }).catch(function (err) {
     body.innerHTML = '<div class="small text-danger">Could not load definition: ' + escHtmlTV(err.message || err) + '</div>';
+  });
+}
+
+function renderDependencyList(title, items, emptyText) {
+  var html = '<div class="small text-muted mb-1">' + escHtmlTV(title) + '</div>';
+  if (!items || items.length === 0) {
+    return html + '<div class="small text-muted mb-2">' + escHtmlTV(emptyText) + '</div>';
+  }
+  html += '<ul class="list-unstyled small mb-2">';
+  items.forEach(function (dep) {
+    var isRoutine = dep.kind === 'procedure' || dep.kind === 'function';
+    var href = isRoutine
+      ? '/r/' + encodeURIComponent(dep.name) + '?kind=' + encodeURIComponent(dep.kind)
+      : '/t/' + encodeURIComponent(dep.name);
+    html += '<li><a href="' + href + '"><i class="bi ' +
+      (dep.kind === 'view' ? 'bi-eye' : isRoutine ? 'bi-gear' : 'bi-table') +
+      ' me-1"></i>' + escHtmlTV(dep.name) + '</a> <span class="badge bg-light text-secondary border fw-normal">' + escHtmlTV(dep.kind) + '</span></li>';
+  });
+  html += '</ul>';
+  return html;
+}
+
+function toggleTableDependencies(tableName) {
+  var panel = document.getElementById('dependenciesPanel');
+  if (!panel.classList.contains('d-none')) {
+    panel.classList.add('d-none');
+    return;
+  }
+  panel.classList.remove('d-none');
+  var body = panel.querySelector('.card-body');
+  body.innerHTML = '<div class="small text-muted">Loading dependencies…</div>';
+  loadTableScript(tableName).then(function (script) {
+    if (script.dependenciesError) {
+      body.innerHTML = '<div class="small text-muted">' + escHtmlTV(script.dependenciesError) + '</div>';
+      return;
+    }
+    var html = renderDependencyList('Depends on', script.dependsOn, 'Nothing else on this connection.');
+    html += renderDependencyList('Depended on by', script.dependents, 'Nothing else on this connection references it.');
+    body.innerHTML = html;
+  }).catch(function (err) {
+    body.innerHTML = '<div class="small text-danger">Could not load dependencies: ' + escHtmlTV(err.message || err) + '</div>';
   });
 }
 </script>

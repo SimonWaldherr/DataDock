@@ -263,3 +263,47 @@ func normalizeStreet(s string) string {
 	}
 	return CanonicalizeName(strings.Join(tokens, " "))
 }
+
+// validateEAN reports whether s is a syntactically valid EAN-8 or EAN-13
+// code: exactly 8 or 13 digits whose final digit matches the standard EAN
+// check-digit algorithm. Ported from external/prodmapper, which uses the
+// same validation to keep garbled or placeholder product codes — a common
+// data-quality issue in product master data — out of matching entirely
+// rather than comparing them literally.
+func validateEAN(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) != 8 && len(s) != 13 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	sum := 0
+	last := len(s) - 1
+	for i := 0; i < last; i++ {
+		digit := int(s[i] - '0')
+		// EAN-8 and EAN-13 assign the 3x/1x checksum weights to opposite
+		// parities of position, per the GS1 specification.
+		if (len(s) == 8) == (i%2 == 0) {
+			sum += 3 * digit
+		} else {
+			sum += digit
+		}
+	}
+	checkDigit := (10 - (sum % 10)) % 10
+	return checkDigit == int(s[last]-'0')
+}
+
+// eanScore compares two EAN-8/EAN-13 codes, but only when both pass
+// validateEAN — see MethodEAN.
+func eanScore(a, b string) (float64, bool) {
+	if !validateEAN(a) || !validateEAN(b) {
+		return 0, false
+	}
+	if a == b {
+		return 1, true
+	}
+	return 0, true
+}
