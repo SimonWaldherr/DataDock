@@ -23,6 +23,7 @@ import (
 	dbjobs "github.com/SimonWaldherr/datadock/internal/jobs"
 	"github.com/SimonWaldherr/datadock/internal/match"
 	"github.com/SimonWaldherr/datadock/internal/resultutil"
+	"github.com/SimonWaldherr/datadock/internal/sqlutil"
 	"github.com/SimonWaldherr/datadock/internal/standards"
 	"github.com/SimonWaldherr/datadock/internal/typed"
 	tinysql "github.com/SimonWaldherr/tinySQL"
@@ -99,6 +100,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /admin/connections/forget", a.requireAdmin(a.requireWritable(a.adminForgetConnectionHandler)))
 	handle("POST /admin/connections/default", a.requireAdmin(a.requireWritable(a.adminSetDefaultConnectionHandler)))
 	handle("GET /admin/setup", a.adminSetupHandler)
+	handle("POST /admin/setup/mode", a.adminSetupModeHandler)
 	handle("POST /admin/setup", a.adminSetupSubmitHandler)
 	handle("GET /admin/login", a.adminLoginHandler)
 	handle("POST /admin/login", a.adminLoginSubmitHandler)
@@ -287,6 +289,22 @@ func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]stri
 			records = append(records, record)
 		}
 		_ = json.NewEncoder(w).Encode(records)
+		return true
+	case "ndjson":
+		w.Header().Set("Content-Type", standards.MediaTypeNDJSON)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.ndjson"`, filenameBase))
+		enc := json.NewEncoder(w)
+		for _, row := range rows {
+			record := make(map[string]any, len(columns))
+			for i, col := range columns {
+				if i < len(row) {
+					record[col] = typed.JSONValue(row[i], kinds[i])
+				} else {
+					record[col] = nil
+				}
+			}
+			_ = enc.Encode(record)
+		}
 		return true
 	case "xml":
 		w.Header().Set("Content-Type", standards.MediaTypeXML)
@@ -773,6 +791,11 @@ func (a *App) adminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		// (adminToggleMaintenanceHandler); this form doesn't include that
 		// control, so keep whatever it's currently set to.
 		settings.ReadOnlyMode = a.currentReadOnlyMode()
+		// Auth mode is bootstrap-only for now (set via -auth-mode/env at
+		// startup, see main.go); this form has no control for it yet, so
+		// keep whatever it's currently set to instead of silently resetting
+		// it to the "" -> local default.
+		settings.AuthMode = string(a.currentAuthMode())
 		err = a.applyRuntimeSettings(settings)
 	}
 	if err == nil {
@@ -2321,6 +2344,20 @@ func (a *App) apiQueryHandler(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 	result := a.executeSQLWindow(r.Context(), strings.TrimSpace(body.SQL), offset, limit)
+	if audit := a.auditLogger(); audit.Enabled() && result.StatementClass != sqlutil.StatementReadQuery {
+		status := http.StatusOK
+		if result.Err != "" {
+			status = http.StatusBadRequest
+		}
+		audit.Log(AuditEvent{
+			Session:   sessionIDFromContext(r.Context()),
+			Method:    r.Method,
+			Path:      r.URL.Path,
+			Operation: string(result.StatementClass),
+			Detail:    strings.TrimSpace(body.SQL),
+			Status:    status,
+		})
+	}
 
 	type apiResult struct {
 		Columns        []string   `json:"columns,omitempty"`
@@ -2497,6 +2534,10 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			// (POST /admin/maintenance/toggle); this endpoint no longer
 			// changes it, so keep whatever it's currently set to.
 			settings.ReadOnlyMode = a.currentReadOnlyMode()
+			// Auth mode is bootstrap-only for now (set via -auth-mode/env at
+			// startup); this endpoint has no field for it yet, so keep
+			// whatever it's currently set to.
+			settings.AuthMode = string(a.currentAuthMode())
 			err = a.applyRuntimeSettings(settings)
 		}
 		if err == nil {
@@ -2581,6 +2622,7 @@ func (a *App) adminStatus(ctx context.Context) map[string]any {
 		"tenants":               health.Tenants,
 		"tables":                health.Tables,
 		"audit_log_enabled":     a.auditLog,
+		"auth_mode":             settings.AuthMode,
 		"admin_password_set":    settings.AdminPasswordSet,
 		"managed_connections":   0,
 		"active_connection":     nil,
@@ -2843,10 +2885,16 @@ func (a *App) apiImportHandler(w http.ResponseWriter, r *http.Request) {
 		switch format {
 		case "csv":
 			res, err = dbimporter.FuzzyImportCSV(ctx, a.nativeDB, a.tenant, table, src, fuzzyOpts)
-		case "json", "ndjson":
+		case "json":
 			res, err = dbimporter.FuzzyImportJSON(ctx, a.nativeDB, a.tenant, table, src, fuzzyOpts)
+		case "ndjson":
+			res, err = dbimporter.FuzzyImportNDJSON(ctx, a.nativeDB, a.tenant, table, src, fuzzyOpts)
+		case "yaml", "yml":
+			res, err = dbimporter.FuzzyImportYAML(ctx, a.nativeDB, a.tenant, table, src, fuzzyOpts)
+		case "xml":
+			res, err = dbimporter.FuzzyImportXML(ctx, a.nativeDB, a.tenant, table, src, fuzzyOpts)
 		default:
-			err = fmt.Errorf("fuzzy import supports csv/tsv and json only")
+			err = fmt.Errorf("fuzzy import supports csv/tsv, json, ndjson, yaml, and xml only")
 		}
 	} else {
 		res, err = importContent(ctx, a.nativeDB, a.tenant, table, format, src, opts)
@@ -2936,16 +2984,18 @@ func importContent(ctx context.Context, db *tinysql.DB, tenant, table, format st
 	switch format {
 	case "csv":
 		return dbimporter.ImportCSV(ctx, db, tenant, table, src, opts)
-	case "json", "ndjson":
+	case "json":
 		return dbimporter.ImportJSON(ctx, db, tenant, table, src, opts)
+	case "ndjson":
+		return dbimporter.ImportNDJSON(ctx, db, tenant, table, src, opts)
 	case "yaml", "yml":
 		return dbimporter.ImportYAML(ctx, db, tenant, table, src, opts)
 	case "xml":
 		return dbimporter.ImportXML(ctx, db, tenant, table, src, opts)
-	case "geojson":
-		return dbimporter.ImportGeoJSON(ctx, db, tenant, table, src, opts)
 	case "kml":
 		return dbimporter.ImportKML(ctx, db, tenant, table, src, opts)
+	case "geojson":
+		return dbimporter.ImportGeoJSON(ctx, db, tenant, table, src, opts)
 	default:
 		return nil, fmt.Errorf("unsupported import format %q", format)
 	}

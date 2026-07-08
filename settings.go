@@ -48,6 +48,7 @@ type RuntimeSettings struct {
 	DefaultDensity    string
 	Port              int
 	AdminPasswordHash string
+	AuthMode          string
 }
 
 type RuntimeSettingsView struct {
@@ -67,6 +68,7 @@ type RuntimeSettingsView struct {
 	DefaultDensity   string `json:"default_density"`
 	Port             int    `json:"port"`
 	AdminPasswordSet bool   `json:"admin_password_set"`
+	AuthMode         string `json:"auth_mode"`
 }
 
 func isAllowedValue(value string, allowed []string) bool {
@@ -132,6 +134,18 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 	if s.Port < 0 || s.Port > 65535 {
 		return fmt.Errorf("port must be between 0 and 65535")
 	}
+	authMode, err := normalizeAuthMode(s.AuthMode)
+	if err != nil {
+		return err
+	}
+	// A future mode-switch UI/API will call this same function, so the
+	// safety net belongs here rather than only at startup: refuse to drop
+	// to no-login while the server is actually reachable beyond localhost,
+	// unless the operator has explicitly acknowledged that with
+	// -allow-insecure-remote.
+	if authMode == AuthModeNone && a.listenAddr != "" && !isLoopbackAddr(a.listenAddr) && !a.allowInsecureRemote {
+		return fmt.Errorf("cannot use auth-mode=none while DataDock is listening on a non-loopback address (%s); use auth-mode=local for a network-reachable server, or pass -allow-insecure-remote if this is intentional (e.g. a private VPN/Tailscale network)", a.listenAddr)
+	}
 
 	cfg := LLMConfig{
 		BaseURL: strings.TrimSpace(s.LLMBaseURL),
@@ -160,6 +174,7 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 	a.defaultDensity = s.DefaultDensity
 	a.port = s.Port
 	a.adminPasswordHash = s.AdminPasswordHash
+	a.authMode = authMode
 	return nil
 }
 
@@ -183,6 +198,7 @@ func (a *App) saveRuntimeSettings(ctx context.Context) error {
 		"default_density":     s.DefaultDensity,
 		"port":                strconv.Itoa(s.Port),
 		"admin_password_hash": s.AdminPasswordHash,
+		"auth_mode":           s.AuthMode,
 	}
 	for key, value := range values {
 		if err := a.saveSetting(ctx, key, value); err != nil {
@@ -356,6 +372,7 @@ func (a *App) currentRuntimeSettings() RuntimeSettings {
 		DefaultDensity:    a.defaultDensity,
 		Port:              a.port,
 		AdminPasswordHash: a.adminPasswordHash,
+		AuthMode:          string(a.authMode),
 	}
 }
 
@@ -379,6 +396,7 @@ func (a *App) runtimeSettingsView() RuntimeSettingsView {
 		DefaultDensity:   a.defaultDensity,
 		Port:             a.port,
 		AdminPasswordSet: strings.TrimSpace(a.adminPasswordHash) != "",
+		AuthMode:         string(a.authMode),
 	}
 }
 
@@ -525,6 +543,7 @@ func runtimeSettingsFromStoredValues(values map[string]string) (RuntimeSettings,
 		DefaultDensity:    defaultDensity,
 		Port:              port,
 		AdminPasswordHash: values["admin_password_hash"],
+		AuthMode:          values["auth_mode"],
 	}, nil
 }
 

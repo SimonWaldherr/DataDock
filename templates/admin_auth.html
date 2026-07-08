@@ -4,7 +4,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{if eq .Mode "setup"}}Set Admin Password{{else}}Admin Login{{end}} – DataDock</title>
+  <title>{{if eq .Mode "setup"}}Set Admin Account{{else if eq .Mode "choose"}}Choose Auth Mode{{else}}Admin Login{{end}} – DataDock</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
   <style>
@@ -26,18 +26,36 @@
     <div class="auth-brand"><i class="bi bi-grid-3x3-gap-fill"></i>DataDock</div>
     <div class="card shadow-sm">
       <div class="card-body">
-        {{if eq .Mode "setup"}}
-        <h1 class="h5 mb-1">Set an Admin password</h1>
+        {{if eq .Mode "choose"}}
+        <h1 class="h5 mb-1">How will you use DataDock?</h1>
         <p class="text-muted small mb-3">
-          No Admin password is set yet. Choose one now — you'll need it to reach Admin settings and to permanently
+          Choose no login for solo local use, or create an Admin account for a shared/team server.
+        </p>
+        {{if .Error}}<div class="alert alert-danger py-2 small">{{.Error}}</div>{{end}}
+        <form method="post" action="/admin/setup/mode" class="mb-2">
+          <input type="hidden" name="next" value="{{.Next}}">
+          <input type="hidden" name="mode" value="none">
+          <button type="submit" class="btn btn-outline-primary w-100"><i class="bi bi-person me-1"></i>Just me, no login</button>
+        </form>
+        <a class="btn btn-primary w-100" href="/admin/setup?team=1{{if .Next}}&amp;next={{.Next}}{{end}}">
+          <i class="bi bi-people me-1"></i>Create Admin account
+        </a>
+        {{else if eq .Mode "setup"}}
+        <h1 class="h5 mb-1">Create an Admin account</h1>
+        <p class="text-muted small mb-3">
+          No Admin account exists yet. Create the first one now; you'll need it to reach Admin settings and to permanently
           save database connection credentials for everyone.
         </p>
         {{if .Error}}<div class="alert alert-danger py-2 small">{{.Error}}</div>{{end}}
         <form method="post" action="/admin/setup">
           <input type="hidden" name="next" value="{{.Next}}">
           <div class="mb-2">
+            <label class="form-label small fw-semibold">Username</label>
+            <input type="text" class="form-control" name="username" minlength="3" maxlength="64" pattern="[A-Za-z0-9._-]{3,64}" required autofocus autocomplete="username" value="admin">
+          </div>
+          <div class="mb-2">
             <label class="form-label small fw-semibold">Password</label>
-            <input type="password" class="form-control" name="password" minlength="8" required autofocus autocomplete="new-password">
+            <input type="password" class="form-control" name="password" minlength="8" required autocomplete="new-password">
             <div class="form-text">At least 8 characters.</div>
           </div>
           <div class="mb-3">
@@ -52,9 +70,13 @@
         {{if .Error}}<div class="alert alert-danger py-2 small">{{.Error}}</div>{{end}}
         <form method="post" action="/admin/login">
           <input type="hidden" name="next" value="{{.Next}}">
+          <div class="mb-2">
+            <label class="form-label small fw-semibold">Username</label>
+            <input type="text" class="form-control" name="username" required autofocus autocomplete="username" value="admin">
+          </div>
           <div class="mb-3">
             <label class="form-label small fw-semibold">Password</label>
-            <input type="password" class="form-control" name="password" required autofocus autocomplete="current-password">
+            <input type="password" class="form-control" name="password" required autocomplete="current-password">
           </div>
           <button type="submit" class="btn btn-primary w-100"><i class="bi bi-box-arrow-in-right me-1"></i>Log in</button>
         </form>

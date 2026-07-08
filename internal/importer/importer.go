@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/SimonWaldherr/datadock/internal/typed"
 	tinysql "github.com/SimonWaldherr/tinySQL"
+	"gopkg.in/yaml.v3"
 )
 
 type ImportOptions struct {
@@ -76,7 +78,6 @@ func FuzzyImportCSV(ctx context.Context, db *tinysql.DB, tenant, tableName strin
 }
 
 func ImportJSON(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *ImportOptions) (*ImportResult, error) {
-	opts = normalizeOptions(opts)
 	data, err := io.ReadAll(src)
 	if err != nil {
 		return nil, err
@@ -85,6 +86,49 @@ func ImportJSON(ctx context.Context, db *tinysql.DB, tenant, tableName string, s
 	if err := json.Unmarshal(data, &values); err != nil {
 		return nil, err
 	}
+	return importObjects(ctx, db, tenant, tableName, values, opts)
+}
+
+func FuzzyImportJSON(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *FuzzyImportOptions) (*ImportResult, error) {
+	var base *ImportOptions
+	if opts != nil {
+		base = opts.ImportOptions
+	}
+	return ImportJSON(ctx, db, tenant, tableName, src, base)
+}
+
+// ImportNDJSON reads newline-delimited JSON: one JSON object per record,
+// rather than the single top-level array ImportJSON expects. It uses a
+// streaming decoder instead of splitting on "\n" so pretty-printed or
+// multi-line records still parse correctly.
+func ImportNDJSON(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *ImportOptions) (*ImportResult, error) {
+	dec := json.NewDecoder(src)
+	var values []map[string]any
+	for {
+		var obj map[string]any
+		if err := dec.Decode(&obj); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+		values = append(values, obj)
+	}
+	return importObjects(ctx, db, tenant, tableName, values, opts)
+}
+
+func FuzzyImportNDJSON(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *FuzzyImportOptions) (*ImportResult, error) {
+	var base *ImportOptions
+	if opts != nil {
+		base = opts.ImportOptions
+	}
+	return ImportNDJSON(ctx, db, tenant, tableName, src, base)
+}
+
+// importObjects converts decoded JSON/YAML objects into the same
+// header+rows shape ImportCSV produces, then delegates to importRecords.
+func importObjects(ctx context.Context, db *tinysql.DB, tenant, tableName string, values []map[string]any, opts *ImportOptions) (*ImportResult, error) {
+	opts = normalizeOptions(opts)
 	columns := orderedJSONColumns(values)
 	records := [][]string{columns}
 	for _, obj := range values {
@@ -103,20 +147,115 @@ func ImportJSON(ctx context.Context, db *tinysql.DB, tenant, tableName string, s
 	return res, err
 }
 
-func FuzzyImportJSON(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *FuzzyImportOptions) (*ImportResult, error) {
+func ImportYAML(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *ImportOptions) (*ImportResult, error) {
+	data, err := io.ReadAll(src)
+	if err != nil {
+		return nil, err
+	}
+	var values []map[string]any
+	if err := yaml.Unmarshal(data, &values); err != nil {
+		return nil, err
+	}
+	for _, obj := range values {
+		for k, v := range obj {
+			obj[k] = normalizeYAMLValue(v)
+		}
+	}
+	return importObjects(ctx, db, tenant, tableName, values, opts)
+}
+
+// normalizeYAMLValue converts yaml.v3's decoded types (map[string]interface{}
+// for mappings, but nested sequences/mappings can still surface as
+// map[string]interface{}/[]interface{} with unexported-friendly types) into
+// values that fmt.Sprint renders sensibly, and flattens nested structures to
+// their JSON form instead of Go's default struct-ish %v output.
+func normalizeYAMLValue(v any) any {
+	switch v.(type) {
+	case map[string]any, []any:
+		if b, err := json.Marshal(v); err == nil {
+			return string(b)
+		}
+	}
+	return v
+}
+
+func FuzzyImportYAML(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *FuzzyImportOptions) (*ImportResult, error) {
 	var base *ImportOptions
 	if opts != nil {
 		base = opts.ImportOptions
 	}
-	return ImportJSON(ctx, db, tenant, tableName, src, base)
+	return ImportYAML(ctx, db, tenant, tableName, src, base)
 }
 
-func ImportYAML(context.Context, *tinysql.DB, string, string, io.Reader, *ImportOptions) (*ImportResult, error) {
-	return nil, fmt.Errorf("yaml import is not supported in standalone datadock yet")
+// xmlImportDoc mirrors the shape DataDock's own XML export produces
+// (<result><columns><column>...</columns><rows><row><cell name="..">v</cell>
+// ...</row></rows></result>), so exporting a table/query as XML and
+// reimporting it round-trips.
+type xmlImportDoc struct {
+	XMLName xml.Name       `xml:"result"`
+	Columns []string       `xml:"columns>column"`
+	Rows    []xmlImportRow `xml:"rows>row"`
 }
 
-func ImportXML(context.Context, *tinysql.DB, string, string, io.Reader, *ImportOptions) (*ImportResult, error) {
-	return nil, fmt.Errorf("xml import is not supported in standalone datadock yet")
+type xmlImportRow struct {
+	Cells []xmlImportCell `xml:"cell"`
+}
+
+type xmlImportCell struct {
+	Name  string `xml:"name,attr"`
+	Value string `xml:",chardata"`
+}
+
+func ImportXML(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *ImportOptions) (*ImportResult, error) {
+	data, err := io.ReadAll(src)
+	if err != nil {
+		return nil, err
+	}
+	var doc xmlImportDoc
+	if err := xml.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	columns := doc.Columns
+	if len(columns) == 0 {
+		seen := map[string]bool{}
+		for _, row := range doc.Rows {
+			for _, cell := range row.Cells {
+				if cell.Name != "" && !seen[cell.Name] {
+					seen[cell.Name] = true
+					columns = append(columns, cell.Name)
+				}
+			}
+		}
+	}
+	opts = normalizeOptions(opts)
+	if len(columns) == 0 {
+		return &ImportResult{Encoding: "utf-8", LineEnding: "\n"}, nil
+	}
+	records := [][]string{columns}
+	for _, row := range doc.Rows {
+		values := make(map[string]string, len(row.Cells))
+		for _, cell := range row.Cells {
+			values[cell.Name] = cell.Value
+		}
+		record := make([]string, len(columns))
+		for i, col := range columns {
+			record[i] = values[col]
+		}
+		records = append(records, record)
+	}
+	headerMode := opts.HeaderMode
+	opts.HeaderMode = "present"
+	res, err := importRecords(ctx, db, tenant, tableName, records, ',', opts)
+	opts.HeaderMode = headerMode
+	return res, err
+}
+
+func FuzzyImportXML(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *FuzzyImportOptions) (*ImportResult, error) {
+	var base *ImportOptions
+	if opts != nil {
+		base = opts.ImportOptions
+	}
+	return ImportXML(ctx, db, tenant, tableName, src, base)
 }
 
 func ImportKML(context.Context, *tinysql.DB, string, string, io.Reader, *ImportOptions) (*ImportResult, error) {

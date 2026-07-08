@@ -39,14 +39,31 @@ func (a *App) withSession(next http.HandlerFunc) http.HandlerFunc {
 
 // requireWritable blocks a mutating handler while the admin has enabled
 // maintenance (read-only) mode, returning a clear error instead of silently
-// letting writes through or silently discarding them.
+// letting writes through or silently discarding them. Since it already wraps
+// every record/table/import/migration/admin-connection mutating route, it
+// doubles as the single choke point for a minimal write audit trail: no
+// per-handler instrumentation needed to know who hit a write route and what
+// status it ended with.
 func (a *App) requireWritable(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if a.currentReadOnlyMode() {
 			a.writeMaintenanceBlocked(w, r)
 			return
 		}
-		next(w, r)
+		audit := a.auditLogger()
+		if !audit.Enabled() {
+			next(w, r)
+			return
+		}
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next(rec, r)
+		audit.Log(AuditEvent{
+			Session: sessionIDFromContext(r.Context()),
+			Method:  r.Method,
+			Path:    r.URL.Path,
+			Target:  r.PathValue("table"),
+			Status:  rec.status,
+		})
 	}
 }
 

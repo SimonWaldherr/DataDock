@@ -11,6 +11,7 @@ const (
 	MediaTypeProblemJSON = "application/problem+json; charset=utf-8"
 	MediaTypeCSV         = "text/csv; charset=utf-8"
 	MediaTypeTSV         = "text/tab-separated-values; charset=utf-8"
+	MediaTypeNDJSON      = "application/x-ndjson; charset=utf-8"
 	MediaTypeXML         = "application/xml; charset=utf-8"
 	MediaTypeXLSX        = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )

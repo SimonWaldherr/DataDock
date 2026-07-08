@@ -862,6 +862,48 @@ func TestAdminRoutesRequireAdminSession(t *testing.T) {
 	}
 }
 
+// TestAuthModeNoneBypassesAdminLogin covers the single-user/local case: with
+// auth-mode=none, every request is implicitly an Admin request, and the
+// setup/login screens redirect straight into the app instead of asking for
+// a password nobody needs.
+func TestAuthModeNoneBypassesAdminLogin(t *testing.T) {
+	app := newTestApp(t)
+	settings := app.currentRuntimeSettings()
+	settings.AuthMode = "none"
+	if err := app.applyRuntimeSettings(settings); err != nil {
+		t.Fatalf("applyRuntimeSettings(auth-mode=none): %v", err)
+	}
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	// No cookie, no prior setup — /admin must be reachable directly.
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected /admin to be reachable with no login in auth-mode=none, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// The admin status API must not demand a session either.
+	apiReq := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	apiRec := httptest.NewRecorder()
+	mux.ServeHTTP(apiRec, apiReq)
+	if apiRec.Code != http.StatusOK {
+		t.Fatalf("expected /api/admin/status to be reachable with no login in auth-mode=none, got %d", apiRec.Code)
+	}
+
+	// Visiting /admin/setup or /admin/login directly redirects away instead
+	// of offering a password form that would be misleading in this mode.
+	for _, path := range []string{"/admin/setup", "/admin/login"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Errorf("%s: expected a redirect in auth-mode=none, got %d", path, rec.Code)
+		}
+	}
+}
+
 func TestSanitizeAdminNextPath(t *testing.T) {
 	cases := map[string]string{
 		"":                          "/admin",
@@ -916,7 +958,7 @@ func TestAdminLoginLogoutAndExpiry(t *testing.T) {
 
 	sessionID := sessionIDFromRequest(loginReq)
 	app.adminAuthMu.Lock()
-	app.adminAuthedSessions[sessionID] = time.Now().Add(-time.Second)
+	app.adminAuthedSessions[sessionID] = sessionAuth{Username: "admin", Role: RoleAdmin, Expiry: time.Now().Add(-time.Second)}
 	app.adminAuthMu.Unlock()
 
 	expiredReq := httptest.NewRequest(http.MethodGet, "/admin", nil)

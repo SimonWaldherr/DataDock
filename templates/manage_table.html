@@ -95,8 +95,11 @@
               <option value="auto" selected>Auto from extension</option>
               <option value="csv">CSV</option>
               <option value="tsv">TSV</option>
-              <option value="json">JSON / NDJSON</option>
+              <option value="json">JSON</option>
+              <option value="ndjson">NDJSON</option>
               <option value="xlsx">XLSX first sheet</option>
+              <option value="xml">XML</option>
+              <option value="yaml">YAML</option>
               <option value="geojson">GeoJSON</option>
             </select>
           </div>
@@ -156,6 +159,9 @@
         </button>
         <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('json')">
           <i class="bi bi-filetype-json me-1"></i>JSON
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('ndjson')">
+          <i class="bi bi-filetype-json me-1"></i>NDJSON
         </button>
         <button class="btn btn-outline-secondary btn-sm" onclick="exportSelectedTable('xml')">
           <i class="bi bi-filetype-xml me-1"></i>XML

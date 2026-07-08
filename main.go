@@ -48,7 +48,9 @@ func main() {
 	verboseMode := flag.Bool("verbose", envBoolDefault("DATADOCK_VERBOSE", false), "Write redacted outbound/inbound system communication logs to stdout")
 	watchDir := flag.String("watch-dir", envDefault("DATADOCK_WATCH_DIR", ""), "Optional directory to auto-import supported files into tinySQL tables")
 	watchInterval := flag.Duration("watch-interval", envDurationDefault("DATADOCK_WATCH_INTERVAL", 3*time.Second), "Polling interval for -watch-dir auto-import")
-	auditPath := flag.String("audit-log", envDefault("DATADOCK_AUDIT_LOG", ""), "Optional path for a tamper-evident tinySQL audit log")
+	auditPath := flag.String("audit-log", envDefault("DATADOCK_AUDIT_LOG", ""), "Optional file path for a JSON-lines audit log of write operations (record edits, DDL, imports, migrations, admin changes, and write/DDL SQL)")
+	authModeFlag := flag.String("auth-mode", envDefault("DATADOCK_AUTH_MODE", ""), "How DataDock gates access to itself: \"local\" (default: a single Admin password) or \"none\" (no login at all, for single-user/local use only; defaults to binding 127.0.0.1 unless -addr says otherwise, see -allow-insecure-remote)")
+	allowInsecureRemote := flag.Bool("allow-insecure-remote", envBoolDefault("DATADOCK_ALLOW_INSECURE_REMOTE", false), "Allow -auth-mode=none to bind to a non-loopback address. Only set this on a network you already trust (e.g. a private VPN/Tailscale), since anyone who can reach that address gets full access with no login.")
 	flag.Parse()
 
 	if *findFreePortFlag {
@@ -128,11 +130,22 @@ func main() {
 		LLMModel:       *llmModel,
 		LLMTimeout:     *llmTimeout,
 		Port:           *port,
+		AuthMode:       *authModeFlag,
 	}
 	if stored, ok, err := app.loadRuntimeSettings(context.Background()); err != nil {
 		log.Fatalf("load settings: %v", err)
 	} else if ok {
 		settings = mergeRuntimeSettingsWithExplicitFlags(stored, settings)
+	}
+
+	// Resolved once here (not just inside applyRuntimeSettings) because the
+	// listen-address default below depends on it: auth-mode=none should
+	// default to a loopback-only bind, not "all interfaces", so the common
+	// case (a developer running `go run .` locally with -auth-mode=none)
+	// is safe by construction without needing -allow-insecure-remote.
+	effectiveAuthMode, err := normalizeAuthMode(settings.AuthMode)
+	if err != nil {
+		log.Fatalf("auth-mode: %v", err)
 	}
 
 	// Resolve the port to listen on, unless -addr gives an explicit host:port
@@ -147,14 +160,31 @@ func main() {
 			}
 			settings.Port = p
 		}
-		listenAddr = fmt.Sprintf(":%d", settings.Port)
+		if effectiveAuthMode == AuthModeNone {
+			listenAddr = fmt.Sprintf("127.0.0.1:%d", settings.Port)
+		} else {
+			listenAddr = fmt.Sprintf(":%d", settings.Port)
+		}
 	}
+
+	// Set before applyRuntimeSettings: its auth-mode validation refuses to
+	// enable AuthModeNone on a non-loopback bind unless allowInsecureRemote
+	// is set, so it needs to see both up front (see settings.go).
+	app.listenAddr = listenAddr
+	app.allowInsecureRemote = *allowInsecureRemote
+	app.authModeExplicit = flagWasSet("auth-mode") || strings.TrimSpace(os.Getenv("DATADOCK_AUTH_MODE")) != ""
 
 	if err := app.applyRuntimeSettings(settings); err != nil {
 		log.Fatalf("settings: %v", err)
 	}
+	if effectiveAuthMode == AuthModeNone && !isLoopbackAddr(listenAddr) {
+		log.Printf("WARNING: -auth-mode=none with -allow-insecure-remote on %s — DataDock is reachable there with no login at all.", listenAddr)
+	}
 	if err := app.saveRuntimeSettings(context.Background()); err != nil {
 		log.Fatalf("save settings: %v", err)
+	}
+	if err := app.migrateLegacyAdminPassword(context.Background()); err != nil {
+		log.Fatalf("migrate legacy admin password: %v", err)
 	}
 	connCtx, connCancel := context.WithTimeout(context.Background(), app.currentConnectTimeout())
 	if err := app.loadManagedConnections(connCtx); err != nil {
@@ -165,7 +195,13 @@ func main() {
 	}
 	connCancel()
 	if strings.TrimSpace(*auditPath) != "" {
-		log.Printf("audit log flag ignored: github.com/SimonWaldherr/tinySQL v0.12.0 does not expose audit logging")
+		auditLogger, err := NewAuditLogger(*auditPath)
+		if err != nil {
+			log.Fatalf("audit log: could not open %q: %v", *auditPath, err)
+		}
+		app.setAuditLogger(auditLogger)
+		defer auditLogger.Close()
+		log.Printf("audit log: recording write operations to %s", *auditPath)
 	}
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 	defer watchCancel()
@@ -188,7 +224,7 @@ func main() {
 	// panic becomes a clean 500 the access log can still see, instead of
 	// net/http's default behavior of just aborting the connection.
 	handler := loggingMiddleware(recoverMiddleware(securityHeaders(mux)))
-	log.Printf("DataDock listening on %s  (db: %s, tenant: %s, dialect: %s)", listenAddr, dbLabel(*dbFile), *tenant, app.currentDialect().Name)
+	log.Printf("DataDock listening on %s  (db: %s, tenant: %s, dialect: %s, auth-mode: %s)", listenAddr, dbLabel(*dbFile), *tenant, app.currentDialect().Name, effectiveAuthMode)
 	srv := &http.Server{
 		Addr:    listenAddr,
 		Handler: handler,
@@ -426,6 +462,9 @@ func mergeRuntimeSettingsWithExplicitFlags(stored, flags RuntimeSettings) Runtim
 	}
 	if flagWasSet("port") {
 		merged.Port = flags.Port
+	}
+	if flagWasSet("auth-mode") {
+		merged.AuthMode = flags.AuthMode
 	}
 	return merged
 }

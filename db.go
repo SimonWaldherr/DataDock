@@ -38,12 +38,41 @@ type App struct {
 	port              int
 	adminPasswordHash string
 	verbose           *VerboseLogger
+	audit             *AuditLogger
+	authMode          AuthMode
 
-	// Admin logins are process-local on purpose: the password hash persists,
-	// but every restart requires a fresh Admin login before credential
-	// storage or server-wide settings can be changed.
+	// listenAddr and allowInsecureRemote are set once at startup (see
+	// main.go) and read-only afterward: they record where the HTTP server
+	// actually bound, so applyRuntimeSettings can refuse to switch into
+	// AuthModeNone on a server that's reachable beyond localhost, even if
+	// that switch is later requested at runtime rather than via flags.
+	listenAddr          string
+	allowInsecureRemote bool
+
+	// authModeExplicit records whether -auth-mode/$DATADOCK_AUTH_MODE was
+	// set for this process, as opposed to defaulting silently. It's set
+	// once at startup (main.go) and gates whether the first-run setup page
+	// shows the "Nur ich / Team" mode chooser: an operator who already told
+	// DataDock which mode to use shouldn't be asked again.
+	authModeExplicit bool
+
+	// Sessions are process-local on purpose: user accounts persist in
+	// __datadock_users, but every restart requires a fresh login before
+	// credential storage or server-wide settings can be changed.
 	adminAuthMu         sync.Mutex
-	adminAuthedSessions map[string]time.Time
+	adminAuthedSessions map[string]sessionAuth
+}
+
+// sessionAuth is the value stored per authenticated session: which user it
+// belongs to, their role at the time of login, and when the session expires.
+// Role is snapshotted at login rather than looked up fresh on every request
+// so a role change takes effect on that user's next login, not mid-session —
+// consistent with how a password change today doesn't invalidate other live
+// sessions either (see users.go).
+type sessionAuth struct {
+	Username string
+	Role     Role
+	Expiry   time.Time
 }
 
 // Column describes a single column returned by a query.
@@ -59,6 +88,28 @@ func (a *App) setVerboseLogger(verbose *VerboseLogger) {
 	if a.conns != nil {
 		a.conns.SetVerbose(verbose)
 	}
+}
+
+func (a *App) setAuditLogger(audit *AuditLogger) {
+	a.settingsMu.Lock()
+	a.audit = audit
+	a.auditLog = audit.Enabled()
+	a.settingsMu.Unlock()
+}
+
+func (a *App) currentAuthMode() AuthMode {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	if a.authMode == "" {
+		return AuthModeLocal
+	}
+	return a.authMode
+}
+
+func (a *App) auditLogger() *AuditLogger {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	return a.audit
 }
 
 func (a *App) verboseLogger() *VerboseLogger {

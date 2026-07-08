@@ -33,3 +33,52 @@ func TestApplyRuntimeSettingsMatchMaxRowsDefaultsAndValidates(t *testing.T) {
 		t.Errorf("currentMatchMaxRows() = %d, want 5000000", got)
 	}
 }
+
+func TestApplyRuntimeSettingsAuthModeNoneRequiresLoopbackOrOptIn(t *testing.T) {
+	app := newTestApp(t)
+
+	// Default (no listenAddr recorded yet, as in a fresh App): nothing to
+	// check against, so auth-mode=none is accepted.
+	settings := app.currentRuntimeSettings()
+	settings.AuthMode = "none"
+	if err := app.applyRuntimeSettings(settings); err != nil {
+		t.Fatalf("applyRuntimeSettings(auth-mode=none) with no recorded listen address: %v", err)
+	}
+	if got := app.currentAuthMode(); got != AuthModeNone {
+		t.Errorf("currentAuthMode() = %q, want %q", got, AuthModeNone)
+	}
+
+	// A non-loopback bind must refuse auth-mode=none...
+	app.listenAddr = "0.0.0.0:8080"
+	app.allowInsecureRemote = false
+	settings.AuthMode = "none"
+	if err := app.applyRuntimeSettings(settings); err == nil {
+		t.Error("expected an error switching to auth-mode=none on a non-loopback bind without -allow-insecure-remote")
+	}
+	// ...falling back to auth-mode=local must still work on that same bind.
+	settings.AuthMode = "local"
+	if err := app.applyRuntimeSettings(settings); err != nil {
+		t.Errorf("applyRuntimeSettings(auth-mode=local) on a non-loopback bind: %v", err)
+	}
+
+	// ...but is allowed once the operator opts in explicitly.
+	app.allowInsecureRemote = true
+	settings.AuthMode = "none"
+	if err := app.applyRuntimeSettings(settings); err != nil {
+		t.Errorf("applyRuntimeSettings(auth-mode=none) with allowInsecureRemote=true: %v", err)
+	}
+
+	// A loopback bind is always fine, opt-in or not.
+	app.listenAddr = "127.0.0.1:8080"
+	app.allowInsecureRemote = false
+	settings.AuthMode = "none"
+	if err := app.applyRuntimeSettings(settings); err != nil {
+		t.Errorf("applyRuntimeSettings(auth-mode=none) on a loopback bind: %v", err)
+	}
+
+	// An unknown auth mode is rejected outright.
+	settings.AuthMode = "bogus"
+	if err := app.applyRuntimeSettings(settings); err == nil {
+		t.Error("expected an error for an unknown auth-mode value")
+	}
+}
