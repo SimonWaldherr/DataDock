@@ -454,7 +454,19 @@ func (a *App) adminChangePasswordHandler(w http.ResponseWriter, r *http.Request)
 		data["Error"] = msg
 		a.render(w, r, "admin", data)
 	}
-	if !verifyAdminPassword(a.currentAdminPasswordHash(), r.Form.Get("current_password")) {
+	username, _, hasSessionUser := a.currentSessionUser(sessionIDFromContext(r.Context()))
+	currentHash := strings.TrimSpace(a.currentAdminPasswordHash())
+	if hasSessionUser {
+		user, found, err := a.getUserByUsername(r.Context(), username)
+		if err != nil {
+			a.serverError(w, err)
+			return
+		}
+		if found {
+			currentHash = user.PasswordHash
+		}
+	}
+	if !verifyAdminPassword(currentHash, r.Form.Get("current_password")) {
 		fail("Current password is incorrect.")
 		return
 	}
@@ -472,6 +484,12 @@ func (a *App) adminChangePasswordHandler(w http.ResponseWriter, r *http.Request)
 		a.serverError(w, err)
 		return
 	}
+	if hasSessionUser {
+		if err := a.setUserPasswordHash(r.Context(), username, hash); err != nil {
+			a.serverError(w, err)
+			return
+		}
+	}
 	settings := a.currentRuntimeSettings()
 	settings.AdminPasswordHash = hash
 	if err := a.applyRuntimeSettings(settings); err != nil {
@@ -482,7 +500,7 @@ func (a *App) adminChangePasswordHandler(w http.ResponseWriter, r *http.Request)
 		a.serverError(w, err)
 		return
 	}
-	data["Success"] = "Admin password changed."
+	data["Success"] = "Password changed."
 	a.render(w, r, "admin", data)
 }
 

@@ -10,6 +10,7 @@
     {{if .Settings.ReadOnlyMode}}
     <span class="badge text-bg-warning"><i class="bi bi-lock-fill me-1"></i>Read-only</span>
     {{end}}
+    <a href="/admin/users" class="btn btn-sm btn-outline-secondary"><i class="bi bi-people me-1"></i>Users</a>
     <a href="/connections" class="btn btn-sm btn-outline-secondary"><i class="bi bi-hdd-network me-1"></i>Connections</a>
     <a href="/jobs" class="btn btn-sm btn-outline-secondary"><i class="bi bi-calendar2-check me-1"></i>Jobs</a>
     <form method="post" action="/admin/logout" class="d-inline">
@@ -29,6 +30,7 @@
       <a class="btn btn-outline-secondary btn-sm" href="#adminDemoData"><i class="bi bi-database-add me-1"></i>Demo Data</a>
       <a class="btn btn-outline-secondary btn-sm" href="#adminStatusJSON"><i class="bi bi-braces me-1"></i>Status JSON</a>
       <span class="vr"></span>
+      <a class="btn btn-outline-secondary btn-sm" href="/admin/users"><i class="bi bi-people me-1"></i>Users</a>
       <a class="btn btn-outline-secondary btn-sm" href="/jobs"><i class="bi bi-calendar2-check me-1"></i>Jobs</a>
       <a class="btn btn-outline-secondary btn-sm" href="/connections"><i class="bi bi-hdd-network me-1"></i>Connections</a>
       <a class="btn btn-outline-secondary btn-sm" href="/migrate"><i class="bi bi-arrow-left-right me-1"></i>Migration</a>
@@ -283,8 +285,8 @@
 
 <div id="adminPassword" class="card">
   <div class="card-body">
-    <h2 class="h6 mb-3">Admin Password</h2>
-    <p class="small text-muted mb-3">Required to reach this page and to permanently save database connection credentials for everyone (Connections page).</p>
+    <h2 class="h6 mb-3">Account Password</h2>
+    <p class="small text-muted mb-3">Change the password for the currently signed-in Admin account.</p>
     <form method="post" action="/admin/change-password" class="row g-2">
       <div class="col-md-3">
         <label class="form-label small">Current password</label>

@@ -89,7 +89,7 @@ geometry engine or optional mapshaper CLI integration. Shapefile exports are
 limited by the format to one geometry type per ZIP; DataDock writes the first
 compatible geometry family it finds.
 
-With tinySQL v0.15.x, map tables can also be queried directly with native geo
+With tinySQL v0.16.x, map tables can also be queried directly with native geo
 functions. `GEO_POINT`/`ST_MAKEPOINT` creates GeoJSON points, `ST_X`/`ST_Y`
 extract longitude/latitude, `GEO_DISTANCE`/`ST_DISTANCE` computes haversine
 distance in meters, and `GEO_WITHIN_BBOX` / `GEO_DWITHIN` cover common spatial
@@ -169,11 +169,19 @@ derived from the filename and refreshed on update.
 ## Admin Settings
 
 Open **Admin** to edit runtime settings without touching any config file. On the
-first visit, DataDock redirects to `/admin/setup` to create an Admin password.
-The password is stored as a bcrypt hash in `__datadock_settings`; later visits
-use `/admin/login` and a session cookie. Admin settings, shared connection
-persistence/default changes, job management, demo-data admin actions, LLM
-discovery/health, and Admin APIs require an authenticated Admin session.
+first visit, DataDock redirects to `/admin/setup`: operators can keep a local,
+loopback-only single-user instance without login, or create the first Admin
+account for a team instance. Local users are stored in `__datadock_users` with
+bcrypt password hashes and explicit roles: **Admin**, **User**, and
+**Read-only**. Existing deployments with the legacy single Admin password are
+migrated into an Admin user automatically at startup.
+
+Later visits use `/admin/login` and a session cookie. Admin settings, shared
+connection persistence/default changes, job management, demo-data admin actions,
+LLM discovery/health, user management, and Admin APIs require an authenticated
+Admin session. User accounts can read and write data but cannot manage Admin
+settings; read-only accounts can browse data and run result-producing SQL, while
+write routes and non-SELECT SQL are blocked.
 
 The same settings are available for automation through:
 
@@ -184,14 +192,15 @@ The same settings are available for automation through:
 | `/api/admin/settings` | `POST` | Apply runtime settings from JSON |
 
 Automation clients use the same session flow as the browser. Before the first
-Admin password is set, Admin APIs return `428 Precondition Required`; after a
-password exists but the request has no authenticated session, they return `401
+Admin account is set, Admin APIs return `428 Precondition Required`; after an
+account exists but the request has no authenticated session, they return `401
 Unauthorized`. Use a cookie jar with `curl` or your HTTP client:
 
 ```bash
-# First run only: create the Admin password and keep the session cookie.
+# First run only: create the first Admin user and keep the session cookie.
 curl -c datadock.cookies -X POST http://localhost:8080/admin/setup \
   -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data-urlencode 'username=admin' \
   --data-urlencode 'password=change-this-password' \
   --data-urlencode 'password_confirm=change-this-password' \
   --data-urlencode 'next=/admin'
@@ -257,7 +266,7 @@ datadock uses stable web and data interchange standards for external integration
 - Parquet, Arrow, Feather, and DuckDB imports currently create file-level manifest rows rather than fully decoding row groups/pages.
 - GeoJSON exports use RFC 7946 FeatureCollection output where geometry or lat/lon columns are present.
 - Map data imports normalize GeoJSON/GeoPackage/GPX/KML/OSM/Shapefile geometries into GeoJSON text columns; MBTiles imports metadata and tile indexes; RG imports JSON/NDJSON routing graph nodes and edges.
-- DataDock tracks tinySQL v0.15.x and exposes its read-only PRAGMA support,
+- DataDock tracks tinySQL v0.16.x and exposes its read-only PRAGMA support,
   result-producing stored procedure calls in the SQL editor, and native agent
   context generation for the local tinySQL connection.
 - tinySQL geo functions such as `ST_MAKEPOINT`, `ST_X`, `ST_Y`,
@@ -517,18 +526,25 @@ cmd/datadock/
 | `GET` | `/connections` | Connection manager |
 | `POST` | `/connections` | Add a session-private managed connection |
 | `POST` | `/connections/active` | Switch the active connection for the current session |
-| `GET` | `/admin/setup` | First-run Admin password setup |
-| `POST` | `/admin/setup` | Save the initial Admin password hash |
+| `GET` | `/admin/setup` | First-run auth-mode chooser or Admin account setup |
+| `POST` | `/admin/setup/mode` | Choose local no-login mode for loopback-only solo use |
+| `POST` | `/admin/setup` | Create the initial Admin account |
 | `GET` | `/admin/login` | Admin login form |
 | `POST` | `/admin/login` | Start an authenticated Admin session |
 | `POST` | `/admin/logout` | End the current Admin session |
 | `GET` | `/admin` | Admin status and runtime settings (Admin session) |
 | `POST` | `/admin/settings` | Apply runtime settings from the Admin UI (Admin session) |
 | `POST` | `/admin/maintenance/toggle` | Toggle server-wide maintenance mode (Admin session) |
-| `POST` | `/admin/change-password` | Change the Admin password (Admin session) |
+| `POST` | `/admin/change-password` | Change the current Admin account password (Admin session) |
 | `POST` | `/admin/connections/persist` | Save/share a connection for all sessions (Admin session) |
 | `POST` | `/admin/connections/forget` | Remove a saved connection (Admin session) |
 | `POST` | `/admin/connections/default` | Change the server-wide default connection (Admin session) |
+| `GET` | `/admin/users` | Manage local users and roles (Admin session) |
+| `POST` | `/admin/users` | Create a local user (Admin session) |
+| `POST` | `/admin/users/role` | Change a user's role (Admin session) |
+| `POST` | `/admin/users/disable` | Enable or disable a local user (Admin session) |
+| `POST` | `/admin/users/reset-password` | Reset a user's password (Admin session) |
+| `POST` | `/admin/users/delete` | Delete a local user (Admin session) |
 | `GET` | `/api/admin/status` | Admin status JSON (Admin session) |
 | `GET/POST` | `/api/admin/settings` | Read or apply runtime settings as JSON (Admin session) |
 | `GET` | `/jobs` | Job overview (Admin session) |

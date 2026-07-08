@@ -38,16 +38,23 @@ func (a *App) withSession(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // requireWritable blocks a mutating handler while the admin has enabled
-// maintenance (read-only) mode, returning a clear error instead of silently
-// letting writes through or silently discarding them. Since it already wraps
-// every record/table/import/migration/admin-connection mutating route, it
-// doubles as the single choke point for a minimal write audit trail: no
-// per-handler instrumentation needed to know who hit a write route and what
-// status it ended with.
+// maintenance (read-only) mode, or while the session is logged in with
+// RoleReadOnly, returning a clear error instead of silently letting writes
+// through or silently discarding them. Since it already wraps every record/
+// table/import/migration/admin-connection mutating route, it doubles as the
+// single choke point for a minimal write audit trail: no per-handler
+// instrumentation needed to know who hit a write route and what status it
+// ended with.
 func (a *App) requireWritable(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if a.currentReadOnlyMode() {
 			a.writeMaintenanceBlocked(w, r)
+			return
+		}
+		sessionID := sessionIDFromContext(r.Context())
+		username, role, ok := a.currentSessionUser(sessionID)
+		if a.currentAuthMode() != AuthModeNone && ok && role == RoleReadOnly {
+			a.writeReadOnlyRoleBlocked(w, r)
 			return
 		}
 		audit := a.auditLogger()
@@ -58,11 +65,12 @@ func (a *App) requireWritable(next http.HandlerFunc) http.HandlerFunc {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next(rec, r)
 		audit.Log(AuditEvent{
-			Session: sessionIDFromContext(r.Context()),
-			Method:  r.Method,
-			Path:    r.URL.Path,
-			Target:  r.PathValue("table"),
-			Status:  rec.status,
+			Session:  sessionID,
+			Username: username,
+			Method:   r.Method,
+			Path:     r.URL.Path,
+			Target:   r.PathValue("table"),
+			Status:   rec.status,
 		})
 	}
 }
@@ -79,6 +87,20 @@ func (a *App) writeMaintenanceBlocked(w http.ResponseWriter, r *http.Request) {
 		`<body style="font-family:system-ui,sans-serif;padding:3rem 1.5rem;max-width:640px;margin:0 auto;color:#111827">` +
 		`<h1 style="font-size:1.3rem">Maintenance mode</h1><p>` + detail + `</p>` +
 		`<p><a href="/admin">Go to Admin settings</a> &middot; <a href="javascript:history.back()">Go back</a></p></body>`))
+}
+
+func (a *App) writeReadOnlyRoleBlocked(w http.ResponseWriter, r *http.Request) {
+	const detail = "Your account has read-only access. Ask an administrator to change your role to make changes."
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		a.writeProblem(w, r, http.StatusForbidden, "Read-only role", detail)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><title>Read-only account</title>` +
+		`<body style="font-family:system-ui,sans-serif;padding:3rem 1.5rem;max-width:640px;margin:0 auto;color:#111827">` +
+		`<h1 style="font-size:1.3rem">Read-only account</h1><p>` + detail + `</p>` +
+		`<p><a href="javascript:history.back()">Go back</a></p></body>`))
 }
 
 func sessionIDFromRequest(r *http.Request) string {

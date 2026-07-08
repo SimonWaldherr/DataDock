@@ -62,11 +62,11 @@
             <label class="form-label small fw-semibold">Confirm password</label>
             <input type="password" class="form-control" name="password_confirm" minlength="8" required autocomplete="new-password">
           </div>
-          <button type="submit" class="btn btn-primary w-100"><i class="bi bi-shield-lock me-1"></i>Set password &amp; continue</button>
+          <button type="submit" class="btn btn-primary w-100"><i class="bi bi-shield-lock me-1"></i>Create account &amp; continue</button>
         </form>
         {{else}}
         <h1 class="h5 mb-1">Admin login</h1>
-        <p class="text-muted small mb-3">Enter the Admin password to continue.</p>
+        <p class="text-muted small mb-3">Enter your DataDock account credentials to continue.</p>
         {{if .Error}}<div class="alert alert-danger py-2 small">{{.Error}}</div>{{end}}
         <form method="post" action="/admin/login">
           <input type="hidden" name="next" value="{{.Next}}">

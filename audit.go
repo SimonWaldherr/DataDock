@@ -25,6 +25,7 @@ type AuditLogger struct {
 type AuditEvent struct {
 	Time      string `json:"time"`
 	Session   string `json:"session,omitempty"`
+	Username  string `json:"username,omitempty"`
 	Method    string `json:"method,omitempty"`
 	Path      string `json:"path,omitempty"`
 	Operation string `json:"operation,omitempty"`

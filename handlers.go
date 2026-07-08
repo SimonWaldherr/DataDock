@@ -119,6 +119,12 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("GET /admin/login", a.adminLoginHandler)
 	handle("POST /admin/login", a.adminLoginSubmitHandler)
 	handle("POST /admin/logout", a.adminLogoutHandler)
+	handle("GET /admin/users", a.requireAdmin(a.adminUsersHandler))
+	handle("POST /admin/users", a.requireAdmin(a.requireWritable(a.adminUsersCreateHandler)))
+	handle("POST /admin/users/role", a.requireAdmin(a.requireWritable(a.adminUsersRoleHandler)))
+	handle("POST /admin/users/disable", a.requireAdmin(a.requireWritable(a.adminUsersDisableHandler)))
+	handle("POST /admin/users/reset-password", a.requireAdmin(a.requireWritable(a.adminUsersResetPasswordHandler)))
+	handle("POST /admin/users/delete", a.requireAdmin(a.requireWritable(a.adminUsersDeleteHandler)))
 
 	handle("GET /jobs", a.requireAdmin(a.jobsHandler))
 	handle("GET /migrate", a.migrationHandler)
@@ -200,12 +206,14 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data m
 	}
 	data["PageSizeOptions"] = pageSizeOptions
 	data["AdminAuthenticated"] = adminAuthenticated
-	// Unconditional (not just on the "connections" page): any handler can
-	// re-render "connections" from an error path (see admin_auth.go), and
-	// the template unconditionally indexes these two maps, so a handler that
-	// forgot to set them would otherwise panic instead of showing the error.
+	// Unconditional (not just on the "connections"/"admin_users" pages): any
+	// handler can re-render those from an error path, and the templates
+	// unconditionally index these, so a handler that forgot to set them
+	// would otherwise panic instead of showing the error.
 	data["LogicSearchConfigured"] = a.embeddingClientFn() != nil
 	data["LogicIndexStatus"], data["LogicIndexRunning"] = a.logicIndexStatuses()
+	data["Users"], _ = a.listUsers(r.Context())
+	data["CurrentUsername"], _, _ = a.currentSessionUser(sessionIDFromContext(r.Context()))
 	if a.conns != nil {
 		sessionID := sessionIDFromContext(r.Context())
 		data["Connections"] = a.conns.ListFor(sessionID)
@@ -2748,18 +2756,26 @@ func (a *App) apiQueryHandler(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		offset = 0
 	}
-	result := a.executeSQLWindow(r.Context(), strings.TrimSpace(body.SQL), offset, limit)
+	sessionID := sessionIDFromContext(r.Context())
+	username, role, ok := a.currentSessionUser(sessionID)
+	sqlText := strings.TrimSpace(body.SQL)
+	if a.currentAuthMode() != AuthModeNone && ok && role == RoleReadOnly && !sqlutil.IsResultProducing(sqlText) {
+		a.writeProblem(w, r, http.StatusForbidden, "Read-only role", "your account has read-only access; only SELECT/WITH/SHOW/EXPLAIN queries are allowed")
+		return
+	}
+	result := a.executeSQLWindow(r.Context(), sqlText, offset, limit)
 	if audit := a.auditLogger(); audit.Enabled() && result.StatementClass != sqlutil.StatementReadQuery {
 		status := http.StatusOK
 		if result.Err != "" {
 			status = http.StatusBadRequest
 		}
 		audit.Log(AuditEvent{
-			Session:   sessionIDFromContext(r.Context()),
+			Session:   sessionID,
+			Username:  username,
 			Method:    r.Method,
 			Path:      r.URL.Path,
 			Operation: string(result.StatementClass),
-			Detail:    strings.TrimSpace(body.SQL),
+			Detail:    sqlText,
 			Status:    status,
 		})
 	}
@@ -3080,6 +3096,7 @@ func (a *App) adminStatus(ctx context.Context) map[string]any {
 	health := tinysql.HealthCheck(a.nativeDB)
 	stats := health.BackendStats
 	settings := a.runtimeSettingsView()
+	usersConfigured, _ := a.usersConfigured(ctx)
 	status := map[string]any{
 		"ok":                    health.OK,
 		"tenant":                a.tenant,
@@ -3096,6 +3113,7 @@ func (a *App) adminStatus(ctx context.Context) map[string]any {
 		"audit_log_enabled":     a.auditLog,
 		"auth_mode":             settings.AuthMode,
 		"admin_password_set":    settings.AdminPasswordSet,
+		"users_configured":      usersConfigured,
 		"managed_connections":   0,
 		"active_connection":     nil,
 		"last_sync_at":          formatTimePtr(health.LastSyncAt),

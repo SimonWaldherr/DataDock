@@ -1019,6 +1019,307 @@ func TestAdminLoginLogoutAndExpiry(t *testing.T) {
 	}
 }
 
+func TestAdminChangePasswordUpdatesCurrentUser(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+	cookie := setupAdminSession(t, mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/change-password", strings.NewReader(
+		url.Values{
+			"current_password":     {"secret123"},
+			"new_password":         {"secret456"},
+			"new_password_confirm": {"secret456"},
+		}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected password-change page 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	user, found, err := app.getUserByUsername(context.Background(), "admin")
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	if !found {
+		t.Fatal("expected setup-created admin user to exist")
+	}
+	if !verifyAdminPassword(user.PasswordHash, "secret456") {
+		t.Fatal("expected user password hash to accept the new password")
+	}
+	if verifyAdminPassword(user.PasswordHash, "secret123") {
+		t.Fatal("old password must not keep working for the user account")
+	}
+}
+
+// sessionCookieForRole creates an authenticated session directly (bypassing
+// the HTTP login flow) for a given username/role, mirroring how
+// TestAdminLoginLogoutAndExpiry pokes app.adminAuthedSessions directly.
+func sessionCookieForRole(app *App, username string, role Role) *http.Cookie {
+	sessionID := newSessionID()
+	app.markSessionAuthenticated(sessionID, username, role)
+	return &http.Cookie{Name: sessionCookieName, Value: sessionID}
+}
+
+func TestReadOnlyRoleBlocksWritesAndNonSelectSQL(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE ro_test (id INT)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	roCookie := sessionCookieForRole(app, "readonly-user", RoleReadOnly)
+
+	dropReq := httptest.NewRequest(http.MethodPost, "/drop-table/ro_test", nil)
+	dropReq.AddCookie(roCookie)
+	dropRec := httptest.NewRecorder()
+	mux.ServeHTTP(dropRec, dropReq)
+	if dropRec.Code != http.StatusForbidden {
+		t.Fatalf("expected readonly role to be blocked from dropping a table with 403, got %d", dropRec.Code)
+	}
+
+	insertBody, _ := json.Marshal(map[string]string{"sql": "INSERT INTO ro_test (id) VALUES (2)"})
+	insertReq := httptest.NewRequest(http.MethodPost, "/api/query", bytes.NewReader(insertBody))
+	insertReq.Header.Set("Content-Type", "application/json")
+	insertReq.AddCookie(roCookie)
+	insertRec := httptest.NewRecorder()
+	mux.ServeHTTP(insertRec, insertReq)
+	if insertRec.Code != http.StatusForbidden {
+		t.Fatalf("expected readonly role to be blocked from INSERT via /api/query with 403, got %d; body: %s", insertRec.Code, insertRec.Body.String())
+	}
+
+	selectBody, _ := json.Marshal(map[string]string{"sql": "SELECT * FROM ro_test"})
+	selectReq := httptest.NewRequest(http.MethodPost, "/api/query", bytes.NewReader(selectBody))
+	selectReq.Header.Set("Content-Type", "application/json")
+	selectReq.AddCookie(roCookie)
+	selectRec := httptest.NewRecorder()
+	mux.ServeHTTP(selectRec, selectReq)
+	if selectRec.Code != http.StatusOK {
+		t.Fatalf("expected readonly role to run SELECT via /api/query, got %d; body: %s", selectRec.Code, selectRec.Body.String())
+	}
+}
+
+func TestUserRoleCanWriteButNotAdminRoutes(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE user_role_test (id INT)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+	// requireRole's "no admin account yet" branch would otherwise redirect
+	// /admin to /admin/setup before ever reaching the role check below.
+	setupAdminSession(t, mux)
+
+	userCookie := sessionCookieForRole(app, "plain-user", RoleUser)
+
+	dropReq := httptest.NewRequest(http.MethodPost, "/drop-table/user_role_test", nil)
+	dropReq.AddCookie(userCookie)
+	dropRec := httptest.NewRecorder()
+	mux.ServeHTTP(dropRec, dropReq)
+	if dropRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected RoleUser to be able to drop a table, got %d; body: %s", dropRec.Code, dropRec.Body.String())
+	}
+
+	adminReq := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	adminReq.AddCookie(userCookie)
+	adminRec := httptest.NewRecorder()
+	mux.ServeHTTP(adminRec, adminReq)
+	if adminRec.Code != http.StatusForbidden {
+		t.Fatalf("expected RoleUser to be forbidden from /admin, got %d", adminRec.Code)
+	}
+}
+
+func TestAdminUsersPageCRUDAndGuards(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+	adminCookie := setupAdminSession(t, mux)
+
+	// Non-admin roles are forbidden from the Users page.
+	roCookie := sessionCookieForRole(app, "someone", RoleReadOnly)
+	forbiddenReq := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+	forbiddenReq.AddCookie(roCookie)
+	forbiddenRec := httptest.NewRecorder()
+	mux.ServeHTTP(forbiddenRec, forbiddenReq)
+	if forbiddenRec.Code != http.StatusForbidden {
+		t.Fatalf("expected non-admin to be forbidden from /admin/users, got %d", forbiddenRec.Code)
+	}
+
+	// Create a second user.
+	createReq := httptest.NewRequest(http.MethodPost, "/admin/users", strings.NewReader(
+		url.Values{"username": {"second"}, "password": {"password123"}, "role": {"user"}}.Encode()))
+	createReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	createReq.AddCookie(adminCookie)
+	createRec := httptest.NewRecorder()
+	mux.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected user creation redirect, got %d; body: %s", createRec.Code, createRec.Body.String())
+	}
+	if _, found, err := app.getUserByUsername(context.Background(), "second"); err != nil || !found {
+		t.Fatalf("expected user 'second' to exist, found=%v err=%v", found, err)
+	}
+
+	// Change its role to readonly.
+	roleReq := httptest.NewRequest(http.MethodPost, "/admin/users/role", strings.NewReader(
+		url.Values{"username": {"second"}, "role": {"readonly"}}.Encode()))
+	roleReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	roleReq.AddCookie(adminCookie)
+	roleRec := httptest.NewRecorder()
+	mux.ServeHTTP(roleRec, roleReq)
+	if roleRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected role-change redirect, got %d; body: %s", roleRec.Code, roleRec.Body.String())
+	}
+	if u, _, _ := app.getUserByUsername(context.Background(), "second"); u.Role != RoleReadOnly {
+		t.Fatalf("expected role readonly, got %q", u.Role)
+	}
+
+	// Disable it.
+	disableReq := httptest.NewRequest(http.MethodPost, "/admin/users/disable", strings.NewReader(
+		url.Values{"username": {"second"}, "disabled": {"true"}}.Encode()))
+	disableReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	disableReq.AddCookie(adminCookie)
+	disableRec := httptest.NewRecorder()
+	mux.ServeHTTP(disableRec, disableReq)
+	if disableRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected disable redirect, got %d; body: %s", disableRec.Code, disableRec.Body.String())
+	}
+	if u, _, _ := app.getUserByUsername(context.Background(), "second"); !u.Disabled {
+		t.Fatal("expected user 'second' to be disabled")
+	}
+
+	// Delete it.
+	deleteReq := httptest.NewRequest(http.MethodPost, "/admin/users/delete", strings.NewReader(
+		url.Values{"username": {"second"}}.Encode()))
+	deleteReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	deleteReq.AddCookie(adminCookie)
+	deleteRec := httptest.NewRecorder()
+	mux.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected delete redirect, got %d; body: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, found, _ := app.getUserByUsername(context.Background(), "second"); found {
+		t.Fatal("expected user 'second' to be deleted")
+	}
+
+	// The sole remaining admin cannot delete themselves...
+	adminUsername, _, _ := app.currentSessionUser(sessionIDFromRequest(adminCookieRequest(adminCookie)))
+	selfDeleteReq := httptest.NewRequest(http.MethodPost, "/admin/users/delete", strings.NewReader(
+		url.Values{"username": {adminUsername}}.Encode()))
+	selfDeleteReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	selfDeleteReq.AddCookie(adminCookie)
+	selfDeleteRec := httptest.NewRecorder()
+	mux.ServeHTTP(selfDeleteRec, selfDeleteReq)
+	if selfDeleteRec.Code != http.StatusOK || !strings.Contains(selfDeleteRec.Body.String(), "cannot delete your own account") {
+		t.Fatalf("expected a self-delete refusal, got %d; body: %s", selfDeleteRec.Code, selfDeleteRec.Body.String())
+	}
+
+	// ...nor demote themselves away from admin, since they're the last one.
+	selfDemoteReq := httptest.NewRequest(http.MethodPost, "/admin/users/role", strings.NewReader(
+		url.Values{"username": {adminUsername}, "role": {"user"}}.Encode()))
+	selfDemoteReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	selfDemoteReq.AddCookie(adminCookie)
+	selfDemoteRec := httptest.NewRecorder()
+	mux.ServeHTTP(selfDemoteRec, selfDemoteReq)
+	if selfDemoteRec.Code != http.StatusOK || !strings.Contains(selfDemoteRec.Body.String(), "last remaining admin") {
+		t.Fatalf("expected a last-admin refusal, got %d; body: %s", selfDemoteRec.Code, selfDemoteRec.Body.String())
+	}
+}
+
+// adminCookieRequest wraps a cookie in a bare *http.Request so
+// sessionIDFromRequest (which reads from an *http.Request) can extract the
+// session ID back out of it in a test.
+func adminCookieRequest(cookie *http.Cookie) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(cookie)
+	return req
+}
+
+// TestAdminSetupModeChooser covers Schritt 4: a fresh instance with no
+// -auth-mode given shows a "Nur ich / Team" chooser instead of jumping
+// straight to account creation; an operator who did pass -auth-mode skips
+// it; and the chooser's "Nur ich" action reuses applyRuntimeSettings' own
+// loopback-bind safety net rather than duplicating it.
+func TestAdminSetupModeChooser(t *testing.T) {
+	t.Run("shown when auth-mode was not explicit", func(t *testing.T) {
+		app := newTestApp(t)
+		mux := http.NewServeMux()
+		app.registerRoutes(mux)
+
+		req := httptest.NewRequest(http.MethodGet, "/admin/setup", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `name="mode" value="none"`) {
+			t.Fatalf("expected the mode chooser to render, got %d; body snippet missing chooser form", rec.Code)
+		}
+	})
+
+	t.Run("skipped when auth-mode was explicit", func(t *testing.T) {
+		app := newTestApp(t)
+		app.authModeExplicit = true
+		mux := http.NewServeMux()
+		app.registerRoutes(mux)
+
+		req := httptest.NewRequest(http.MethodGet, "/admin/setup", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `name="mode" value="none"`) {
+			t.Fatalf("expected the account-creation form directly (no chooser), got %d", rec.Code)
+		}
+	})
+
+	t.Run("team=1 bypasses the chooser", func(t *testing.T) {
+		app := newTestApp(t)
+		mux := http.NewServeMux()
+		app.registerRoutes(mux)
+
+		req := httptest.NewRequest(http.MethodGet, "/admin/setup?team=1", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `name="mode" value="none"`) {
+			t.Fatalf("expected ?team=1 to bypass the chooser, got %d", rec.Code)
+		}
+	})
+
+	t.Run("mode=none succeeds on a loopback bind", func(t *testing.T) {
+		app := newTestApp(t)
+		app.listenAddr = "127.0.0.1:8080"
+		mux := http.NewServeMux()
+		app.registerRoutes(mux)
+
+		req := httptest.NewRequest(http.MethodPost, "/admin/setup/mode", strings.NewReader(url.Values{"mode": {"none"}}.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("expected mode=none to succeed on a loopback bind, got %d; body: %s", rec.Code, rec.Body.String())
+		}
+		if app.currentAuthMode() != AuthModeNone {
+			t.Fatalf("expected auth mode to become none, got %q", app.currentAuthMode())
+		}
+	})
+
+	t.Run("mode=none fails on a non-loopback bind without opt-in", func(t *testing.T) {
+		app := newTestApp(t)
+		app.listenAddr = "0.0.0.0:8080"
+		mux := http.NewServeMux()
+		app.registerRoutes(mux)
+
+		req := httptest.NewRequest(http.MethodPost, "/admin/setup/mode", strings.NewReader(url.Values{"mode": {"none"}}.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "non-loopback") {
+			t.Fatalf("expected the chooser to re-render with the loopback safety error, got %d; body: %s", rec.Code, rec.Body.String())
+		}
+		if app.currentAuthMode() == AuthModeNone {
+			t.Fatal("auth mode must not have switched to none on a refused non-loopback bind")
+		}
+	})
+}
+
 func TestAPIImportHandlerCSV(t *testing.T) {
 	app := newTestApp(t)
 	body := strings.NewReader(`{"table":"imported_people","format":"csv","content":"id,name\n1,Ada\n2,Grace\n","header_mode":"present","create_table":true,"type_inference":true}`)

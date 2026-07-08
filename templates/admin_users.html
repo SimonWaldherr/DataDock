@@ -1,0 +1,119 @@
+{{define "admin_users"}}
+{{template "base_start" .}}
+
+<div class="page-hdr">
+  <h1><i class="bi bi-people text-primary"></i>Users</h1>
+  <a href="/admin" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Admin</a>
+</div>
+
+{{template "alert" .}}
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead>
+        <tr>
+          <th>Username</th>
+          <th>Role</th>
+          <th>Created</th>
+          <th>Status</th>
+          <th class="text-end">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{$current := .CurrentUsername}}
+        {{range .Users}}
+        <tr>
+          <td>
+            <div class="fw-semibold">{{.Username}}</div>
+            {{if eq .Username $current}}<span class="badge bg-light text-secondary border">You</span>{{end}}
+          </td>
+          <td>
+            <span class="badge {{if eq .Role "admin"}}text-bg-primary{{else if eq .Role "readonly"}}text-bg-warning{{else}}bg-light text-secondary border{{end}}">{{.Role}}</span>
+          </td>
+          <td><span class="text-muted small">{{.CreatedAt.Format "2006-01-02"}}</span></td>
+          <td>
+            {{if .Disabled}}
+            <span class="badge text-bg-secondary">Disabled</span>
+            {{else}}
+            <span class="badge bg-light text-secondary border">Enabled</span>
+            {{end}}
+          </td>
+          <td class="text-end">
+            <form method="post" action="/admin/users/role" class="d-inline-flex align-items-center gap-1">
+              <input type="hidden" name="username" value="{{.Username}}">
+              <select name="role" class="form-select form-select-sm" style="width:auto" title="Change role">
+                <option value="admin" {{if eq .Role "admin"}}selected{{end}}>Admin</option>
+                <option value="user" {{if eq .Role "user"}}selected{{end}}>User</option>
+                <option value="readonly" {{if eq .Role "readonly"}}selected{{end}}>Read-only</option>
+              </select>
+              <button class="btn btn-sm btn-outline-secondary" title="Save role">Save</button>
+            </form>
+            <form method="post" action="/admin/users/reset-password" class="d-inline-flex align-items-center gap-1 ms-1">
+              <input type="hidden" name="username" value="{{.Username}}">
+              <input type="password" name="new_password" class="form-control form-control-sm" style="width:9rem" placeholder="New password" minlength="8">
+              <button class="btn btn-sm btn-outline-secondary" title="Reset this user's password"><i class="bi bi-key"></i></button>
+            </form>
+            {{if .Disabled}}
+            <form method="post" action="/admin/users/disable" class="d-inline ms-1">
+              <input type="hidden" name="username" value="{{.Username}}">
+              <input type="hidden" name="disabled" value="false">
+              <button class="btn btn-sm btn-outline-secondary" title="Re-enable this account"><i class="bi bi-unlock"></i></button>
+            </form>
+            {{else}}
+            <form method="post" action="/admin/users/disable" class="d-inline ms-1" onsubmit="return confirm('Disable {{.Username}}? They will not be able to log in until re-enabled.');">
+              <input type="hidden" name="username" value="{{.Username}}">
+              <input type="hidden" name="disabled" value="true">
+              <button class="btn btn-sm btn-outline-warning" title="Disable this account"><i class="bi bi-lock"></i></button>
+            </form>
+            {{end}}
+            {{if ne .Username $current}}
+            <form method="post" action="/admin/users/delete" class="d-inline ms-1" onsubmit="return confirm('Delete the account {{.Username}}? This cannot be undone.');">
+              <input type="hidden" name="username" value="{{.Username}}">
+              <button class="btn btn-sm btn-outline-danger" title="Delete this account"><i class="bi bi-trash3"></i></button>
+            </form>
+            {{end}}
+          </td>
+        </tr>
+        {{else}}
+        <tr><td colspan="5" class="text-muted small py-3">No users yet.</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card mt-3">
+  <div class="card-body">
+    <h2 class="h6 mb-3">Add User</h2>
+    <form method="post" action="/admin/users" class="row g-2">
+      <div class="col-md-4">
+        <label class="form-label small text-muted">Username</label>
+        <input class="form-control form-control-sm" type="text" name="username" minlength="3" maxlength="64" pattern="[A-Za-z0-9._-]{3,64}" value="{{index .Form "username"}}" required>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label small text-muted">Password</label>
+        <input class="form-control form-control-sm" type="password" name="password" minlength="8" autocomplete="new-password" required>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small text-muted">Role</label>
+        <select name="role" class="form-select form-select-sm">
+          <option value="user" {{if eq (index .Form "role") "user"}}selected{{end}}>User</option>
+          <option value="readonly" {{if eq (index .Form "role") "readonly"}}selected{{end}}>Read-only</option>
+          <option value="admin" {{if eq (index .Form "role") "admin"}}selected{{end}}>Admin</option>
+        </select>
+      </div>
+      <div class="col-md-2 d-flex align-items-end">
+        <button class="btn btn-primary btn-sm w-100">Add</button>
+      </div>
+    </form>
+    <p class="text-muted small mt-2 mb-0">
+      <strong>Admin</strong> can manage settings, connections, jobs, and other users.
+      <strong>User</strong> has full read/write access to data (today's default).
+      <strong>Read-only</strong> can browse and run <code>SELECT</code> queries, but every write is blocked regardless of maintenance mode.
+    </p>
+  </div>
+</div>
+
+{{template "base_end" .}}
+{{end}}
