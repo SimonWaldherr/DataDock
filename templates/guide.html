@@ -21,7 +21,7 @@
       <div class="col-md-4">
         <div class="metric">
           <div class="fw-semibold"><i class="bi bi-upload text-primary me-1"></i>Import</div>
-          <div class="small text-muted">Upload CSV, TSV, JSON, GeoJSON, or an XLSX first sheet into a new tinySQL table.</div>
+          <div class="small text-muted">Upload tabular files plus GeoJSON, KML, OSM, Shapefile ZIP, MBTiles, or RG data into a new tinySQL table.</div>
         </div>
       </div>
       <div class="col-md-4">
@@ -42,7 +42,10 @@
       <tbody>
         <tr><td>CSV / TSV</td><td>Header row can be auto-detected, forced present, or forced absent.</td></tr>
         <tr><td>JSON / NDJSON</td><td>Imports an array of objects into columns derived from object keys.</td></tr>
-        <tr><td>GeoJSON</td><td>Imports FeatureCollection data with a GeoJSON geometry column and flattened properties.</td></tr>
+        <tr><td>GeoJSON / KML / OSM</td><td>Imports features with GeoJSON geometry text, geometry type, and useful tags/properties.</td></tr>
+        <tr><td>Shapefile ZIP</td><td>Reads the first .shp in a ZIP, converting shapes to GeoJSON geometry and DBF attributes to columns.</td></tr>
+        <tr><td>MBTiles</td><td>Imports metadata plus a tile index with size, SHA-256, and base64 tile data for small tiles.</td></tr>
+        <tr><td>RG</td><td>Imports JSON/NDJSON routing graphs as node and edge rows with geometry where present.</td></tr>
         <tr><td>XLSX</td><td>Reads the first worksheet and imports it through the CSV path.</td></tr>
         <tr><td>Demo Data</td><td>Creates related departments, people, projects, events, invoices, and support tickets.</td></tr>
       </tbody>

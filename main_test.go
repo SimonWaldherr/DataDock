@@ -1390,6 +1390,72 @@ func TestSafeExportFilenameBase(t *testing.T) {
 	}
 }
 
+func TestExportContentDisposition(t *testing.T) {
+	tests := []struct {
+		name string
+		base string
+		ext  string
+		want string
+	}{
+		{
+			name: "ascii",
+			base: "people",
+			ext:  "csv",
+			want: `attachment; filename="people.csv"`,
+		},
+		{
+			name: "unicode",
+			base: "Kunden März",
+			ext:  "xlsx",
+			want: `attachment; filename="Kunden_M_rz.xlsx"; filename*=UTF-8''Kunden%20M%C3%A4rz.xlsx`,
+		},
+		{
+			name: "unsafe unicode name",
+			base: ` ../Kunden: "März" `,
+			ext:  ".excel.csv",
+			want: `attachment; filename=".._Kunden___M_rz_.excel.csv"; filename*=UTF-8''Kunden_%20_M%C3%A4rz.excel.csv`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := exportContentDisposition(tt.base, tt.ext); got != tt.want {
+				t.Fatalf("exportContentDisposition(%q, %q) = %q, want %q", tt.base, tt.ext, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestImportFormatFromNameMapFormats(t *testing.T) {
+	tests := map[string]string{
+		"places.geojson":        "geojson",
+		"route.kml":             "kml",
+		"berlin.osm":            "osm",
+		"berlin.osm.xml":        "osm",
+		"roads.zip":             "shp",
+		"tiles.mbtiles":         "mbtiles",
+		"network.rg":            "rg",
+		"network.graph.json":    "rg",
+		"network.routing-graph": "rg",
+	}
+	for filename, want := range tests {
+		if got := importFormatFromName(filename, ""); got != want {
+			t.Fatalf("importFormatFromName(%q) = %q, want %q", filename, got, want)
+		}
+	}
+}
+
+func TestMapImportsUseLargerUploadLimit(t *testing.T) {
+	if got := importUploadLimit("csv"); got != maxImportUploadBytes {
+		t.Fatalf("csv upload limit = %d, want %d", got, maxImportUploadBytes)
+	}
+	for _, format := range []string{"geojson", "kml", "osm", "shp", "mbtiles", "rg"} {
+		if got := importUploadLimit(format); got != maxMapImportUploadBytes {
+			t.Fatalf("%s upload limit = %d, want %d", format, got, maxMapImportUploadBytes)
+		}
+	}
+}
+
 func TestRecoverMiddlewareReturnsCleanServerError(t *testing.T) {
 	panicking := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		panic("boom")

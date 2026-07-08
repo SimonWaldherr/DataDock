@@ -18,6 +18,7 @@ administrator-managed shared connections or per-user credentials.
 | **Datasheet View** | View, sort, and page through table rows |
 | **Record CRUD** | Add, edit, and delete records from any table with an `id INT` column |
 | **Table Design** | Create new tables with a visual column designer (INT, FLOAT, TEXT, BOOL) |
+| **Map Data Import** | Import GeoJSON, KML, OSM XML, Shapefile ZIPs, MBTiles indexes, and JSON/NDJSON routing graphs into queryable tables with GeoJSON geometry columns |
 | **Export** | Download whole tables/views or SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, XML, or GeoJSON |
 | **Drop Table** | Delete any table with a one-click confirmation |
 | **SQL Editor** | Monaco-enhanced SQL editor with SQL syntax highlighting and textarea fallback; selected text can be executed with Run, export, Ctrl+Enter, or F5 |
@@ -122,7 +123,7 @@ enable it where operational stdout access is appropriately restricted.
 The SQL editor supports multiple result views per tab: table, live logs, cards,
 JSON/XML trees, pivot summaries, column profiles, schema graph, and notebook.
 Query share links include the active SQL, tab title, view mode, live settings,
-and log filter. `-watch-dir` imports CSV/TSV/JSON/NDJSON/XML/YAML/XLSX/GeoJSON/KML
+and log filter. `-watch-dir` imports CSV/TSV/JSON/NDJSON/XML/YAML/XLSX/GeoJSON/KML/OSM/Shapefile ZIP/MBTiles/RG
 files on startup and whenever their size or modification time changes; the table
 name is derived from the filename and refreshed on update.
 
@@ -213,6 +214,7 @@ datadock uses stable web and data interchange standards for external integration
 - Excel-safe CSV is an explicit export mode that rewrites ambiguous text and ISO date/time values for Excel import while leaving standard CSV unchanged.
 - XLSX exports use Office Open XML spreadsheet packages with typed numeric, boolean, date, time, and datetime cells.
 - GeoJSON exports use RFC 7946 FeatureCollection output where geometry or lat/lon columns are present.
+- Map data imports normalize GeoJSON/KML/OSM/Shapefile geometries into GeoJSON text columns; MBTiles imports metadata and tile indexes; RG imports JSON/NDJSON routing graph nodes and edges.
 - tinySQL-facing error classes can use ISO/IEC 9075 SQLSTATE helpers exposed by
   the public tinySQL API.
 
@@ -275,7 +277,7 @@ The wizard walks through:
    including two different database engines) and a table on each — or
    picking the special **File Upload** entry instead of a connection, which
    swaps that side's table dropdown for a file picker: choosing a
-   CSV/TSV/JSON/XLSX/XML/YAML/GeoJSON file imports it into the local tinySQL
+   CSV/TSV/JSON/XLSX/XML/YAML/GeoJSON/KML/OSM/Shapefile ZIP/MBTiles/RG file imports it into the local tinySQL
    database (via the same import path as **Manage Tables → Import**) and
    uses it immediately as that side's table, no separate import step and no
    loss of whatever table is already selected on the other side,

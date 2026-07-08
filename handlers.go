@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	dbimporter "github.com/SimonWaldherr/datadock/internal/importer"
 	dbjobs "github.com/SimonWaldherr/datadock/internal/jobs"
@@ -266,12 +267,11 @@ func (a *App) writeProblem(w http.ResponseWriter, r *http.Request, status int, t
 }
 
 func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]string, format, filenameBase string) bool {
-	filenameBase = safeExportFilenameBase(filenameBase)
 	kinds := typed.InferColumns(rows, len(columns))
 	switch strings.ToLower(strings.TrimSpace(format)) {
 	case "", "csv":
 		w.Header().Set("Content-Type", standards.MediaTypeCSV)
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.csv"`, filenameBase))
+		w.Header().Set("Content-Disposition", exportContentDisposition(filenameBase, "csv"))
 		cw := csv.NewWriter(w)
 		_ = cw.Write(columns)
 		for _, row := range rows {
@@ -281,7 +281,7 @@ func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]stri
 		return true
 	case "tsv":
 		w.Header().Set("Content-Type", standards.MediaTypeTSV)
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.tsv"`, filenameBase))
+		w.Header().Set("Content-Disposition", exportContentDisposition(filenameBase, "tsv"))
 		cw := csv.NewWriter(w)
 		cw.Comma = '\t'
 		_ = cw.Write(columns)
@@ -294,7 +294,7 @@ func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]stri
 		return writeExcelCSV(w, columns, rows, kinds, filenameBase) == nil
 	case "json":
 		w.Header().Set("Content-Type", standards.MediaTypeJSON)
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.json"`, filenameBase))
+		w.Header().Set("Content-Disposition", exportContentDisposition(filenameBase, "json"))
 		records := make([]map[string]any, 0, len(rows))
 		for _, row := range rows {
 			record := make(map[string]any, len(columns))
@@ -311,7 +311,7 @@ func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]stri
 		return true
 	case "ndjson":
 		w.Header().Set("Content-Type", standards.MediaTypeNDJSON)
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.ndjson"`, filenameBase))
+		w.Header().Set("Content-Disposition", exportContentDisposition(filenameBase, "ndjson"))
 		enc := json.NewEncoder(w)
 		for _, row := range rows {
 			record := make(map[string]any, len(columns))
@@ -327,7 +327,7 @@ func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]stri
 		return true
 	case "xml":
 		w.Header().Set("Content-Type", standards.MediaTypeXML)
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.xml"`, filenameBase))
+		w.Header().Set("Content-Disposition", exportContentDisposition(filenameBase, "xml"))
 		_, _ = w.Write([]byte(xml.Header))
 		_ = xml.NewEncoder(w).Encode(exportXMLDocument(columns, rows, kinds))
 		return true
@@ -335,7 +335,7 @@ func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]stri
 		return writeGeoJSONExport(w, columns, rows, kinds, filenameBase) == nil
 	case "xlsx":
 		w.Header().Set("Content-Type", standards.MediaTypeXLSX)
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.xlsx"`, filenameBase))
+		w.Header().Set("Content-Disposition", exportContentDisposition(filenameBase, "xlsx"))
 		return writeXLSX(w, columns, rows) == nil
 	default:
 		return false
@@ -572,6 +572,38 @@ func safeExportFilenameBase(name string) string {
 			return '_'
 		}
 	}, strings.TrimSpace(name))
+	if name == "" {
+		return "export"
+	}
+	return name
+}
+
+func exportContentDisposition(filenameBase, extension string) string {
+	extension = strings.TrimPrefix(strings.TrimSpace(extension), ".")
+	if extension == "" {
+		extension = "dat"
+	}
+	fallback := safeExportFilenameBase(filenameBase) + "." + extension
+	utf8Name := unicodeExportFilenameBase(filenameBase) + "." + extension
+	if utf8Name == fallback {
+		return fmt.Sprintf(`attachment; filename="%s"`, fallback)
+	}
+	return fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, fallback, url.PathEscape(utf8Name))
+}
+
+func unicodeExportFilenameBase(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '_'
+		}
+		switch r {
+		case '/', '\\', ':', '*', '?', '"', '<', '>', '|':
+			return '_'
+		default:
+			return r
+		}
+	}, strings.TrimSpace(name))
+	name = strings.Trim(name, " ._")
 	if name == "" {
 		return "export"
 	}
@@ -2090,7 +2122,7 @@ func (a *App) importFileHandler(w http.ResponseWriter, r *http.Request) {
 		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "File import currently targets the local tinySQL DB only."})
 		return
 	}
-	if err := r.ParseMultipartForm(16 << 20); err != nil {
+	if err := r.ParseMultipartForm(maxImportUploadBytes); err != nil {
 		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "Could not read upload: " + err.Error()})
 		return
 	}
@@ -2117,7 +2149,7 @@ func (a *App) importFileHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // importUploadedFile parses a multipart file upload (CSV/TSV/JSON/NDJSON/
-// XLSX/XML/YAML/GeoJSON) and imports it into a new table on the local
+// XLSX/XML/YAML/GeoJSON/KML/OSM/Shapefile ZIP/MBTiles/RG) and imports it into a new table on the local
 // tinySQL database — the only backend file import currently supports.
 // Shared by the Manage Tables import tab (importFileHandler) and the
 // Matching wizard's "File Upload" connection option (resolveMatchTableSide,
@@ -2133,11 +2165,12 @@ func (a *App) importUploadedFile(ctx context.Context, file multipart.File, filen
 	}
 	table = sanitizeIdentifier(table)
 
-	content, err := io.ReadAll(io.LimitReader(file, 16<<20))
+	format := importFormatFromName(filename, formatOverride)
+	limit := importUploadLimit(format)
+	content, err := readLimitedImport(file, limit)
 	if err != nil {
 		return table, nil, fmt.Errorf("could not read upload: %w", err)
 	}
-	format := importFormatFromName(filename, formatOverride)
 	if format == "xlsx" {
 		content, err = xlsxToCSV(content)
 		if err != nil {
@@ -2162,6 +2195,31 @@ func (a *App) importUploadedFile(ctx context.Context, file multipart.File, filen
 		return table, nil, fmt.Errorf("import failed: %w", err)
 	}
 	return table, res, nil
+}
+
+const (
+	maxImportUploadBytes    int64 = 16 << 20
+	maxMapImportUploadBytes int64 = 256 << 20
+)
+
+func importUploadLimit(format string) int64 {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "geojson", "kml", "osm", "shp", "shapefile", "shpzip", "mbtiles", "rg", "routing-graph", "routing_graph":
+		return maxMapImportUploadBytes
+	default:
+		return maxImportUploadBytes
+	}
+}
+
+func readLimitedImport(r io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("file is larger than the %s import limit", formatByteSize(limit))
+	}
+	return data, nil
 }
 
 // exportFormHandler renders the Export tab of the combined table management
@@ -3315,6 +3373,14 @@ func importContent(ctx context.Context, db *tinysql.DB, tenant, table, format st
 		return dbimporter.ImportXML(ctx, db, tenant, table, src, opts)
 	case "kml":
 		return dbimporter.ImportKML(ctx, db, tenant, table, src, opts)
+	case "osm":
+		return dbimporter.ImportOSM(ctx, db, tenant, table, src, opts)
+	case "shp", "shapefile", "shpzip":
+		return dbimporter.ImportShapefileZip(ctx, db, tenant, table, src, opts)
+	case "mbtiles":
+		return dbimporter.ImportMBTiles(ctx, db, tenant, table, src, opts)
+	case "rg", "routing-graph", "routing_graph":
+		return dbimporter.ImportRoutingGraph(ctx, db, tenant, table, src, opts)
 	case "geojson":
 		return dbimporter.ImportGeoJSON(ctx, db, tenant, table, src, opts)
 	default:
@@ -3352,10 +3418,18 @@ func importFormatFromName(filename, selected string) string {
 		return selected
 	}
 	name := strings.ToLower(strings.TrimSpace(filename))
+	if strings.HasSuffix(name, ".osm.xml") {
+		return "osm"
+	}
+	if strings.HasSuffix(name, ".routing-graph") || strings.HasSuffix(name, ".routing_graph") || strings.HasSuffix(name, ".graph.json") {
+		return "rg"
+	}
 	if i := strings.LastIndex(name, "."); i >= 0 {
 		switch name[i+1:] {
-		case "csv", "tsv", "json", "ndjson", "xlsx", "xml", "yaml", "yml", "geojson", "kml":
+		case "csv", "tsv", "json", "ndjson", "xlsx", "xml", "yaml", "yml", "geojson", "kml", "osm", "mbtiles", "rg":
 			return name[i+1:]
+		case "zip", "shp":
+			return "shp"
 		}
 	}
 	return "csv"

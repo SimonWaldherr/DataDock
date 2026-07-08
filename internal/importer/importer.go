@@ -258,10 +258,6 @@ func FuzzyImportXML(ctx context.Context, db *tinysql.DB, tenant, tableName strin
 	return ImportXML(ctx, db, tenant, tableName, src, base)
 }
 
-func ImportKML(context.Context, *tinysql.DB, string, string, io.Reader, *ImportOptions) (*ImportResult, error) {
-	return nil, fmt.Errorf("kml import is not supported in standalone datadock yet")
-}
-
 func importRecords(ctx context.Context, db *tinysql.DB, tenant, tableName string, records [][]string, delimiter rune, opts *ImportOptions) (*ImportResult, error) {
 	res := &ImportResult{Delimiter: delimiter, Encoding: "utf-8", LineEnding: "\n"}
 	if len(records) == 0 {

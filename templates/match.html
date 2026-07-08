@@ -91,7 +91,7 @@
         {{if eq .SelectedSourceID "__upload__"}}
         <label class="form-label small">Upload source file</label>
         <input type="file" class="form-control form-control-sm" name="source_file" onchange="this.form.requestSubmit()"
-               accept=".csv,.tsv,.xlsx,.json,.ndjson,.xml,.yaml,.yml,.geojson" required>
+               accept=".csv,.tsv,.xlsx,.json,.ndjson,.xml,.yaml,.yml,.geojson,.kml,.osm,.mbtiles,.rg,.zip,.shp" required>
         <div class="form-text">Imported into the local tinySQL database on submit.</div>
         {{else}}
         <label class="form-label small">Source table</label>
@@ -107,7 +107,7 @@
         {{if eq .SelectedTargetID "__upload__"}}
         <label class="form-label small">Upload target file</label>
         <input type="file" class="form-control form-control-sm" name="target_file" onchange="this.form.requestSubmit()"
-               accept=".csv,.tsv,.xlsx,.json,.ndjson,.xml,.yaml,.yml,.geojson" required>
+               accept=".csv,.tsv,.xlsx,.json,.ndjson,.xml,.yaml,.yml,.geojson,.kml,.osm,.mbtiles,.rg,.zip,.shp" required>
         <div class="form-text">Imported into the local tinySQL database on submit.</div>
         {{else}}
         <label class="form-label small">Target table</label>

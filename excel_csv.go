@@ -20,7 +20,7 @@ var (
 
 func writeExcelCSV(w http.ResponseWriter, columns []string, rows [][]string, kinds []typed.Kind, filenameBase string) error {
 	w.Header().Set("Content-Type", standards.MediaTypeCSV)
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.excel.csv"`, filenameBase))
+	w.Header().Set("Content-Disposition", exportContentDisposition(filenameBase, "excel.csv"))
 	_, _ = w.Write([]byte{0xEF, 0xBB, 0xBF})
 	if _, err := fmt.Fprintln(w, "sep=,"); err != nil {
 		return err

@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -40,7 +39,7 @@ var (
 
 func writeGeoJSONExport(w http.ResponseWriter, columns []string, rows [][]string, kinds []typed.Kind, filenameBase string) error {
 	w.Header().Set("Content-Type", standards.MediaTypeGeoJSON)
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.geojson"`, filenameBase))
+	w.Header().Set("Content-Disposition", exportContentDisposition(filenameBase, "geojson"))
 	return json.NewEncoder(w).Encode(buildGeoJSONFeatureCollection(columns, rows, kinds))
 }
 
