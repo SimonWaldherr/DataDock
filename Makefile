@@ -12,7 +12,7 @@ SHELL       := bash
 # ignores it. Multi-line shell logic must be continued explicitly or moved into
 # scripts/make-menu.sh.
 
-.PHONY: all build run run-memory test fmt format menu tui help findport clean
+.PHONY: all build run run-memory test vet staticcheck vulncheck check fmt format menu tui help findport clean
 
 GO     ?= go
 NPM    ?= npm
@@ -22,8 +22,8 @@ TENANT ?= default
 PORT   ?=
 ADDR   ?=
 
-GOEXE := $(shell $(GO) env GOEXE)
-BIN   := $(APP)$(GOEXE)
+GOEXE = $(shell $(GO) env GOEXE)
+BIN   = $(APP)$(GOEXE)
 
 RUN_ARGS := -db $(DB) -tenant $(TENANT)
 ifneq ($(strip $(ADDR)),)
@@ -38,17 +38,21 @@ all: build
 
 help:
 	@echo "DataDock make targets:"
-	echo "  make menu         interactive launcher (default when running plain 'make')"
-	echo "  make run          start the server   [DB=..] [TENANT=..] [PORT=..|ADDR=host:port]"
-	echo "  make run-memory   start the server with an in-memory database"
-	echo "  make build        build ./$(BIN)"
-	echo "  make test         run the Go test suite"
-	echo "  make fmt          run go fmt and npm run format when package.json exists"
-	echo "  make findport     print a free TCP port between 8000-8100"
-	echo "  make clean        remove the built binary"
-	echo ""
-	echo "PORT/ADDR given on the command line always take precedence over any"
-	echo "port saved in DataDock's settings or the auto-detected free port."
+	@echo "  make menu         interactive launcher (default when running plain 'make')"
+	@echo "  make run          start the server   [DB=..] [TENANT=..] [PORT=..|ADDR=host:port]"
+	@echo "  make run-memory   start the server with an in-memory database"
+	@echo "  make build        build ./$(APP)"
+	@echo "  make test         run the Go test suite"
+	@echo "  make vet          run go vet"
+	@echo "  make staticcheck  run staticcheck when installed"
+	@echo "  make vulncheck    run govulncheck when installed"
+	@echo "  make check        run test, vet, staticcheck and govulncheck"
+	@echo "  make fmt          run go fmt and npm run format when package.json exists"
+	@echo "  make findport     print a free TCP port between 8000-8100"
+	@echo "  make clean        remove the built binary"
+	@echo ""
+	@echo "PORT/ADDR given on the command line always take precedence over any"
+	@echo "port saved in DataDock's settings or the auto-detected free port."
 
 build:
 	@echo "==> building $(BIN)"
@@ -57,6 +61,30 @@ build:
 test:
 	@echo "==> running tests"
 	$(GO) test ./...
+
+vet:
+	@echo "==> running go vet"
+	$(GO) vet ./...
+
+staticcheck:
+	@echo "==> running staticcheck"
+	@if command -v staticcheck >/dev/null 2>&1; then \
+		staticcheck ./...; \
+	else \
+		echo "staticcheck not installed; install with: go install honnef.co/go/tools/cmd/staticcheck@latest"; \
+		exit 1; \
+	fi
+
+vulncheck:
+	@echo "==> running govulncheck"
+	@if command -v govulncheck >/dev/null 2>&1; then \
+		govulncheck ./...; \
+	else \
+		echo "govulncheck not installed; install with: go install golang.org/x/vuln/cmd/govulncheck@latest"; \
+		exit 1; \
+	fi
+
+check: test vet staticcheck vulncheck
 
 fmt format:
 	@echo "==> formatting Go sources"
