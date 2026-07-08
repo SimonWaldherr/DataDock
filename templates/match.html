@@ -380,64 +380,13 @@
 {{end}}
 
 <script>
+// Server-rendered data only; the field-rule editor logic (mescape,
+// addFieldRow, etc.) lives in app.js.
 var SOURCE_COLUMNS = [{{range .SourceColumns}}"{{.Name}}",{{end}}];
 var TARGET_COLUMNS = [{{range .TargetColumns}}"{{.Name}}",{{end}}];
 var MATCH_METHODS = [{{range .MatchMethods}}{value:"{{.Value}}",label:"{{.Label}}",hint:"{{.Hint}}"},{{end}}];
 var INITIAL_FIELD_ROWS = [{{range .FieldRows}}{source:"{{.SourceColumn}}",target:"{{.TargetColumn}}",method:"{{.Method}}",weight:{{.Weight}},tolerance:{{.Tolerance}},group:"{{.Group}}"},{{end}}];
 
-function mescape(s) {
-  return String(s).replace(/[&<>"']/g, function (c) {
-    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-  });
-}
-function columnOptionsHTML(list, selected) {
-  return list.map(function (name) {
-    return '<option value="' + mescape(name) + '"' + (name === selected ? ' selected' : '') + '>' + mescape(name) + '</option>';
-  }).join('');
-}
-function methodOptionsHTML(selected) {
-  return MATCH_METHODS.map(function (m) {
-    return '<option value="' + m.value + '" title="' + mescape(m.hint) + '"' + (m.value === selected ? ' selected' : '') + '>' + mescape(m.label) + '</option>';
-  }).join('');
-}
-function addFieldRow(row) {
-  row = row || {};
-  var tbody = document.getElementById('fieldRowsBody');
-  var tr = document.createElement('tr');
-  tr.innerHTML =
-    '<td><select class="form-select form-select-sm" name="field_source">' + columnOptionsHTML(SOURCE_COLUMNS, row.source) + '</select></td>' +
-    '<td><select class="form-select form-select-sm" name="field_target">' + columnOptionsHTML(TARGET_COLUMNS, row.target) + '</select></td>' +
-    '<td><select class="form-select form-select-sm" name="field_method">' + methodOptionsHTML(row.method || 'token_set') + '</select></td>' +
-    '<td><input type="number" step="0.1" min="0.1" class="form-control form-control-sm" name="field_weight" value="' + (row.weight || 1) + '"></td>' +
-    '<td><input type="number" step="1" min="0" max="100" class="form-control form-control-sm" name="field_tolerance" value="' + Math.round((row.tolerance || 0) * 100) + '"></td>' +
-    '<td><input type="text" class="form-control form-control-sm" name="field_group" placeholder="optional" value="' + mescape(row.group || '') + '"></td>' +
-    '<td><button type="button" class="btn btn-outline-danger btn-sm" onclick="removeFieldRow(this)" title="Remove field"><i class="bi bi-dash"></i></button></td>';
-  tbody.appendChild(tr);
-}
-function removeFieldRow(btn) {
-  var rows = document.querySelectorAll('#fieldRowsBody tr');
-  if (rows.length <= 1) return;
-  btn.closest('tr').remove();
-}
-function loadSavedConfig() {
-  var sel = document.getElementById('savedConfigSelect');
-  if (!sel || !sel.value) return;
-  window.location.href = '/match?config=' + encodeURIComponent(sel.value);
-}
-function prepareDeleteConfig() {
-  var sel = document.getElementById('savedConfigSelect');
-  if (!sel || !sel.value) {
-    alert('Choose a configuration to delete first.');
-    return false;
-  }
-  document.getElementById('deleteConfigName').value = sel.value;
-  return true;
-}
-function confirmDeleteConfig(form) {
-  var sel = document.getElementById('savedConfigSelect');
-  var name = sel ? sel.value : '';
-  return name !== '' && window.confirm('Delete the saved configuration "' + name + '"? This cannot be undone.');
-}
 document.addEventListener('DOMContentLoaded', function () {
   if (document.getElementById('fieldRowsBody')) {
     if (INITIAL_FIELD_ROWS.length === 0) {

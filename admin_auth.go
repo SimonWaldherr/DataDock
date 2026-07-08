@@ -526,6 +526,11 @@ func (a *App) adminForgetConnectionHandler(w http.ResponseWriter, r *http.Reques
 		a.render(w, r, "connections", map[string]interface{}{"Error": err.Error()})
 		return
 	}
+	// Best-effort: a removed connection's ID can later be reused for an
+	// unrelated database, so its indexed SQL-logic vectors (see
+	// logic_search.go) must not survive it — but a cleanup failure here
+	// shouldn't block the connection removal that already succeeded.
+	_ = a.deleteObjectEmbeddingsForConnection(r.Context(), id)
 	http.Redirect(w, r, "/connections", http.StatusSeeOther)
 }
 

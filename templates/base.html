@@ -175,6 +175,31 @@
 {{end}}
 {{end}}
 
+{{/* dependency_list renders one column of an object's dependency graph
+     (see routine_view.html's "Depends on" / "Depended on by" panels).
+     Expects a dict with:
+       Title string ("Depends on" / "Depended on by")
+       Items []ObjectDependency
+       Empty string (message shown when Items is empty)
+   Shared so the per-item icon/link markup only exists once. */}}
+{{define "dependency_list"}}
+<div class="small text-muted mb-1">{{.Title}}</div>
+{{if .Items}}
+<ul class="list-unstyled small mb-0">
+  {{range .Items}}
+  <li>
+    <a href="{{if or (eq .Kind "procedure") (eq .Kind "function")}}/r/{{.Name}}?kind={{.Kind}}{{else}}/t/{{.Name}}{{end}}">
+      <i class="bi {{if eq .Kind "view"}}bi-eye{{else if or (eq .Kind "procedure") (eq .Kind "function")}}bi-gear{{else}}bi-table{{end}} me-1"></i>{{.Name}}
+    </a>
+    <span class="badge bg-light text-secondary border fw-normal">{{.Kind}}</span>
+  </li>
+  {{end}}
+</ul>
+{{else}}
+<div class="small text-muted">{{.Empty}}</div>
+{{end}}
+{{end}}
+
 {{/* sidebar_kind_group renders one collapsible sidebar folder (Tables or
      Views) for the static tinySQL sidebar. Expects a dict with:
        Items       []TableObject

@@ -35,38 +35,10 @@
     {{else}}
     <div class="row g-3">
       <div class="col-md-6">
-        <div class="small text-muted mb-1">Depends on</div>
-        {{if .DependsOn}}
-        <ul class="list-unstyled small mb-0">
-          {{range .DependsOn}}
-          <li>
-            <a href="{{if or (eq .Kind "procedure") (eq .Kind "function")}}/r/{{.Name}}?kind={{.Kind}}{{else}}/t/{{.Name}}{{end}}">
-              <i class="bi {{if eq .Kind "view"}}bi-eye{{else if or (eq .Kind "procedure") (eq .Kind "function")}}bi-gear{{else}}bi-table{{end}} me-1"></i>{{.Name}}
-            </a>
-            <span class="badge bg-light text-secondary border fw-normal">{{.Kind}}</span>
-          </li>
-          {{end}}
-        </ul>
-        {{else}}
-        <div class="small text-muted">Nothing else on this connection.</div>
-        {{end}}
+        {{template "dependency_list" (dict "Title" "Depends on" "Items" .DependsOn "Empty" "Nothing else on this connection.")}}
       </div>
       <div class="col-md-6">
-        <div class="small text-muted mb-1">Depended on by</div>
-        {{if .Dependents}}
-        <ul class="list-unstyled small mb-0">
-          {{range .Dependents}}
-          <li>
-            <a href="{{if or (eq .Kind "procedure") (eq .Kind "function")}}/r/{{.Name}}?kind={{.Kind}}{{else}}/t/{{.Name}}{{end}}">
-              <i class="bi {{if eq .Kind "view"}}bi-eye{{else if or (eq .Kind "procedure") (eq .Kind "function")}}bi-gear{{else}}bi-table{{end}} me-1"></i>{{.Name}}
-            </a>
-            <span class="badge bg-light text-secondary border fw-normal">{{.Kind}}</span>
-          </li>
-          {{end}}
-        </ul>
-        {{else}}
-        <div class="small text-muted">Nothing else on this connection references it.</div>
-        {{end}}
+        {{template "dependency_list" (dict "Title" "Depended on by" "Items" .Dependents "Empty" "Nothing else on this connection references it.")}}
       </div>
     </div>
     {{end}}
@@ -74,15 +46,9 @@
 </div>
 
 <script>
+// Server-rendered data only; copyRoutineDefinition() itself lives in app.js.
 var ROUTINE_DEFINITION = {{.Definition}};
 var ROUTINE_TITLE = {{.RoutineName}};
-function copyRoutineDefinition(btn) {
-  navigator.clipboard.writeText(ROUTINE_DEFINITION).then(function () {
-    var original = btn.innerHTML;
-    btn.innerHTML = '<i class="bi bi-check2 me-1"></i>Copied';
-    setTimeout(function () { btn.innerHTML = original; }, 1500);
-  });
-}
 </script>
 
 {{template "base_end" .}}

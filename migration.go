@@ -64,7 +64,7 @@ func (a *App) migrateTable(ctx context.Context, sessionID, sourceID, targetID, s
 		summary.Created = true
 	}
 
-	rows, err := a.queryConn(ctx, source, "migration.read", "SELECT * FROM "+source.QuoteIdent(meta.Name))
+	rows, err := a.queryConn(ctx, source, "migration.read", migrationSelectAllQuery(source, meta.Name))
 	if err != nil {
 		return summary, err
 	}
@@ -100,31 +100,13 @@ func (a *App) createMigratedTable(ctx context.Context, target *DBConnection, tab
 	if len(columns) == 0 {
 		return fmt.Errorf("source table has no columns")
 	}
-	defs := make([]string, 0, len(columns))
 	for _, col := range columns {
 		if !isValidIdentifier(col.Name) {
 			return fmt.Errorf("column %q cannot be migrated automatically", col.Name)
 		}
-		defs = append(defs, target.QuoteIdent(col.Name)+" "+migrationColumnType(target, col.TypeName))
 	}
-	ddl := fmt.Sprintf("CREATE TABLE %s (%s)", target.QuoteIdent(table), strings.Join(defs, ", "))
-	_, err := a.execConn(ctx, target, "migration.create_table", ddl)
+	_, err := a.execConn(ctx, target, "migration.create_table", migrationCreateTableDDL(target, table, columns))
 	return err
-}
-
-func migrationInsertSQL(target *DBConnection, table string, columns []string) string {
-	quoted := make([]string, len(columns))
-	placeholders := make([]string, len(columns))
-	for i, col := range columns {
-		quoted[i] = target.QuoteIdent(col)
-		placeholders[i] = target.Placeholder(i + 1)
-	}
-	return fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s)",
-		target.QuoteIdent(table),
-		strings.Join(quoted, ", "),
-		strings.Join(placeholders, ", "),
-	)
 }
 
 func migrationColumnType(target *DBConnection, sourceType string) string {

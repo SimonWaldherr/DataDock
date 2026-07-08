@@ -1204,6 +1204,79 @@
      margin-bottom: .6rem;
      color: var(--muted);
 }
+/* ── Homepage quickstart (empty-database first-run screen) ── */
+ .quickstart {
+     max-width: 880px;
+     width: 100%;
+     margin: 2rem auto;
+}
+ .quickstart-intro {
+     text-align: center;
+     margin-bottom: 1.75rem;
+}
+ .quickstart-intro .bi {
+     font-size: 2.2rem;
+     color: var(--brand);
+     margin-bottom: .5rem;
+     display: inline-block;
+}
+ .quickstart-intro p {
+     max-width: 480px;
+     margin-left: auto;
+     margin-right: auto;
+}
+ .quickstart-grid {
+     display: grid;
+     grid-template-columns: repeat(3, 1fr);
+     gap: .75rem;
+}
+ .quickstart-form {
+     display: contents;
+}
+ .quickstart-card {
+     display: block;
+     width: 100%;
+     text-align: left;
+     text-decoration: none;
+     color: inherit;
+     font: inherit;
+     background: var(--surface);
+     cursor: pointer;
+     transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease;
+}
+ .quickstart-card:hover, .quickstart-card:focus-visible {
+     transform: translateY(-2px);
+     box-shadow: 0 8px 20px rgba(15, 23, 42, .1);
+     border-color: var(--brand);
+     color: inherit;
+}
+ .quickstart-card .card-body {
+     padding: 1rem;
+}
+ .quickstart-card .bi {
+     font-size: 1.4rem;
+     color: var(--brand);
+     margin-bottom: .4rem;
+     display: block;
+}
+ .quickstart-card-primary {
+     background: var(--active-bg);
+     border-color: var(--active-line);
+}
+ .quickstart-title {
+     font-weight: 600;
+     font-size: .92rem;
+     margin-bottom: .15rem;
+}
+ .quickstart-desc {
+     font-size: .8rem;
+     color: var(--muted);
+}
+@media (max-width: 640px) {
+     .quickstart-grid {
+         grid-template-columns: repeat(2, 1fr);
+    }
+}
 /* ── Alert ── */
  .alert {
      border: 1px solid transparent;

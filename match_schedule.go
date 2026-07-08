@@ -183,8 +183,7 @@ func (a *App) recordMatchScheduleRun(ctx context.Context, configName string, row
 	if err := a.ensureMatchSchedulesTable(ctx); err != nil {
 		return
 	}
-	_, _ = a.execConn(ctx, a.localTinySQLConn(), "match_schedule.record_run",
-		"UPDATE "+matchSchedulesTable+" SET last_run_at = ?, last_status = ?, last_rows = ? WHERE config_name = ?",
+	_, _ = a.execConn(ctx, a.localTinySQLConn(), "match_schedule.record_run", matchSchedulesRecordRunSQL,
 		time.Now().UTC().Format(time.RFC3339), status, rows, configName)
 }
 
@@ -219,15 +218,14 @@ func (a *App) saveMatchSchedule(ctx context.Context, sched MatchSchedule) error 
 	}
 
 	conn := a.localTinySQLConn()
-	if _, err := a.execConn(ctx, conn, "match_schedule.delete", "DELETE FROM "+matchSchedulesTable+" WHERE config_name = ?", name); err != nil {
+	if _, err := a.execConn(ctx, conn, "match_schedule.delete", matchSchedulesDeleteSQL, name); err != nil {
 		return err
 	}
 	enabledInt := 0
 	if sched.Enabled {
 		enabledInt = 1
 	}
-	if _, err := a.execConn(ctx, conn, "match_schedule.insert",
-		"INSERT INTO "+matchSchedulesTable+" (config_name, cron_expr, enabled, last_run_at, last_status, last_rows) VALUES (?, ?, ?, ?, ?, ?)",
+	if _, err := a.execConn(ctx, conn, "match_schedule.insert", matchSchedulesInsertSQL,
 		name, sched.CronExpr, enabledInt, sched.LastRunAt, sched.LastStatus, sched.LastRows); err != nil {
 		return err
 	}
@@ -244,8 +242,7 @@ func (a *App) loadMatchSchedule(ctx context.Context, configName string) (MatchSc
 	if err := a.ensureMatchSchedulesTable(ctx); err != nil {
 		return MatchSchedule{}, false, err
 	}
-	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "match_schedule.load",
-		"SELECT config_name, cron_expr, enabled, last_run_at, last_status, last_rows FROM "+matchSchedulesTable+" WHERE config_name = ?", configName)
+	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "match_schedule.load", matchSchedulesSelectOneSQL, configName)
 	if err != nil {
 		return MatchSchedule{}, false, err
 	}
@@ -265,8 +262,7 @@ func (a *App) listMatchSchedules(ctx context.Context) ([]MatchSchedule, error) {
 	if err := a.ensureMatchSchedulesTable(ctx); err != nil {
 		return nil, err
 	}
-	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "match_schedule.list",
-		"SELECT config_name, cron_expr, enabled, last_run_at, last_status, last_rows FROM "+matchSchedulesTable)
+	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "match_schedule.list", matchSchedulesSelectAllSQL)
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +278,9 @@ func (a *App) listMatchSchedules(ctx context.Context) ([]MatchSchedule, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	sort.Slice(schedules, func(i, j int) bool { return strings.ToLower(schedules[i].ConfigName) < strings.ToLower(schedules[j].ConfigName) })
+	sort.Slice(schedules, func(i, j int) bool {
+		return strings.ToLower(schedules[i].ConfigName) < strings.ToLower(schedules[j].ConfigName)
+	})
 	return schedules, nil
 }
 
@@ -299,13 +297,12 @@ func (a *App) deleteMatchSchedule(ctx context.Context, configName string) error 
 	if err := a.ensureMatchSchedulesTable(ctx); err != nil {
 		return err
 	}
-	_, err := a.execConn(ctx, a.localTinySQLConn(), "match_schedule.delete", "DELETE FROM "+matchSchedulesTable+" WHERE config_name = ?", configName)
+	_, err := a.execConn(ctx, a.localTinySQLConn(), "match_schedule.delete", matchSchedulesDeleteSQL, configName)
 	return err
 }
 
 func (a *App) ensureMatchSchedulesTable(ctx context.Context) error {
-	_, err := a.execConn(ctx, a.localTinySQLConn(), "match_schedule.ensure_table",
-		"CREATE TABLE "+matchSchedulesTable+" (config_name TEXT, cron_expr TEXT, enabled INT, last_run_at TEXT, last_status TEXT, last_rows INT)")
+	_, err := a.execConn(ctx, a.localTinySQLConn(), "match_schedule.ensure_table", matchSchedulesEnsureTableSQL)
 	if err == nil {
 		return nil
 	}

@@ -61,8 +61,7 @@ var ErrUserExists = errors.New("username already exists")
 // exists". No PRIMARY KEY/UNIQUE constraint (none exist anywhere in this
 // codebase's tinySQL DDL) — uniqueness is enforced in Go, in createUser.
 func (a *App) ensureUsersTable(ctx context.Context) error {
-	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.ensure_table",
-		"CREATE TABLE "+usersTable+" (username TEXT, password_hash TEXT, role TEXT, created_at TEXT, disabled TEXT)")
+	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.ensure_table", usersEnsureTableSQL)
 	if err == nil {
 		return nil
 	}
@@ -77,8 +76,7 @@ func (a *App) listUsers(ctx context.Context) ([]User, error) {
 	if err := a.ensureUsersTable(ctx); err != nil {
 		return nil, err
 	}
-	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "users.list",
-		"SELECT username, password_hash, role, created_at, disabled FROM "+usersTable)
+	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "users.list", usersSelectAllSQL)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
@@ -198,34 +196,29 @@ func (a *App) createUser(ctx context.Context, username, passwordHash string, rol
 	} else if found {
 		return ErrUserExists
 	}
-	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.insert",
-		"INSERT INTO "+usersTable+" (username, password_hash, role, created_at, disabled) VALUES (?, ?, ?, ?, ?)",
+	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.insert", usersInsertSQL,
 		username, passwordHash, string(role), time.Now().UTC().Format(time.RFC3339), strconv.FormatBool(false),
 	)
 	return err
 }
 
 func (a *App) updateUserRole(ctx context.Context, username string, role Role) error {
-	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.update_role",
-		"UPDATE "+usersTable+" SET role = ? WHERE username = ?", string(role), username)
+	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.update_role", usersUpdateRoleSQL, string(role), username)
 	return err
 }
 
 func (a *App) setUserDisabled(ctx context.Context, username string, disabled bool) error {
-	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.update_disabled",
-		"UPDATE "+usersTable+" SET disabled = ? WHERE username = ?", strconv.FormatBool(disabled), username)
+	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.update_disabled", usersUpdateDisabledSQL, strconv.FormatBool(disabled), username)
 	return err
 }
 
 func (a *App) setUserPasswordHash(ctx context.Context, username, hash string) error {
-	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.update_password",
-		"UPDATE "+usersTable+" SET password_hash = ? WHERE username = ?", hash, username)
+	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.update_password", usersUpdatePasswordSQL, hash, username)
 	return err
 }
 
 func (a *App) deleteUser(ctx context.Context, username string) error {
-	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.delete",
-		"DELETE FROM "+usersTable+" WHERE username = ?", username)
+	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.delete", usersDeleteSQL, username)
 	return err
 }
 

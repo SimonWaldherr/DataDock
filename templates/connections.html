@@ -83,9 +83,65 @@
             {{end}}
           </td>
         </tr>
+        {{if and (or $admin .Private) (or (eq .Dialect "PostgreSQL") (eq .Dialect "MariaDB/MySQL") (eq .Dialect "Microsoft SQL Server"))}}
+        {{$logicReport := index $.LogicIndexStatus .ID}}
+        {{$logicRunning := index $.LogicIndexRunning .ID}}
+        <tr>
+          <td colspan="6" class="py-1 border-top-0">
+            <div class="d-flex align-items-center gap-2 flex-wrap small text-muted">
+              <i class="bi bi-diagram-3"></i>
+              <span>SQL Logic Search (views/procedures/functions){{if .Private}} — your private connection{{end}}:</span>
+              {{if not $.LogicSearchConfigured}}
+              <span>configure an embedding model in <a href="/admin">Admin Settings</a> to enable reindexing.</span>
+              {{else if $logicRunning}}
+              <span class="badge bg-light text-secondary border">Reindexing…</span>
+              {{else}}
+              <form method="post" action="/connections/reindex-logic" class="d-inline">
+                <input type="hidden" name="id" value="{{.ID}}">
+                <button class="btn btn-xs btn-outline-secondary py-0 px-2">Reindex</button>
+              </form>
+              {{if $logicReport.UpdatedAt}}
+              <span>
+                last run {{$logicReport.UpdatedAt.Format "2006-01-02 15:04"}}:
+                {{$logicReport.Indexed}} indexed, {{$logicReport.Skipped}} unchanged, {{$logicReport.Removed}} removed
+                {{if $logicReport.Errors}}, <span class="text-danger">{{len $logicReport.Errors}} error(s)</span>{{end}}
+              </span>
+              {{else}}
+              <span>never reindexed</span>
+              {{end}}
+              {{end}}
+            </div>
+          </td>
+        </tr>
+        {{end}}
         {{end}}
       </tbody>
     </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6 mb-2"><i class="bi bi-search me-1"></i>Search SQL Logic</h2>
+    <p class="small text-muted mb-2">Semantic search over indexed view/procedure/function definitions on a reindexed connection — ask for what a query does, not just its name.</p>
+    <div class="row g-2 align-items-end">
+      <div class="col-md-4">
+        <label class="form-label small">Connection</label>
+        <select class="form-select form-select-sm" id="logicSearchConn">
+          {{range .Connections}}
+          <option value="{{.ID}}">{{.Name}}</option>
+          {{end}}
+        </select>
+      </div>
+      <div class="col-md-6">
+        <label class="form-label small">Query</label>
+        <input class="form-control form-control-sm" id="logicSearchQuery" placeholder="which view already computes monthly revenue?">
+      </div>
+      <div class="col-md-2">
+        <button type="button" class="btn btn-sm btn-primary w-100" id="logicSearchBtn">Search</button>
+      </div>
+    </div>
+    <div id="logicSearchResults" class="mt-2"></div>
   </div>
 </div>
 
@@ -215,133 +271,19 @@
 </div>
 
 <script>
-(function () {
-  var kind = document.getElementById('connectionKind');
-  var quickFields = document.getElementById('quickConnectFields');
-  var advancedField = document.getElementById('advancedDSNField');
-  var dsn = document.getElementById('connectionDSN');
-  var modeQuickBtn = document.getElementById('modeQuickBtn');
-  var modeAdvancedBtn = document.getElementById('modeAdvancedBtn');
-  var qcPort = document.getElementById('qcPort');
-  var qcInstanceWrap = document.getElementById('qcInstanceWrap');
-  var qcMssqlOptions = document.getElementById('qcMssqlOptions');
-  var qcPostgresOptions = document.getElementById('qcPostgresOptions');
-  var qcAuthModeWrap = document.getElementById('qcAuthModeWrap');
-  var qcAuthMode = document.getElementById('qcAuthMode');
-  var qcUserWrap = document.getElementById('qcUserWrap');
-  var qcUserLabel = document.getElementById('qcUserLabel');
-  var qcUser = document.getElementById('qcUser');
-  var qcPasswordWrap = document.getElementById('qcPasswordWrap');
-  var qcWindowsCurrentHint = document.getElementById('qcWindowsCurrentHint');
-  if (!kind || !quickFields || !advancedField) return;
-
-  var defaultPorts = { mssql: '1433', postgres: '5432', mysql: '3306', sqlite: '' };
-
-  function setMode(mode) {
-    if (mode === 'advanced') {
-      quickFields.classList.add('d-none');
-      advancedField.classList.remove('d-none');
-      if (dsn) dsn.required = true;
-      modeAdvancedBtn.classList.add('active');
-      modeQuickBtn.classList.remove('active');
-    } else {
-      quickFields.classList.remove('d-none');
-      advancedField.classList.add('d-none');
-      if (dsn) dsn.required = false;
-      modeQuickBtn.classList.add('active');
-      modeAdvancedBtn.classList.remove('active');
-    }
-  }
-
-  function refreshAuthModeUI() {
-    if (!qcAuthMode) return;
-    var isMssql = kind.value === 'mssql';
-    var mode = isMssql ? qcAuthMode.value : 'sql';
-    var isWindowsCurrent = isMssql && mode === 'windows-current';
-    if (qcUserWrap) qcUserWrap.classList.toggle('d-none', isWindowsCurrent);
-    if (qcPasswordWrap) qcPasswordWrap.classList.toggle('d-none', isWindowsCurrent);
-    if (qcWindowsCurrentHint) qcWindowsCurrentHint.classList.toggle('d-none', !isWindowsCurrent);
-    if (qcUserLabel && qcUser) {
-      if (isMssql && mode === 'windows-account') {
-        qcUserLabel.textContent = 'User (DOMAIN\\username)';
-        qcUser.placeholder = 'CONTOSO\\svc-datadock';
-      } else {
-        qcUserLabel.textContent = 'User';
-        qcUser.placeholder = 'sa';
-      }
-    }
-  }
-
-  function refreshKindUI() {
-    var k = kind.value;
-    if (k === 'auto') {
-      setMode('advanced');
-      return;
-    }
-    if (qcPort) qcPort.placeholder = defaultPorts[k] || '';
-    if (qcInstanceWrap) qcInstanceWrap.classList.toggle('d-none', k !== 'mssql');
-    if (qcAuthModeWrap) qcAuthModeWrap.classList.toggle('d-none', k !== 'mssql');
-    if (qcMssqlOptions) qcMssqlOptions.classList.toggle('d-none', k !== 'mssql');
-    if (qcPostgresOptions) qcPostgresOptions.classList.toggle('d-none', k !== 'postgres');
-    refreshAuthModeUI();
-  }
-
-  modeQuickBtn.addEventListener('click', function () { setMode('quick'); });
-  modeAdvancedBtn.addEventListener('click', function () { setMode('advanced'); });
-  kind.addEventListener('change', refreshKindUI);
-  if (qcAuthMode) qcAuthMode.addEventListener('change', refreshAuthModeUI);
-
-  // After a failed attempt the server re-renders this form with whatever
-  // was submitted; restore the matching input mode instead of always
-  // defaulting back to Quick Connect.
-  if (dsn && dsn.value.trim() !== '') {
-    setMode('advanced');
-  } else {
-    setMode('quick');
-  }
-  refreshKindUI();
-
-  // Remember non-secret Quick Connect fields in this browser for next time —
-  // never the password, and never sent to the server as a "please save
-  // this" setting. This is purely a client-side convenience; whether the
-  // connection itself persists on the server is a separate, admin-only
-  // decision (see the Storage column above).
-  var prefillKey = 'datadock.connections.lastQuickConnect';
-  var prefillFields = ['kind', 'host', 'port', 'database', 'user', 'instance', 'authmode', 'encrypt', 'sslmode'];
-  var form = document.getElementById('connectionForm');
-
-  function loadPrefill() {
-    try {
-      return JSON.parse(localStorage.getItem(prefillKey) || '{}');
-    } catch (e) {
-      return {};
-    }
-  }
-
-  // Only prefill on a fresh GET-rendered form (no error re-population
-  // already happened server-side, i.e. every field is still empty).
-  var alreadyPopulated = prefillFields.some(function (name) {
-    var el = form.elements[name];
-    return el && el.value;
-  });
-  if (!alreadyPopulated) {
-    var saved = loadPrefill();
-    prefillFields.forEach(function (name) {
-      var el = form.elements[name];
-      if (el && saved[name]) el.value = saved[name];
-    });
-    kind.dispatchEvent(new Event('change'));
-  }
-
-  form.addEventListener('submit', function () {
-    var toSave = {};
-    prefillFields.forEach(function (name) {
-      var el = form.elements[name];
-      if (el) toSave[name] = el.value;
-    });
-    try { localStorage.setItem(prefillKey, JSON.stringify(toSave)); } catch (e) {}
-  });
-})();
+// initConnectionForm/initLogicSearchBox live in app.js; calling them from
+// DOMContentLoaded here (rather than moving the calls too) is what makes
+// DataDock's AJAX shell navigation re-wire this page's event listeners
+// every time it's loaded into the shell, not just on a full browser
+// navigation — see executeScripts() in app.js. DOMContentLoaded also
+// matters on a normal full page load: app.js loads via a <script src> at
+// the very end of the document, AFTER this inline script runs, so calling
+// these functions directly here would fail (they wouldn't exist yet);
+// waiting for the event defers the call until app.js has already loaded.
+document.addEventListener('DOMContentLoaded', function () {
+  initConnectionForm();
+  initLogicSearchBox();
+});
 </script>
 
 {{template "base_end" .}}

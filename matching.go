@@ -214,11 +214,7 @@ func (a *App) loadMatchRows(ctx context.Context, conn *DBConnection, table, keyC
 			cols = append(cols, f.TargetColumn)
 		}
 	}
-	quoted := make([]string, len(cols))
-	for i, c := range cols {
-		quoted[i] = conn.QuoteIdent(c)
-	}
-	query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(quoted, ", "), conn.QuoteIdent(table))
+	query := matchSelectRowsQuery(conn, table, cols)
 	rows, err := a.queryConn(ctx, conn, "match.read_rows", query)
 	if err != nil {
 		return nil, nil, err
@@ -305,20 +301,7 @@ func (a *App) ensureMatchResultTable(ctx context.Context, conn *DBConnection, ta
 	if _, err := a.tableMeta(contextWithActiveConnection(ctx, conn), tableName); err == nil {
 		return nil
 	}
-	textType := migrationColumnType(conn, "TEXT")
-	floatType := migrationColumnType(conn, "FLOAT")
-	ddl := fmt.Sprintf(
-		"CREATE TABLE %s (%s %s, %s %s, %s %s, %s %s, %s %s, %s %s, %s %s)",
-		conn.QuoteIdent(tableName),
-		conn.QuoteIdent(matchResultColumns[0]), textType,
-		conn.QuoteIdent(matchResultColumns[1]), textType,
-		conn.QuoteIdent(matchResultColumns[2]), textType,
-		conn.QuoteIdent(matchResultColumns[3]), textType,
-		conn.QuoteIdent(matchResultColumns[4]), floatType,
-		conn.QuoteIdent(matchResultColumns[5]), textType,
-		conn.QuoteIdent(matchResultColumns[6]), textType,
-	)
-	_, err := a.execConn(ctx, conn, "match.create_table", ddl)
+	_, err := a.execConn(ctx, conn, "match.create_table", matchResultTableDDL(conn, tableName))
 	return err
 }
 
@@ -339,14 +322,7 @@ func (a *App) saveMatchResults(ctx context.Context, saveConn *DBConnection, tabl
 		return 0, fmt.Errorf("creating result table: %w", err)
 	}
 
-	quoted := make([]string, len(matchResultColumns))
-	placeholders := make([]string, len(matchResultColumns))
-	for i, c := range matchResultColumns {
-		quoted[i] = saveConn.QuoteIdent(c)
-		placeholders[i] = saveConn.Placeholder(i + 1)
-	}
-	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-		saveConn.QuoteIdent(tableName), strings.Join(quoted, ", "), strings.Join(placeholders, ", "))
+	insertSQL := matchResultInsertQuery(saveConn, tableName)
 
 	stamp := matchedAt.UTC().Format(time.RFC3339)
 	written := 0

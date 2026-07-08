@@ -1,32 +1,57 @@
 {{define "index"}}
 {{template "base_start" .}}
 
-<div class="empty-state">
-  <i class="bi bi-grid-3x3-gap"></i>
-  <p class="fw-semibold fs-5 mb-1">No tables yet</p>
-  <p class="text-muted mb-3 small">Create a local table, connect an external database, or run SQL directly.</p>
-  <div class="toolbar justify-content-center">
-    <a href="/create-table" class="btn btn-primary btn-sm">
-      <i class="bi bi-plus-lg me-1"></i>Create Table
-    </a>
-    <a href="/connections" class="btn btn-outline-secondary btn-sm">
-      <i class="bi bi-hdd-network me-1"></i>Connect DB
-    </a>
-    <a href="/query" class="btn btn-outline-secondary btn-sm">
-      <i class="bi bi-terminal me-1"></i>SQL Editor
-    </a>
+<div class="quickstart">
+  <div class="quickstart-intro">
+    <i class="bi bi-grid-3x3-gap-fill"></i>
+    <h1 class="h4 fw-semibold mb-1">Get Started with DataDock</h1>
+    <p class="text-muted mb-0">A SQL-first workbench for local and external databases — browse, query, import, and automate, all in one place.</p>
   </div>
-  <div class="toolbar justify-content-center mt-2">
-    <a href="/import" class="btn btn-outline-secondary btn-sm">
-      <i class="bi bi-upload me-1"></i>Import File
+
+  <div class="quickstart-grid">
+    <a href="/create-table" class="card quickstart-card quickstart-card-primary">
+      <div class="card-body">
+        <i class="bi bi-plus-lg"></i>
+        <div class="quickstart-title">Create Table</div>
+        <div class="quickstart-desc">Design a new table with custom columns.</div>
+      </div>
     </a>
-    <form method="post" action="/demo-data" class="d-inline">
-      <button class="btn btn-outline-secondary btn-sm" type="submit">
-        <i class="bi bi-database-add me-1"></i>Import Demo Data
+    <a href="/connections" class="card quickstart-card">
+      <div class="card-body">
+        <i class="bi bi-hdd-network"></i>
+        <div class="quickstart-title">Connect DB</div>
+        <div class="quickstart-desc">Link a PostgreSQL, MySQL, or SQL Server database.</div>
+      </div>
+    </a>
+    <a href="/query" class="card quickstart-card">
+      <div class="card-body">
+        <i class="bi bi-terminal"></i>
+        <div class="quickstart-title">SQL Editor</div>
+        <div class="quickstart-desc">Run ad-hoc SQL — no table required.</div>
+      </div>
+    </a>
+    <a href="/import" class="card quickstart-card">
+      <div class="card-body">
+        <i class="bi bi-upload"></i>
+        <div class="quickstart-title">Import File</div>
+        <div class="quickstart-desc">Load CSV, JSON, Excel, XML, or GeoJSON.</div>
+      </div>
+    </a>
+    <form method="post" action="/demo-data" class="quickstart-form">
+      <button type="submit" class="card quickstart-card">
+        <div class="card-body">
+          <i class="bi bi-database-add"></i>
+          <div class="quickstart-title">Import Demo Data</div>
+          <div class="quickstart-desc">Explore DataDock with ready-made sample data.</div>
+        </div>
       </button>
     </form>
-    <a href="/guide" class="btn btn-outline-secondary btn-sm">
-      <i class="bi bi-journal-text me-1"></i>Guide
+    <a href="/guide" class="card quickstart-card">
+      <div class="card-body">
+        <i class="bi bi-journal-text"></i>
+        <div class="quickstart-title">Guide</div>
+        <div class="quickstart-desc">Read the quick-start guide and feature docs.</div>
+      </div>
     </a>
   </div>
 </div>

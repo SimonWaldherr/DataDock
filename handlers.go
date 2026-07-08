@@ -104,6 +104,11 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /admin/connections/persist", a.requireAdmin(a.requireWritable(a.adminPersistConnectionHandler)))
 	handle("POST /admin/connections/forget", a.requireAdmin(a.requireWritable(a.adminForgetConnectionHandler)))
 	handle("POST /admin/connections/default", a.requireAdmin(a.requireWritable(a.adminSetDefaultConnectionHandler)))
+	// Not requireAdmin: a private connection's owner may reindex it too —
+	// see reindexConnectionLogicHandler's own doc comment for the
+	// shared-vs-private authorization split it enforces internally.
+	handle("POST /connections/reindex-logic", a.requireWritable(a.reindexConnectionLogicHandler))
+	handle("POST /admin/logic-search/reindex-all", a.requireAdmin(a.requireWritable(a.adminReindexAllSharedLogicHandler)))
 	handle("GET /admin/setup", a.adminSetupHandler)
 	handle("POST /admin/setup/mode", a.adminSetupModeHandler)
 	handle("POST /admin/setup", a.adminSetupSubmitHandler)
@@ -148,6 +153,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("GET /api/schema", a.apiSchemaHandler)
 	handle("GET /api/catalog", a.apiCatalogHandler)
 	handle("GET /api/catalog/expand", a.apiCatalogExpandHandler)
+	handle("POST /api/logic-search", a.apiLogicSearchHandler)
 	handle("GET /api/admin/status", a.requireAdmin(a.apiAdminStatusHandler))
 	handle("GET /api/admin/settings", a.requireAdmin(a.apiAdminSettingsHandler))
 	handle("POST /api/admin/settings", a.requireAdmin(a.apiAdminSettingsHandler))
@@ -189,6 +195,12 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data m
 	}
 	data["PageSizeOptions"] = pageSizeOptions
 	data["AdminAuthenticated"] = adminAuthenticated
+	// Unconditional (not just on the "connections" page): any handler can
+	// re-render "connections" from an error path (see admin_auth.go), and
+	// the template unconditionally indexes these two maps, so a handler that
+	// forgot to set them would otherwise panic instead of showing the error.
+	data["LogicSearchConfigured"] = a.embeddingClientFn() != nil
+	data["LogicIndexStatus"], data["LogicIndexRunning"] = a.logicIndexStatuses()
 	if a.conns != nil {
 		sessionID := sessionIDFromContext(r.Context())
 		data["Connections"] = a.conns.ListFor(sessionID)
@@ -742,7 +754,7 @@ func (a *App) exportTableHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn := a.activeConn(r.Context())
-	cols, rows, err := a.queryRows(r.Context(), "SELECT * FROM "+conn.QuoteIdent(meta.Name))
+	cols, rows, err := a.queryRows(r.Context(), selectAllQuery(conn, meta.Name))
 	if err != nil {
 		if isMissingDBObjectError(err) {
 			a.renderObjectMissing(w, r, tableName, err)
@@ -758,6 +770,119 @@ func (a *App) exportTableHandler(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) connectionsHandler(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "connections", map[string]interface{}{"Form": defaultConnectionForm()})
+}
+
+// logicIndexStatuses snapshots every connection's last reindex report and
+// whether one is currently running, for the connections page to render
+// without exposing a.logicIndexMu to templates.
+func (a *App) logicIndexStatuses() (map[string]LogicIndexReport, map[string]bool) {
+	a.logicIndexMu.Lock()
+	defer a.logicIndexMu.Unlock()
+	report := make(map[string]LogicIndexReport, len(a.logicIndexStatus))
+	for k, v := range a.logicIndexStatus {
+		report[k] = v
+	}
+	running := make(map[string]bool, len(a.logicIndexing))
+	for k, v := range a.logicIndexing {
+		running[k] = v
+	}
+	return report, running
+}
+
+// reindexConnectionLogicHandler triggers a background SQL-logic reindex
+// (see logic_search.go) for one connection. Deliberately NOT admin-only:
+// each user may add their own private connection (see ConnectionManager's
+// Owner field), and only that user can ever see or use it, so only that
+// user can meaningfully benefit from — or reasonably be trusted to trigger —
+// reindexing it. A SHARED connection (visible to everyone) is different:
+// reindexing it affects the embedding index every user's prompts draw on
+// and can make many billed embedding-API calls, so that still requires an
+// admin. searchObjectLogic/GetFor already guarantee a non-owning, non-admin
+// session can't even resolve a connection it doesn't own, but the ownership
+// check below is what stops it from being reindexed by someone who merely
+// happens to share the server.
+func (a *App) reindexConnectionLogicHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	id := r.Form.Get("id")
+	sessionID := sessionIDFromContext(r.Context())
+	conn := a.conns.GetFor(sessionID, id)
+	if conn == nil {
+		a.render(w, r, "connections", map[string]interface{}{"Error": fmt.Sprintf("connection %q not found", id)})
+		return
+	}
+	if conn.Owner == "" && !a.isAdminAuthenticated(sessionID) {
+		a.render(w, r, "connections", map[string]interface{}{"Error": "Only an admin can reindex a shared connection."})
+		return
+	}
+	if err := a.startReindexConnectionLogic(sessionID, id); err != nil {
+		a.render(w, r, "connections", map[string]interface{}{"Error": err.Error()})
+		return
+	}
+	http.Redirect(w, r, "/connections", http.StatusSeeOther)
+}
+
+// adminReindexAllSharedLogicHandler is the Admin Settings "reindex
+// everything" counterpart to the per-connection button above: it starts a
+// background reindex for every SHARED, dialect-supported connection in one
+// click, for an admin who'd rather refresh the whole server-wide index than
+// click through each connection individually. Private, per-user
+// connections aren't included — each owner reindexes their own from the
+// Connections page.
+func (a *App) adminReindexAllSharedLogicHandler(w http.ResponseWriter, r *http.Request) {
+	var started, errs []string
+	for _, info := range a.conns.List() {
+		conn := a.conns.Get(info.ID)
+		if conn == nil || !logicSearchSupported(conn) {
+			continue
+		}
+		if err := a.startReindexConnectionLogic("", info.ID); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", info.ID, err))
+			continue
+		}
+		started = append(started, info.ID)
+	}
+	data := a.adminPageData(r.Context(), nil)
+	switch {
+	case len(started) == 0 && len(errs) == 0:
+		data["Error"] = "No shared connections are eligible for SQL-logic reindexing (PostgreSQL, MySQL/MariaDB, or Microsoft SQL Server only)."
+	case len(started) == 0:
+		data["Error"] = "Could not start reindexing: " + strings.Join(errs, "; ")
+	default:
+		msg := fmt.Sprintf("Started reindexing %d connection(s): %s.", len(started), strings.Join(started, ", "))
+		if len(errs) > 0 {
+			msg += " Skipped: " + strings.Join(errs, "; ")
+		}
+		data["Success"] = msg
+	}
+	a.render(w, r, "admin", data)
+}
+
+// apiLogicSearchHandler answers a semantic search over one connection's
+// indexed view/procedure/function definitions (see logic_search.go). Not
+// admin-gated (it's read-only, mirroring /api/catalog), but
+// searchObjectLogic resolves connection_id via this session's ID, so a
+// session can never search a connection it can't already see.
+func (a *App) apiLogicSearchHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ConnectionID string `json:"connection_id"`
+		Query        string `json:"query"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+		return
+	}
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	sessionID := sessionIDFromContext(r.Context())
+	hits, err := a.searchObjectLogic(ctx, sessionID, strings.TrimSpace(body.ConnectionID), strings.TrimSpace(body.Query), maxLLMLogicSearchHits)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Search failed", err.Error())
+		return
+	}
+	a.writeJSON(w, http.StatusOK, map[string]any{"hits": hits})
 }
 
 // defaultConnectionForm seeds the "Add Managed Connection" form with sane
@@ -824,6 +949,9 @@ func (a *App) adminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	settings, err := runtimeSettingsFromForm(r)
 	if err == nil && strings.TrimSpace(r.Form.Get("llm_api_key")) == "" {
 		settings.LLMAPIKey = a.currentLLMAPIKey()
+	}
+	if err == nil && strings.TrimSpace(r.Form.Get("embedding_api_key")) == "" {
+		settings.EmbeddingAPIKey = a.currentRuntimeSettings().EmbeddingAPIKey
 	}
 	if err == nil {
 		settings.Port = a.currentPort()
@@ -1943,7 +2071,7 @@ func (a *App) createTableHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn := a.activeConn(r.Context())
-	ddl := fmt.Sprintf("CREATE TABLE %s (%s)", conn.QuoteIdent(safeTableName), strings.Join(defs, ", "))
+	ddl := createTableQuery(conn, safeTableName, defs)
 	ctx, cancel := a.withQueryTimeout(r.Context())
 	defer cancel()
 	if _, err := a.execConn(ctx, conn, "table.create", ddl); err != nil {
@@ -2494,7 +2622,7 @@ func (a *App) dropTableHandler(w http.ResponseWriter, r *http.Request) {
 	conn := a.activeConn(r.Context())
 	ctx, cancel := a.withQueryTimeout(r.Context())
 	defer cancel()
-	if _, err := a.execConn(ctx, conn, "table.drop", "DROP TABLE "+conn.QuoteIdent(meta.Name)); err != nil {
+	if _, err := a.execConn(ctx, conn, "table.drop", dropTableQuery(conn, meta.Name)); err != nil {
 		a.serverError(w, err)
 		return
 	}
@@ -3378,34 +3506,40 @@ func boolDefault(v *bool, fallback bool) bool {
 // either the Admin HTML form or the JSON admin settings API, so both paths
 // share one parsing/validation implementation.
 type runtimeSettingsInput struct {
-	Dialect        string
-	ConnectTimeout string
-	QueryTimeout   string
-	LLMBaseURL     string
-	LLMAPIKey      string
-	LLMModel       string
-	LLMTimeout     string
-	ReadOnlyMode   bool
-	PageSize       string
-	MatchMaxRows   string
-	DefaultTheme   string
-	DefaultDensity string
+	Dialect          string
+	ConnectTimeout   string
+	QueryTimeout     string
+	LLMBaseURL       string
+	LLMAPIKey        string
+	LLMModel         string
+	LLMTimeout       string
+	EmbeddingBaseURL string
+	EmbeddingAPIKey  string
+	EmbeddingModel   string
+	ReadOnlyMode     bool
+	PageSize         string
+	MatchMaxRows     string
+	DefaultTheme     string
+	DefaultDensity   string
 }
 
 func runtimeSettingsFromForm(r *http.Request) (RuntimeSettings, error) {
 	return runtimeSettingsFromInput(runtimeSettingsInput{
-		Dialect:        r.Form.Get("dialect"),
-		ConnectTimeout: r.Form.Get("connect_timeout"),
-		QueryTimeout:   r.Form.Get("query_timeout"),
-		LLMBaseURL:     r.Form.Get("llm_base_url"),
-		LLMAPIKey:      r.Form.Get("llm_api_key"),
-		LLMModel:       r.Form.Get("llm_model"),
-		LLMTimeout:     r.Form.Get("llm_timeout"),
-		ReadOnlyMode:   r.Form.Get("read_only_mode") != "",
-		PageSize:       r.Form.Get("page_size"),
-		MatchMaxRows:   r.Form.Get("match_max_rows"),
-		DefaultTheme:   r.Form.Get("default_theme"),
-		DefaultDensity: r.Form.Get("default_density"),
+		Dialect:          r.Form.Get("dialect"),
+		ConnectTimeout:   r.Form.Get("connect_timeout"),
+		QueryTimeout:     r.Form.Get("query_timeout"),
+		LLMBaseURL:       r.Form.Get("llm_base_url"),
+		LLMAPIKey:        r.Form.Get("llm_api_key"),
+		LLMModel:         r.Form.Get("llm_model"),
+		LLMTimeout:       r.Form.Get("llm_timeout"),
+		EmbeddingBaseURL: r.Form.Get("embedding_base_url"),
+		EmbeddingAPIKey:  r.Form.Get("embedding_api_key"),
+		EmbeddingModel:   r.Form.Get("embedding_model"),
+		ReadOnlyMode:     r.Form.Get("read_only_mode") != "",
+		PageSize:         r.Form.Get("page_size"),
+		MatchMaxRows:     r.Form.Get("match_max_rows"),
+		DefaultTheme:     r.Form.Get("default_theme"),
+		DefaultDensity:   r.Form.Get("default_density"),
 	})
 }
 
@@ -3439,18 +3573,21 @@ func runtimeSettingsFromInput(in runtimeSettingsInput) (RuntimeSettings, error) 
 		matchMaxRows = n
 	}
 	return RuntimeSettings{
-		Dialect:        in.Dialect,
-		ConnectTimeout: connect,
-		QueryTimeout:   query,
-		LLMBaseURL:     in.LLMBaseURL,
-		LLMAPIKey:      in.LLMAPIKey,
-		LLMModel:       in.LLMModel,
-		LLMTimeout:     llm,
-		ReadOnlyMode:   in.ReadOnlyMode,
-		PageSize:       pageSize,
-		MatchMaxRows:   matchMaxRows,
-		DefaultTheme:   in.DefaultTheme,
-		DefaultDensity: in.DefaultDensity,
+		Dialect:          in.Dialect,
+		ConnectTimeout:   connect,
+		QueryTimeout:     query,
+		LLMBaseURL:       in.LLMBaseURL,
+		LLMAPIKey:        in.LLMAPIKey,
+		LLMModel:         in.LLMModel,
+		LLMTimeout:       llm,
+		EmbeddingBaseURL: in.EmbeddingBaseURL,
+		EmbeddingAPIKey:  in.EmbeddingAPIKey,
+		EmbeddingModel:   in.EmbeddingModel,
+		ReadOnlyMode:     in.ReadOnlyMode,
+		PageSize:         pageSize,
+		MatchMaxRows:     matchMaxRows,
+		DefaultTheme:     in.DefaultTheme,
+		DefaultDensity:   in.DefaultDensity,
 	}, nil
 }
 

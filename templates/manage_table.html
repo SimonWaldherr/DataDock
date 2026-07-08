@@ -180,17 +180,11 @@
 </div>
 
 <script>
-function switchManageTab(tab) {
-  ['create', 'import', 'export'].forEach(function(name) {
-    var panel = document.getElementById('manageTab' + name.charAt(0).toUpperCase() + name.slice(1));
-    if (panel) panel.classList.toggle('d-none', name !== tab);
-  });
-  document.querySelectorAll('#manageTableTabs .nav-link').forEach(function(btn) {
-    btn.classList.toggle('active', btn.getAttribute('data-tab') === tab);
-  });
-  try { localStorage.setItem('datadock.manageTable.activeTab', tab); } catch (e) {}
-}
-
+// switchManageTab/addField/removeField/exportSelectedTable live in app.js;
+// this bootstrap needs the server-rendered ActiveTab value and must stay
+// inline (not just a data var) so DataDock's AJAX shell navigation re-runs
+// it every time this page loads into the shell — see executeScripts() in
+// app.js.
 document.addEventListener('DOMContentLoaded', function () {
   var initial = {{if .ActiveTab}}'{{.ActiveTab}}'{{else}}''{{end}};
   if (!initial) {
@@ -198,41 +192,6 @@ document.addEventListener('DOMContentLoaded', function () {
   }
   switchManageTab(initial === 'import' || initial === 'export' ? initial : 'create');
 });
-
-function addField() {
-  var list = document.getElementById('fieldList');
-  var row = document.createElement('div');
-  row.className = 'field-row mb-2';
-  row.innerHTML =
-    '<input type="text" class="form-control form-control-sm" name="col_name" placeholder="column name" required>' +
-    '<select class="form-select form-select-sm type-sel" name="col_type">' +
-    '<option value="TEXT" selected>TEXT</option><option value="INT">INT</option>' +
-    '<option value="FLOAT">FLOAT</option><option value="BOOL">BOOL</option>' +
-    '</select>' +
-    '<button type="button" class="btn btn-outline-danger btn-sm btn-remove" onclick="removeField(this)" title="Remove column">' +
-    '<i class="bi bi-dash"></i></button>';
-  list.appendChild(row);
-  row.querySelector('input').focus();
-}
-
-function removeField(btn) {
-  var rows = document.querySelectorAll('#fieldList .field-row');
-  if (rows.length <= 1) return; // keep at least one
-  btn.closest('.field-row').remove();
-}
-
-function exportSelectedTable(format) {
-  var select = document.getElementById('exportTableSelect');
-  var table = select.value;
-  var status = document.getElementById('exportStatus');
-  if (!table) {
-    status.textContent = 'Choose a table or view first.';
-    select.focus();
-    return;
-  }
-  status.textContent = '';
-  window.location.href = '/t/' + encodeURIComponent(table) + '/export?format=' + encodeURIComponent(format);
-}
 </script>
 
 {{template "base_end" .}}

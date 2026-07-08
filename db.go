@@ -26,6 +26,8 @@ type App struct {
 	settingsMu        sync.RWMutex
 	llm               LLMClient
 	llmConfig         LLMConfig
+	embeddingClient   EmbeddingClient
+	embeddingConfig   EmbeddingConfig
 	auditLog          bool
 	dialect           DialectProfile
 	conns             *ConnectionManager
@@ -71,6 +73,15 @@ type App struct {
 	matchCronMu      sync.Mutex
 	matchCron        *cron.Cron
 	matchCronEntries map[string]cron.EntryID
+
+	// logicIndexMu guards concurrent SQL-logic reindex runs (see
+	// logic_search.go): logicIndexing marks a connection ID as currently
+	// being reindexed (rejecting a second concurrent trigger for the same
+	// connection) and logicIndexStatus holds the last completed run's report
+	// so the connections page can show it after a reload.
+	logicIndexMu     sync.Mutex
+	logicIndexing    map[string]bool
+	logicIndexStatus map[string]LogicIndexReport
 }
 
 // sessionAuth is the value stored per authenticated session: which user it
@@ -241,9 +252,9 @@ type TableScript struct {
 	InsertTmpl        string             `json:"insertTmpl,omitempty"`
 	UpdateTmpl        string             `json:"updateTmpl,omitempty"`
 	Structure         []ColumnDetail     `json:"structure,omitempty"`
-	CreateSQL         string             `json:"createSQL,omitempty"` // views only: the view's CREATE statement
-	AlterSQL          string             `json:"alterSQL,omitempty"`  // views only: an ALTER VIEW variant, when the dialect supports it
-	DDLError          string             `json:"ddlError,omitempty"`  // views only: why CreateSQL couldn't be fetched
+	CreateSQL         string             `json:"createSQL,omitempty"`         // views only: the view's CREATE statement
+	AlterSQL          string             `json:"alterSQL,omitempty"`          // views only: an ALTER VIEW variant, when the dialect supports it
+	DDLError          string             `json:"ddlError,omitempty"`          // views only: why CreateSQL couldn't be fetched
 	DependsOn         []ObjectDependency `json:"dependsOn,omitempty"`         // what this object references
 	Dependents        []ObjectDependency `json:"dependents,omitempty"`        // what references this object
 	DependenciesError string             `json:"dependenciesError,omitempty"` // why dependency analysis wasn't available
@@ -486,7 +497,7 @@ func (a *App) tableMeta(ctx context.Context, name string) (TableMeta, error) {
 
 	// Row count (best-effort; ignore error). Use the DB-sourced meta.Name, not
 	// the user-provided name, when building the SQL query.
-	if rows, err := a.queryConn(ctx, a.localTinySQLConn(), "metadata.row_count", "SELECT COUNT(*) FROM "+quoteName(meta.Name)); err == nil {
+	if rows, err := a.queryConn(ctx, a.localTinySQLConn(), "metadata.row_count", nativeRowCountQuery(meta.Name)); err == nil {
 		if rows.Next() {
 			_ = rows.Scan(&meta.RowCount)
 		}
@@ -535,7 +546,7 @@ func (a *App) queryBackedMeta(ctx context.Context, name, kind string) (TableMeta
 			meta.HasID = true
 		}
 	}
-	if rows, err := a.queryConn(ctx, conn, "metadata.row_count", "SELECT COUNT(*) FROM "+conn.QuoteIdent(name)); err == nil {
+	if rows, err := a.queryConn(ctx, conn, "metadata.row_count", rowCountQuery(conn, name)); err == nil {
 		if rows.Next() {
 			_ = rows.Scan(&meta.RowCount)
 		}
@@ -595,8 +606,7 @@ func (a *App) getRecord(ctx context.Context, table string, id string) ([]Column,
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
 	conn := a.activeConn(ctx)
-	rows, err := a.queryConn(ctx, conn, "record.get",
-		fmt.Sprintf("SELECT * FROM %s WHERE %s = %s", conn.QuoteIdent(table), conn.QuoteIdent("id"), conn.Placeholder(1)), parseID(id))
+	rows, err := a.queryConn(ctx, conn, "record.get", recordGetQuery(conn, table), parseID(id))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -636,7 +646,7 @@ func (a *App) insertRecord(ctx context.Context, table string, values map[string]
 	// Determine next id via MAX(id)+1.
 	conn := a.activeConn(ctx)
 	var maxID sql.NullInt64
-	if rows, err := a.queryConn(ctx, conn, "record.next_id", "SELECT MAX("+conn.QuoteIdent("id")+") FROM "+conn.QuoteIdent(table)); err == nil {
+	if rows, err := a.queryConn(ctx, conn, "record.next_id", recordMaxIDQuery(conn, table)); err == nil {
 		if rows.Next() {
 			_ = rows.Scan(&maxID)
 		}
@@ -664,12 +674,7 @@ func (a *App) insertRecord(ctx context.Context, table string, values map[string]
 		placeholders[i] = conn.Placeholder(i + 1)
 	}
 
-	query := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s)",
-		conn.QuoteIdent(table),
-		strings.Join(colNames, ", "),
-		strings.Join(placeholders, ", "),
-	)
+	query := recordInsertQuery(conn, table, colNames, placeholders)
 	_, err := a.execConn(ctx, conn, "record.insert", query, args...)
 	return err
 }
@@ -694,13 +699,7 @@ func (a *App) updateRecord(ctx context.Context, table string, id string, values 
 	}
 	args = append(args, parseID(id))
 
-	query := fmt.Sprintf(
-		"UPDATE %s SET %s WHERE %s = %s",
-		conn.QuoteIdent(table),
-		strings.Join(setClauses, ", "),
-		conn.QuoteIdent("id"),
-		conn.Placeholder(len(args)),
-	)
+	query := recordUpdateQuery(conn, table, setClauses, conn.Placeholder(len(args)))
 	_, err := a.execConn(ctx, conn, "record.update", query, args...)
 	return err
 }
@@ -710,8 +709,7 @@ func (a *App) deleteRecord(ctx context.Context, table string, id string) error {
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
 	conn := a.activeConn(ctx)
-	query := fmt.Sprintf("DELETE FROM %s WHERE %s = %s", conn.QuoteIdent(table), conn.QuoteIdent("id"), conn.Placeholder(1))
-	_, err := a.execConn(ctx, conn, "record.delete", query, parseID(id))
+	_, err := a.execConn(ctx, conn, "record.delete", recordDeleteQuery(conn, table), parseID(id))
 	return err
 }
 
@@ -893,27 +891,7 @@ func scanSQLRow(rows *sql.Rows, cols []string) ([]string, error) {
 }
 
 func (c *DBConnection) tableObjects(ctx context.Context) ([]TableObject, error) {
-	var query string
-	switch c.Dialect.Name {
-	case "SQLite":
-		query = "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name"
-	case "PostgreSQL":
-		query = "SELECT CASE WHEN table_schema = 'public' THEN table_name ELSE table_schema || '.' || table_name END AS name, table_type FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog','information_schema') AND table_type IN ('BASE TABLE','VIEW') ORDER BY table_schema, table_name"
-	case "MariaDB/MySQL":
-		query = "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type IN ('BASE TABLE','VIEW') ORDER BY table_name"
-	case "Microsoft SQL Server":
-		// sys.objects (not information_schema.tables) so is_ms_shipped can
-		// exclude SQL Server's own built-in tables/views
-		// (MSreplication_options, spt_fallback_*, spt_monitor, spt_values,
-		// ...), which otherwise show up as if they were part of the user's
-		// schema — including in the LLM's RAG context.
-		query = "SELECT s.name + '.' + o.name AS name, CASE WHEN o.type = 'V' THEN 'VIEW' ELSE 'BASE TABLE' END AS table_type " +
-			"FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id " +
-			"WHERE o.type IN ('U','V') AND o.is_ms_shipped = 0 ORDER BY s.name, o.name"
-	default:
-		query = "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') ORDER BY name"
-	}
-	rows, err := c.queryContext(ctx, "metadata.table_objects", query)
+	rows, err := c.queryContext(ctx, "metadata.table_objects", tableObjectsQuery(c))
 	if err != nil {
 		return nil, err
 	}
@@ -996,41 +974,13 @@ func (c *DBConnection) tableMeta(ctx context.Context, name string) (TableMeta, e
 			meta.HasID = true
 		}
 	}
-	if rows, err := c.queryContext(ctx, "metadata.row_count", "SELECT COUNT(*) FROM "+c.QuoteIdent(canonical)); err == nil {
+	if rows, err := c.queryContext(ctx, "metadata.row_count", rowCountQuery(c, canonical)); err == nil {
 		if rows.Next() {
 			_ = rows.Scan(&meta.RowCount)
 		}
 		rows.Close()
 	}
 	return meta, nil
-}
-
-func (c *DBConnection) selectPageSQL(table, sortCol, dir string, limit, offset int) string {
-	quotedTable := c.QuoteIdent(table)
-	orderClause := ""
-	if sortCol != "" {
-		orderClause = " ORDER BY " + c.QuoteIdent(sortCol)
-		if dir == "desc" {
-			orderClause += " DESC"
-		} else {
-			orderClause += " ASC"
-		}
-	}
-	switch c.Dialect.Name {
-	case "Microsoft SQL Server":
-		if limit <= 0 {
-			return "SELECT TOP 0 * FROM " + quotedTable
-		}
-		if orderClause == "" {
-			orderClause = " ORDER BY (SELECT NULL)"
-		}
-		return fmt.Sprintf("SELECT * FROM %s%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", quotedTable, orderClause, offset, limit)
-	default:
-		if limit <= 0 {
-			return "SELECT * FROM " + quotedTable + " LIMIT 0"
-		}
-		return fmt.Sprintf("SELECT * FROM %s%s LIMIT %d OFFSET %d", quotedTable, orderClause, limit, offset)
-	}
 }
 
 func sortTableObjects(objects []TableObject) {

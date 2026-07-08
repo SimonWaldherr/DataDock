@@ -152,7 +152,7 @@ func TestIndexNoTables(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "No tables yet") {
+	if !strings.Contains(w.Body.String(), "Get Started with DataDock") {
 		t.Errorf("expected empty-state message, got:\n%s", w.Body.String())
 	}
 }
@@ -495,22 +495,18 @@ func TestQueryEditor(t *testing.T) {
 		t.Errorf("expected SQL Editor heading")
 	}
 	body := w.Body.String()
+	// The page's own markup: the JS behind it (Quick Chart rendering, the
+	// sample query/prompt lists, Monaco loading, ...) lives in app.js and is
+	// covered by TestAppJSContainsPageLogic instead.
 	for _, want := range []string{
 		"/history",
-		"Quick Chart",
 		"Share",
 		"toggleSchemaPreview",
-		"fetch('/api/schema')",
-		"currentSQL()",
-		"monaco-editor",
 		"Test connection",
-		"F5",
 		"Excel CSV",
 		"GeoJSON",
 		`option value="map"`,
-		"Locations for Map view",
-		"JSON/XML payload tree",
-		"Excel CSV edge cases",
+		"initQueryPage",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected query editor to contain %q", want)
@@ -528,9 +524,56 @@ func TestHistoryPage(t *testing.T) {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"Local History", "restoreLocalQueryHistory", "openSQLInEditor", "clearLocalQueryHistory"} {
+	for _, want := range []string{"Local History", "renderLocalQueryHistory"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected history page to contain %q", want)
+		}
+	}
+}
+
+// TestAppJSContainsPageLogic guards static/app.js itself: every template's
+// inline <script> was consolidated into this one file (see README's
+// "Front-end JavaScript" section), so this is the test that would catch a
+// function accidentally dropped during that move — the per-page HTML tests
+// above only check for the thin bootstrap left inline (a data variable or an
+// onclick reference), not the function bodies themselves anymore.
+func TestAppJSContainsPageLogic(t *testing.T) {
+	data, err := webFS.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatalf("read static/app.js: %v", err)
+	}
+	js := string(data)
+	for _, want := range []string{
+		// SQL editor (/query)
+		"function renderQuickChartControls",
+		"function initMonacoEditor",
+		"function currentSQL",
+		"Locations for Map view",
+		"JSON/XML payload tree",
+		"Excel CSV edge cases",
+		// History (/history)
+		"function restoreLocalQueryHistory",
+		"function openSQLInEditor",
+		"function clearLocalQueryHistory",
+		// Connections (/connections)
+		"function initConnectionForm",
+		"function initLogicSearchBox",
+		// Table view (/t/{name})
+		"function confirmDrop",
+		"function toggleTableDependencies",
+		// Admin (/admin)
+		"function detectLLMServers",
+		// Matching wizard (/match)
+		"function addFieldRow",
+		// Jobs (/jobs)
+		"function createJob",
+		// Manage Tables (/create-table, /import, /export)
+		"function switchManageTab",
+		// Routine view (/r/{name})
+		"function copyRoutineDefinition",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("expected static/app.js to contain %q", want)
 		}
 	}
 }

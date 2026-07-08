@@ -130,9 +130,8 @@ func (c *DBConnection) ExpandCatalogDatabase(ctx context.Context, database strin
 // ── PostgreSQL ──────────────────────────────────────────────────────────────
 
 func (c *DBConnection) listCatalogPostgres(ctx context.Context) ([]CatalogDatabase, error) {
-	current := c.queryScalar(ctx, "SELECT current_database()")
-	dbNames, err := c.queryStrings(ctx,
-		"SELECT datname FROM pg_database WHERE datistemplate = false AND has_database_privilege(current_user, datname, 'CONNECT') ORDER BY datname")
+	current := c.queryScalar(ctx, pgCurrentDatabaseQuery)
+	dbNames, err := c.queryStrings(ctx, pgListDatabasesQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -182,9 +181,7 @@ func (c *DBConnection) postgresSchemas(ctx context.Context, query queryFunc) ([]
 		return s
 	}
 
-	rows, err := query(ctx, "catalog.postgres.tables",
-		"SELECT table_schema, table_name, table_type FROM information_schema.tables "+
-			"WHERE table_schema NOT IN ('pg_catalog','information_schema') ORDER BY table_schema, table_name")
+	rows, err := query(ctx, "catalog.postgres.tables", pgListTablesQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -204,10 +201,7 @@ func (c *DBConnection) postgresSchemas(ctx context.Context, query queryFunc) ([]
 	}
 	rows.Close()
 
-	procRows, err := query(ctx, "catalog.postgres.procedures",
-		"SELECT n.nspname, p.proname, CASE WHEN p.prokind = 'f' THEN 'function' ELSE 'procedure' END "+
-			"FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "+
-			"WHERE n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY n.nspname, p.proname")
+	procRows, err := query(ctx, "catalog.postgres.procedures", pgListProceduresQuery)
 	if err == nil {
 		for procRows.Next() {
 			var schema, name, kind string
@@ -319,7 +313,7 @@ func (c *DBConnection) queryStrings(ctx context.Context, query string) ([]string
 // "database" and "schema" are synonyms, so each CatalogDatabase gets exactly
 // one unnamed CatalogSchema.
 func (c *DBConnection) listCatalogMySQL(ctx context.Context) ([]CatalogDatabase, error) {
-	current := c.queryScalar(ctx, "SELECT DATABASE()")
+	current := c.queryScalar(ctx, mysqlCurrentDatabaseQuery)
 	byDB := map[string]*CatalogSchema{}
 	var order []string
 	ensure := func(name string) *CatalogSchema {
@@ -332,10 +326,7 @@ func (c *DBConnection) listCatalogMySQL(ctx context.Context) ([]CatalogDatabase,
 		return s
 	}
 
-	rows, err := c.queryContext(ctx, "catalog.mysql.tables",
-		"SELECT table_schema, table_name, table_type FROM information_schema.tables "+
-			"WHERE table_schema NOT IN ('information_schema','mysql','performance_schema','sys') "+
-			"ORDER BY table_schema, table_name")
+	rows, err := c.queryContext(ctx, "catalog.mysql.tables", mysqlListTablesQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -355,10 +346,7 @@ func (c *DBConnection) listCatalogMySQL(ctx context.Context) ([]CatalogDatabase,
 	}
 	rows.Close()
 
-	procRows, err := c.queryContext(ctx, "catalog.mysql.procedures",
-		"SELECT routine_schema, routine_name, routine_type FROM information_schema.routines "+
-			"WHERE routine_schema NOT IN ('information_schema','mysql','performance_schema','sys') "+
-			"ORDER BY routine_schema, routine_name")
+	procRows, err := c.queryContext(ctx, "catalog.mysql.procedures", mysqlListProceduresQuery)
 	if err == nil {
 		for procRows.Next() {
 			var db, name, kind string
@@ -391,9 +379,8 @@ func (c *DBConnection) listCatalogMySQL(ctx context.Context) ([]CatalogDatabase,
 // page load into N sequential round trips inside one query timeout, which
 // occasionally lost the race and rendered the sidebar empty.
 func (c *DBConnection) listCatalogMSSQL(ctx context.Context) ([]CatalogDatabase, error) {
-	current := c.queryScalar(ctx, "SELECT DB_NAME()")
-	dbNames, err := c.queryStrings(ctx,
-		"SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0 AND HAS_DBACCESS(name) = 1 ORDER BY name")
+	current := c.queryScalar(ctx, mssqlCurrentDatabaseQuery)
+	dbNames, err := c.queryStrings(ctx, mssqlListDatabasesQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +410,7 @@ func (c *DBConnection) listCatalogMSSQL(ctx context.Context) ([]CatalogDatabase,
 }
 
 func (c *DBConnection) mssqlSchemasForDatabase(ctx context.Context, dbName string) ([]CatalogSchema, error) {
-	qdb := "[" + strings.ReplaceAll(dbName, "]", "]]") + "]"
+	qdb := mssqlBracketQualify(dbName)
 	bySchema := map[string]*CatalogSchema{}
 	var order []string
 	ensure := func(name string) *CatalogSchema {
@@ -436,15 +423,7 @@ func (c *DBConnection) mssqlSchemasForDatabase(ctx context.Context, dbName strin
 		return s
 	}
 
-	// sys.objects (not information_schema.tables) so is_ms_shipped can filter
-	// out SQL Server's own built-in tables/views (MSreplication_options,
-	// spt_fallback_*, spt_monitor, spt_values, ...) that exist by default in
-	// every database and would otherwise get surfaced as if they were part
-	// of the user's schema — including into the LLM's RAG context.
-	rows, err := c.queryContext(ctx, "catalog.mssql.tables",
-		"SELECT s.name, o.name, CASE WHEN o.type = 'V' THEN 'VIEW' ELSE 'BASE TABLE' END "+
-			"FROM "+qdb+".sys.objects o JOIN "+qdb+".sys.schemas s ON s.schema_id = o.schema_id "+
-			"WHERE o.type IN ('U','V') AND o.is_ms_shipped = 0 ORDER BY s.name, o.name")
+	rows, err := c.queryContext(ctx, "catalog.mssql.tables", mssqlListTablesQuery(qdb))
 	if err != nil {
 		return nil, err
 	}
@@ -464,11 +443,7 @@ func (c *DBConnection) mssqlSchemasForDatabase(ctx context.Context, dbName strin
 	}
 	rows.Close()
 
-	procRows, err := c.queryContext(ctx, "catalog.mssql.procedures",
-		"SELECT SCHEMA_NAME(schema_id), name, 'procedure' FROM "+qdb+".sys.procedures WHERE is_ms_shipped = 0 "+
-			"UNION ALL "+
-			"SELECT SCHEMA_NAME(schema_id), name, 'function' FROM "+qdb+".sys.objects WHERE type IN ('FN','IF','TF') AND is_ms_shipped = 0 "+
-			"ORDER BY 1, 2")
+	procRows, err := c.queryContext(ctx, "catalog.mssql.procedures", mssqlListProceduresQuery(qdb))
 	if err == nil {
 		for procRows.Next() {
 			var schema, name, kind string
@@ -505,27 +480,15 @@ func (c *DBConnection) probeObjectKind(ctx context.Context, qualifiedName string
 		return "table"
 	}
 
-	var query string
-	switch c.Dialect.Name {
-	case "PostgreSQL":
-		query = fmt.Sprintf("SELECT table_type FROM information_schema.tables WHERE table_schema = %s AND table_name = %s",
-			c.Placeholder(1), c.Placeholder(2))
-	case "MariaDB/MySQL":
+	if c.Dialect.Name == "MariaDB/MySQL" {
 		targetDB := schema
 		if targetDB == "" {
 			targetDB = db
 		}
 		schema = targetDB
-		query = fmt.Sprintf("SELECT table_type FROM information_schema.tables WHERE table_schema = %s AND table_name = %s",
-			c.Placeholder(1), c.Placeholder(2))
-	case "Microsoft SQL Server":
-		if db == "" {
-			return "table"
-		}
-		qdb := "[" + strings.ReplaceAll(db, "]", "]]") + "]"
-		query = fmt.Sprintf("SELECT table_type FROM %s.information_schema.tables WHERE table_schema = %s AND table_name = %s",
-			qdb, c.Placeholder(1), c.Placeholder(2))
-	default:
+	}
+	query := probeObjectKindQuery(c, db)
+	if query == "" {
 		return "table"
 	}
 
@@ -617,36 +580,24 @@ func (c *DBConnection) columnNullability(ctx context.Context, qualifiedName stri
 		if schema == "" {
 			schema = "public"
 		}
-		scan(c.queryContext(ctx, "metadata.columns",
-			"SELECT column_name, is_nullable, column_default FROM information_schema.columns WHERE table_schema = "+c.Placeholder(1)+" AND table_name = "+c.Placeholder(2),
-			schema, tbl))
+		scan(c.queryContext(ctx, "metadata.columns", pgColumnsQuery(c), schema, tbl))
 	case "MariaDB/MySQL":
 		targetDB := schema
 		if targetDB == "" {
 			targetDB = db
 		}
 		if targetDB != "" {
-			scan(c.queryContext(ctx, "metadata.columns",
-				"SELECT column_name, is_nullable, column_default FROM information_schema.columns WHERE table_schema = "+c.Placeholder(1)+" AND table_name = "+c.Placeholder(2),
-				targetDB, tbl))
+			scan(c.queryContext(ctx, "metadata.columns", mysqlColumnsQuery(c, targetDB), targetDB, tbl))
 		} else {
-			scan(c.queryContext(ctx, "metadata.columns",
-				"SELECT column_name, is_nullable, column_default FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = "+c.Placeholder(1),
-				tbl))
+			scan(c.queryContext(ctx, "metadata.columns", mysqlColumnsQuery(c, ""), tbl))
 		}
 	case "Microsoft SQL Server":
 		if schema == "" {
 			schema = "dbo"
 		}
-		infoTable := "information_schema.columns"
-		if db != "" {
-			infoTable = "[" + strings.ReplaceAll(db, "]", "]]") + "].information_schema.columns"
-		}
-		scan(c.queryContext(ctx, "metadata.columns",
-			"SELECT column_name, is_nullable, column_default FROM "+infoTable+" WHERE table_schema = "+c.Placeholder(1)+" AND table_name = "+c.Placeholder(2),
-			schema, tbl))
+		scan(c.queryContext(ctx, "metadata.columns", mssqlColumnsQuery(c, db), schema, tbl))
 	case "SQLite":
-		rows, err := c.queryContext(ctx, "metadata.columns", "PRAGMA table_info("+c.QuoteIdent(tbl)+")")
+		rows, err := c.queryContext(ctx, "metadata.columns", sqliteColumnsQuery(c, tbl))
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -692,9 +643,7 @@ func (c *DBConnection) fetchViewDefinition(ctx context.Context, qualifiedName st
 		if schema == "" {
 			schema = "public"
 		}
-		def := c.queryScalarArgs(ctx,
-			"SELECT view_definition FROM information_schema.views WHERE table_schema = "+c.Placeholder(1)+" AND table_name = "+c.Placeholder(2),
-			schema, tbl)
+		def := c.queryScalarArgs(ctx, pgViewDefinitionQuery(c), schema, tbl)
 		if strings.TrimSpace(def) == "" {
 			return "", fmt.Errorf("view definition not found (insufficient privileges or the view doesn't exist)")
 		}
@@ -709,7 +658,7 @@ func (c *DBConnection) fetchViewDefinition(ctx context.Context, qualifiedName st
 		if schema != "" {
 			qtable = c.QuoteIdent(schema) + "." + c.QuoteIdent(tbl)
 		}
-		rows, err := c.queryContext(ctx, "metadata.show_create_view", "SHOW CREATE VIEW "+qtable)
+		rows, err := c.queryContext(ctx, "metadata.show_create_view", mysqlShowCreateViewQuery(qtable))
 		if err != nil {
 			return "", err
 		}
@@ -744,7 +693,7 @@ func (c *DBConnection) fetchViewDefinition(ctx context.Context, qualifiedName st
 		return def, nil
 
 	case "SQLite":
-		def := c.queryScalarArgs(ctx, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = "+c.Placeholder(1), tbl)
+		def := c.queryScalarArgs(ctx, sqliteViewDefinitionQuery(c), tbl)
 		if strings.TrimSpace(def) == "" {
 			return "", fmt.Errorf("view definition not found")
 		}
@@ -770,9 +719,7 @@ func (c *DBConnection) fetchMSSQLModuleDefinition(ctx context.Context, db, schem
 		modulesTable = "[" + strings.ReplaceAll(db, "]", "]]") + "].sys.sql_modules"
 		objectIDArg = db + "." + qualified
 	}
-	def := c.queryScalarArgs(ctx,
-		"SELECT definition FROM "+modulesTable+" WHERE object_id = OBJECT_ID("+c.Placeholder(1)+")",
-		objectIDArg)
+	def := c.queryScalarArgs(ctx, mssqlModuleDefinitionQuery(c, modulesTable), objectIDArg)
 	if strings.TrimSpace(def) == "" {
 		return "", fmt.Errorf("definition not found (insufficient privileges or the object doesn't exist)")
 	}
@@ -794,10 +741,7 @@ func (c *DBConnection) fetchRoutineDefinition(ctx context.Context, qualifiedName
 		if schema == "" {
 			schema = "public"
 		}
-		def := c.queryScalarArgs(ctx,
-			"SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "+
-				"WHERE n.nspname = "+c.Placeholder(1)+" AND p.proname = "+c.Placeholder(2)+" LIMIT 1",
-			schema, name)
+		def := c.queryScalarArgs(ctx, pgFunctionDefQuery(c), schema, name)
 		if strings.TrimSpace(def) == "" {
 			return "", fmt.Errorf("definition not found (insufficient privileges, an overload mismatch, or the routine doesn't exist)")
 		}
@@ -812,7 +756,7 @@ func (c *DBConnection) fetchRoutineDefinition(ctx context.Context, qualifiedName
 		if strings.EqualFold(kind, "function") {
 			showKeyword, resultColumn = "FUNCTION", "Create Function"
 		}
-		rows, err := c.queryContext(ctx, "catalog.show_create_routine", "SHOW CREATE "+showKeyword+" "+qname)
+		rows, err := c.queryContext(ctx, "catalog.show_create_routine", mysqlShowCreateRoutineQuery(showKeyword, qname))
 		if err != nil {
 			return "", err
 		}
@@ -923,13 +867,7 @@ func (c *DBConnection) mssqlDependencyEdges(ctx context.Context, db, schema, nam
 	if reversed {
 		joinCol, selectCol = "d.referenced_id", "d.referencing_id"
 	}
-	query := fmt.Sprintf(
-		`SELECT DISTINCT ISNULL(s.name, ''), o.name, `+
-			`CASE o.type WHEN 'V' THEN 'view' WHEN 'U' THEN 'table' WHEN 'P' THEN 'procedure' `+
-			`WHEN 'FN' THEN 'function' WHEN 'IF' THEN 'function' WHEN 'TF' THEN 'function' ELSE 'object' END `+
-			`FROM %s d JOIN %s o ON %s = o.object_id LEFT JOIN %s s ON o.schema_id = s.schema_id `+
-			`WHERE %s = OBJECT_ID(%s)`,
-		depsTable, objectsTable, selectCol, schemasTable, joinCol, c.Placeholder(1))
+	query := mssqlDependencyEdgesQuery(c, depsTable, objectsTable, schemasTable, selectCol, joinCol)
 	return c.scanDependencyEdges(ctx, "catalog.mssql.dependencies", query, objectIDArg)
 }
 
@@ -943,15 +881,7 @@ func (c *DBConnection) postgresViewDependencyEdges(ctx context.Context, schema, 
 	if reversed {
 		resultCols, filterCols = "dependent_ns.nspname, dependent_view.relname, dependent_view.relkind", "source_ns.nspname = %s AND source_table.relname = %s"
 	}
-	query := fmt.Sprintf(
-		`SELECT DISTINCT %s FROM pg_depend `+
-			`JOIN pg_rewrite ON pg_depend.objid = pg_rewrite.oid `+
-			`JOIN pg_class dependent_view ON pg_rewrite.ev_class = dependent_view.oid `+
-			`JOIN pg_class source_table ON pg_depend.refobjid = source_table.oid `+
-			`JOIN pg_namespace dependent_ns ON dependent_ns.oid = dependent_view.relnamespace `+
-			`JOIN pg_namespace source_ns ON source_ns.oid = source_table.relnamespace `+
-			`WHERE %s AND source_table.oid <> dependent_view.oid AND pg_depend.deptype = 'n'`,
-		resultCols, fmt.Sprintf(filterCols, c.Placeholder(1), c.Placeholder(2)))
+	query := postgresViewDependencyEdgesQuery(c, resultCols, filterCols)
 	rows, err := c.queryContext(ctx, "catalog.postgres.dependencies", query, schema, name)
 	if err != nil {
 		return nil, err
@@ -982,9 +912,7 @@ func (c *DBConnection) mysqlViewDependencyEdges(ctx context.Context, schema, nam
 	if reversed {
 		selectCols, whereCols, kind = "view_schema, view_name", "table_schema = %s AND table_name = %s", "view"
 	}
-	query := fmt.Sprintf(
-		"SELECT DISTINCT %s FROM information_schema.view_table_usage WHERE %s",
-		selectCols, fmt.Sprintf(whereCols, c.Placeholder(1), c.Placeholder(2)))
+	query := mysqlViewDependencyEdgesQuery(c, selectCols, whereCols)
 	rows, err := c.queryContext(ctx, "catalog.mysql.dependencies", query, schema, name)
 	if err != nil {
 		return nil, err

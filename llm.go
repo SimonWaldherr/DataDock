@@ -35,6 +35,8 @@ const (
 	llmToolTableProfile     = "datadock.table.profile"
 	llmToolQueryPreview     = "datadock.query.preview"
 	llmToolResultSummarize  = "datadock.result.summarize"
+	llmToolLogicSearch      = "datadock.logic.search"
+	maxLLMLogicSearchHits   = 5
 )
 
 type LLMResultContext = resultutil.Summary
@@ -225,7 +227,8 @@ func buildLLMMessagesWithFormatting(req LLMRequest, formatSchema func(string) st
 		"Available context tools: " + llmToolSchemaSearch + ` {"query":"search terms","tables":["optional_table"]}; ` +
 		llmToolTableProfile + ` {"tables":["table_name"]}; ` +
 		llmToolQueryPreview + ` {"sql":"SELECT ...","limit":20}; ` +
-		llmToolResultSummarize + ` {"query":"focus"}. ` +
+		llmToolResultSummarize + ` {"query":"focus"}; ` +
+		llmToolLogicSearch + ` {"query":"which view or procedure already computes X"} (semantic search over indexed view/procedure/function SQL bodies, when reindexed and configured). ` +
 		"For SQL generation, return exactly one JSON object and no markdown or extra prose: " +
 		`{"action":"sql","sql":"SELECT ...","explanation":"..."}, {"action":"chart","chart":{"type":"bar","x":"column","y":"column","aggregation":"sum","title":"..."},"explanation":"..."}, {"action":"tool_call","tool":"` + llmToolSchemaSearch + `","arguments":{"query":"...","tables":["table_name"]},"explanation":"..."}, or {"action":"clarify","follow_up":"...","explanation":"..."}. ` +
 		"Keep explanations concise and practical."
@@ -603,6 +606,8 @@ func (a *App) callLLMTool(ctx context.Context, req LLMRequest, parsed LLMSQLResp
 		return a.callLLMQueryPreviewTool(ctx, parsed)
 	case llmToolResultSummarize:
 		return a.callLLMResultSummarizeTool(req, parsed)
+	case llmToolLogicSearch:
+		return a.callLLMLogicSearchTool(ctx, parsed)
 	default:
 		return ""
 	}
@@ -724,6 +729,37 @@ func (a *App) callLLMResultSummarizeTool(req LLMRequest, parsed LLMSQLResponse) 
 		return ""
 	}
 	return llmToolResultBlock(llmToolResultSummarize, parsed.Arguments, data)
+}
+
+// callLLMLogicSearchTool answers a "which view/procedure already does X"
+// question via searchObjectLogic (see logic_search.go). Unlike the other
+// tools, a failure or empty result still returns a non-empty block with an
+// explanatory note — searchObjectLogic legitimately fails whenever the
+// active connection is tinySQL, has never been reindexed, or no embedding
+// model is configured, and the model needs to know that rather than
+// silently getting nothing back.
+func (a *App) callLLMLogicSearchTool(ctx context.Context, parsed LLMSQLResponse) string {
+	query := strings.TrimSpace(parsed.Arguments.Query)
+	if query == "" {
+		return ""
+	}
+	conn := a.activeConn(ctx)
+	if conn == nil {
+		return ""
+	}
+	hits, err := a.searchObjectLogic(ctx, sessionIDFromContext(ctx), conn.ID, query, maxLLMLogicSearchHits)
+	if err != nil {
+		data, _ := json.Marshal(map[string]any{"note": err.Error()})
+		return llmToolResultBlock(llmToolLogicSearch, parsed.Arguments, data)
+	}
+	if len(hits) == 0 {
+		data, _ := json.Marshal(map[string]any{
+			"note": "no indexed views/procedures/functions matched; this connection may not have been reindexed yet",
+		})
+		return llmToolResultBlock(llmToolLogicSearch, parsed.Arguments, data)
+	}
+	data, _ := json.Marshal(map[string]any{"hits": hits})
+	return llmToolResultBlock(llmToolLogicSearch, parsed.Arguments, data)
 }
 
 func llmToolResultBlock(tool string, args LLMToolArguments, raw json.RawMessage) string {
@@ -960,7 +996,7 @@ func (a *App) sampleColumnValues(ctx context.Context, table, column string, limi
 	if limit <= 0 {
 		return nil
 	}
-	query := fmt.Sprintf("SELECT %s FROM %s LIMIT %d", quoteName(column), quoteName(table), limit)
+	query := llmSampleColumnValuesQuery(table, column, limit)
 	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "llm.sample_values", query)
 	if err != nil {
 		return nil

@@ -34,13 +34,21 @@ var allowedUIThemes = []string{"workbench", "midnight", "forest", "contrast", "s
 var allowedUIDensities = []string{"comfortable", "compact"}
 
 type RuntimeSettings struct {
-	Dialect           string
-	ConnectTimeout    time.Duration
-	QueryTimeout      time.Duration
-	LLMBaseURL        string
-	LLMAPIKey         string
-	LLMModel          string
-	LLMTimeout        time.Duration
+	Dialect        string
+	ConnectTimeout time.Duration
+	QueryTimeout   time.Duration
+	LLMBaseURL     string
+	LLMAPIKey      string
+	LLMModel       string
+	LLMTimeout     time.Duration
+	// EmbeddingBaseURL/EmbeddingAPIKey are optional: when blank,
+	// currentEmbeddingConfig falls back to LLMBaseURL/LLMAPIKey, since the
+	// same OpenAI-compatible provider commonly serves both. EmbeddingModel
+	// has no such fallback — a chat model is never a valid embedding model —
+	// so logic search stays "not configured" until one is set explicitly.
+	EmbeddingBaseURL  string
+	EmbeddingAPIKey   string
+	EmbeddingModel    string
 	ReadOnlyMode      bool
 	PageSize          int
 	MatchMaxRows      int
@@ -52,23 +60,28 @@ type RuntimeSettings struct {
 }
 
 type RuntimeSettingsView struct {
-	Dialect          string `json:"dialect"`
-	ConnectTimeout   string `json:"connect_timeout"`
-	QueryTimeout     string `json:"query_timeout"`
-	LLMBaseURL       string `json:"llm_base_url"`
-	LLMModel         string `json:"llm_model"`
-	LLMTimeout       string `json:"llm_timeout"`
-	LLMConfigured    bool   `json:"llm_configured"`
-	LLMAPIKeySet     bool   `json:"llm_api_key_set"`
-	LLMAPIKeyDisplay string `json:"llm_api_key_display"`
-	ReadOnlyMode     bool   `json:"read_only_mode"`
-	PageSize         int    `json:"page_size"`
-	MatchMaxRows     int    `json:"match_max_rows"`
-	DefaultTheme     string `json:"default_theme"`
-	DefaultDensity   string `json:"default_density"`
-	Port             int    `json:"port"`
-	AdminPasswordSet bool   `json:"admin_password_set"`
-	AuthMode         string `json:"auth_mode"`
+	Dialect                string `json:"dialect"`
+	ConnectTimeout         string `json:"connect_timeout"`
+	QueryTimeout           string `json:"query_timeout"`
+	LLMBaseURL             string `json:"llm_base_url"`
+	LLMModel               string `json:"llm_model"`
+	LLMTimeout             string `json:"llm_timeout"`
+	LLMConfigured          bool   `json:"llm_configured"`
+	LLMAPIKeySet           bool   `json:"llm_api_key_set"`
+	LLMAPIKeyDisplay       string `json:"llm_api_key_display"`
+	EmbeddingBaseURL       string `json:"embedding_base_url"`
+	EmbeddingModel         string `json:"embedding_model"`
+	EmbeddingConfigured    bool   `json:"embedding_configured"`
+	EmbeddingAPIKeySet     bool   `json:"embedding_api_key_set"`
+	EmbeddingAPIKeyDisplay string `json:"embedding_api_key_display"`
+	ReadOnlyMode           bool   `json:"read_only_mode"`
+	PageSize               int    `json:"page_size"`
+	MatchMaxRows           int    `json:"match_max_rows"`
+	DefaultTheme           string `json:"default_theme"`
+	DefaultDensity         string `json:"default_density"`
+	Port                   int    `json:"port"`
+	AdminPasswordSet       bool   `json:"admin_password_set"`
+	AuthMode               string `json:"auth_mode"`
 }
 
 func isAllowedValue(value string, allowed []string) bool {
@@ -160,6 +173,29 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 		llm = NewOpenAICompatibleClient(cfg)
 	}
 
+	// a.embeddingConfig stores the RAW submitted values (round-tripped as-is
+	// through settings, same role a.llmConfig plays for the LLM) — the
+	// resolved client below is what actually falls back to the LLM's
+	// BaseURL/APIKey when they're blank, since the same OpenAI-compatible
+	// provider commonly serves both. The model never falls back: an unset
+	// EmbeddingModel means "not configured" even if the LLM itself is.
+	embeddingCfg := EmbeddingConfig{
+		BaseURL: strings.TrimSpace(s.EmbeddingBaseURL),
+		APIKey:  strings.TrimSpace(s.EmbeddingAPIKey),
+		Model:   strings.TrimSpace(s.EmbeddingModel),
+		Timeout: s.LLMTimeout,
+		Verbose: a.verboseLogger(),
+	}
+	var embeddingClient EmbeddingClient
+	if embeddingCfg.Model != "" {
+		resolved := embeddingCfg
+		resolved.BaseURL = firstNonEmpty(resolved.BaseURL, cfg.BaseURL)
+		resolved.APIKey = firstNonEmpty(resolved.APIKey, cfg.APIKey)
+		if resolved.BaseURL != "" {
+			embeddingClient = NewOpenAICompatibleEmbeddingClient(resolved)
+		}
+	}
+
 	a.settingsMu.Lock()
 	defer a.settingsMu.Unlock()
 	a.dialect = DialectProfileForName(dialect)
@@ -167,6 +203,8 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 	a.queryTimeout = s.QueryTimeout
 	a.llmConfig = cfg
 	a.llm = llm
+	a.embeddingConfig = embeddingCfg
+	a.embeddingClient = embeddingClient
 	a.readOnlyMode = s.ReadOnlyMode
 	a.pageSize = s.PageSize
 	a.matchMaxRows = s.MatchMaxRows
@@ -191,6 +229,9 @@ func (a *App) saveRuntimeSettings(ctx context.Context) error {
 		"llm_api_key":         s.LLMAPIKey,
 		"llm_model":           s.LLMModel,
 		"llm_timeout":         s.LLMTimeout.String(),
+		"embedding_base_url":  s.EmbeddingBaseURL,
+		"embedding_api_key":   s.EmbeddingAPIKey,
+		"embedding_model":     s.EmbeddingModel,
 		"read_only_mode":      strconv.FormatBool(s.ReadOnlyMode),
 		"page_size":           strconv.Itoa(s.PageSize),
 		"match_max_rows":      strconv.Itoa(s.MatchMaxRows),
@@ -362,6 +403,9 @@ func (a *App) currentRuntimeSettings() RuntimeSettings {
 		LLMAPIKey:         a.llmConfig.APIKey,
 		LLMModel:          a.llmConfig.Model,
 		LLMTimeout:        a.llmConfig.Timeout,
+		EmbeddingBaseURL:  a.embeddingConfig.BaseURL,
+		EmbeddingAPIKey:   a.embeddingConfig.APIKey,
+		EmbeddingModel:    a.embeddingConfig.Model,
 		ReadOnlyMode:      a.readOnlyMode,
 		PageSize:          a.pageSize,
 		MatchMaxRows:      a.matchMaxRows,
@@ -377,23 +421,28 @@ func (a *App) runtimeSettingsView() RuntimeSettingsView {
 	a.settingsMu.RLock()
 	defer a.settingsMu.RUnlock()
 	return RuntimeSettingsView{
-		Dialect:          a.dialect.Name,
-		ConnectTimeout:   a.connectTimeout.String(),
-		QueryTimeout:     a.queryTimeout.String(),
-		LLMBaseURL:       a.llmConfig.BaseURL,
-		LLMModel:         a.llmConfig.Model,
-		LLMTimeout:       a.llmConfig.Timeout.String(),
-		LLMConfigured:    a.llm != nil,
-		LLMAPIKeySet:     a.llmConfig.APIKey != "",
-		LLMAPIKeyDisplay: maskedSecret(a.llmConfig.APIKey),
-		ReadOnlyMode:     a.readOnlyMode,
-		PageSize:         a.pageSize,
-		MatchMaxRows:     a.matchMaxRows,
-		DefaultTheme:     a.defaultTheme,
-		DefaultDensity:   a.defaultDensity,
-		Port:             a.port,
-		AdminPasswordSet: strings.TrimSpace(a.adminPasswordHash) != "",
-		AuthMode:         string(a.authMode),
+		Dialect:                a.dialect.Name,
+		ConnectTimeout:         a.connectTimeout.String(),
+		QueryTimeout:           a.queryTimeout.String(),
+		LLMBaseURL:             a.llmConfig.BaseURL,
+		LLMModel:               a.llmConfig.Model,
+		LLMTimeout:             a.llmConfig.Timeout.String(),
+		LLMConfigured:          a.llm != nil,
+		LLMAPIKeySet:           a.llmConfig.APIKey != "",
+		LLMAPIKeyDisplay:       maskedSecret(a.llmConfig.APIKey),
+		EmbeddingBaseURL:       a.embeddingConfig.BaseURL,
+		EmbeddingModel:         a.embeddingConfig.Model,
+		EmbeddingConfigured:    a.embeddingClient != nil,
+		EmbeddingAPIKeySet:     a.embeddingConfig.APIKey != "",
+		EmbeddingAPIKeyDisplay: maskedSecret(a.embeddingConfig.APIKey),
+		ReadOnlyMode:           a.readOnlyMode,
+		PageSize:               a.pageSize,
+		MatchMaxRows:           a.matchMaxRows,
+		DefaultTheme:           a.defaultTheme,
+		DefaultDensity:         a.defaultDensity,
+		Port:                   a.port,
+		AdminPasswordSet:       strings.TrimSpace(a.adminPasswordHash) != "",
+		AuthMode:               string(a.authMode),
 	}
 }
 
@@ -459,6 +508,36 @@ func (a *App) llmClient() LLMClient {
 	a.settingsMu.RLock()
 	defer a.settingsMu.RUnlock()
 	return a.llm
+}
+
+// embeddingClientFn returns the resolved embedding client (BaseURL/APIKey
+// fallback to the LLM's already applied, see applyRuntimeSettings), or nil
+// if no embedding model is configured. Named with the Fn suffix to avoid
+// colliding with the App.embeddingClient field of the same name.
+func (a *App) embeddingClientFn() EmbeddingClient {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	return a.embeddingClient
+}
+
+// currentEmbeddingModel returns the configured embedding model name (used
+// to tag stored vectors and to scope search queries), or "" if unset.
+func (a *App) currentEmbeddingModel() string {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	return a.embeddingConfig.Model
+}
+
+// firstNonEmpty returns the first non-blank (after trimming) string, or ""
+// if every candidate is blank. Used by applyRuntimeSettings to fall back
+// the embedding config's BaseURL/APIKey to the LLM's when left unset.
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func (a *App) currentDialect() DialectProfile {
@@ -533,6 +612,9 @@ func runtimeSettingsFromStoredValues(values map[string]string) (RuntimeSettings,
 		LLMAPIKey:         values["llm_api_key"],
 		LLMModel:          values["llm_model"],
 		LLMTimeout:        llmTimeout,
+		EmbeddingBaseURL:  values["embedding_base_url"],
+		EmbeddingAPIKey:   values["embedding_api_key"],
+		EmbeddingModel:    values["embedding_model"],
 		ReadOnlyMode:      readOnlyMode,
 		PageSize:          pageSize,
 		MatchMaxRows:      matchMaxRows,

@@ -27,107 +27,13 @@
 </div>
 
 <script>
-var queryHistoryKey = 'datadock.queryHistory.v1';
-
+// Logic lives in app.js; this DOMContentLoaded call must stay inline so
+// DataDock's AJAX shell navigation (see executeScripts() in app.js) re-runs
+// it every time this page is loaded into the shell, not just on a full
+// browser navigation.
 document.addEventListener('DOMContentLoaded', function () {
   renderLocalQueryHistory();
 });
-
-function loadLocalQueryHistory() {
-  try {
-    var raw = localStorage.getItem(queryHistoryKey);
-    return raw ? JSON.parse(raw) || [] : [];
-  } catch (e) {
-    return [];
-  }
-}
-
-function renderLocalQueryHistory() {
-  var target = document.getElementById('queryHistory');
-  if (!target) return;
-  var items = loadLocalQueryHistory();
-  if (items.length === 0) {
-    target.innerHTML = '<div class="text-muted">No local queries yet.</div>';
-    return;
-  }
-  var html = '<div class="list-group list-group-flush">';
-  items.forEach(function(item, idx) {
-    var label = item.sql.replace(/\s+/g, ' ').trim();
-    if (label.length > 160) label = label.slice(0, 160) + '...';
-    html += '<button type="button" class="list-group-item list-group-item-action px-0 py-2" onclick="restoreLocalQueryHistory(' + idx + ')">' +
-      '<span class="d-block text-truncate">' + escHtml(label) + '</span>' +
-      '<span class="text-muted">' + escHtml(formatHistoryTime(item.at)) + ' · ' +
-      (item.error ? '<span class="text-danger">' + escHtml(item.error) + '</span>' : escHtml(item.rowCount || 0) + ' row(s) · ' + escHtml(item.elapsedMs || 0) + ' ms') +
-      '</span>' +
-      '</button>';
-  });
-  html += '</div>';
-  target.innerHTML = html;
-}
-
-function restoreLocalQueryHistory(idx) {
-  var item = loadLocalQueryHistory()[idx];
-  if (!item) return;
-  openSQLInEditor(item.sql, '', false);
-}
-
-function clearLocalQueryHistory() {
-  try { localStorage.removeItem(queryHistoryKey); } catch (e) {}
-  renderLocalQueryHistory();
-}
-
-function exportLocalQueryHistory(format) {
-  var items = loadLocalQueryHistory();
-  if (items.length === 0) {
-    window.alert('No local query history to export.');
-    return;
-  }
-  var stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  if (format === 'csv') {
-    var header = ['at', 'rowCount', 'elapsedMs', 'error', 'sql'];
-    var lines = [header.map(csvCell).join(',')];
-    items.forEach(function (item) {
-      lines.push([
-        item.at || '',
-        item.rowCount || 0,
-        item.elapsedMs || 0,
-        item.error || '',
-        item.sql || ''
-      ].map(csvCell).join(','));
-    });
-    downloadTextFile('datadock-query-history-' + stamp + '.csv', 'text/csv;charset=utf-8', lines.join('\n') + '\n');
-    return;
-  }
-  downloadTextFile('datadock-query-history-' + stamp + '.json', 'application/json;charset=utf-8', JSON.stringify(items, null, 2) + '\n');
-}
-
-function downloadTextFile(filename, type, content) {
-  var blob = new Blob([content], {type: type});
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(function () { URL.revokeObjectURL(url); }, 0);
-}
-
-function csvCell(value) {
-  return '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"';
-}
-
-function formatHistoryTime(value) {
-  var d = new Date(value);
-  if (isNaN(d.getTime())) return '';
-  return d.toLocaleString();
-}
-
-function escHtml(s) {
-  return String(s)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-}
 </script>
 
 {{template "base_end" .}}

@@ -239,9 +239,44 @@
           </div>
         </div>
       </div>
+
+      <div class="col-12 admin-section-title mt-2">Embeddings (SQL Logic Search)</div>
+      <div class="col-md-5">
+        <label class="form-label small text-muted">OpenAI-compatible Base URL</label>
+        <input class="form-control form-control-sm" name="embedding_base_url" value="{{.Settings.EmbeddingBaseURL}}" placeholder="leave empty to reuse the LLM's Base URL above">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small text-muted">Model</label>
+        <input class="form-control form-control-sm" name="embedding_model" value="{{.Settings.EmbeddingModel}}" placeholder="text-embedding-3-small">
+      </div>
+      <div class="col-md-4">
+        <label class="form-label small text-muted">API Key</label>
+        <input class="form-control form-control-sm" name="embedding_api_key" type="password" autocomplete="new-password" placeholder="{{if .Settings.EmbeddingAPIKeySet}}{{.Settings.EmbeddingAPIKeyDisplay}}{{else}}leave empty to reuse the LLM's API key{{end}}">
+        <div class="form-text">{{if .Settings.EmbeddingAPIKeySet}}Leave empty to keep the current key.{{end}}</div>
+      </div>
+      <div class="col-12 small text-muted">
+        Embeddings power the "Search SQL Logic" feature on the <a href="/connections">Connections</a> page (semantic search over indexed view/procedure/function definitions). {{if .Settings.EmbeddingConfigured}}Configured{{else}}A Model is required to enable it{{end}} — Base URL/API Key fall back to the LLM's above when left blank.
+      </div>
       <div class="col-12">
         <button class="btn btn-primary btn-sm" type="submit">Save Settings</button>
       </div>
+    </form>
+  </div>
+</div>
+
+<div id="adminLogicSearch" class="card">
+  <div class="card-body">
+    <h2 class="h6 mb-1">SQL Logic Search Indexing</h2>
+    <p class="small text-muted mb-3">
+      Crawl every <strong>shared</strong> PostgreSQL/MySQL/MSSQL connection's views, procedures, and functions into the
+      vector index used by semantic Logic Search (<a href="/connections">Connections</a> page) and the LLM assistant's
+      <code>datadock.logic.search</code> tool. Each user's own private connection has its own Reindex button on the
+      Connections page — only its owner can trigger it, since only they can see or use it.
+    </p>
+    <form method="post" action="/admin/logic-search/reindex-all" class="d-inline">
+      <button class="btn btn-outline-secondary btn-sm" type="submit" {{if not .Settings.EmbeddingConfigured}}disabled title="Configure an embedding model above first"{{end}}>
+        <i class="bi bi-arrow-repeat me-1"></i>Reindex All Shared Connections Now
+      </button>
     </form>
   </div>
 </div>
@@ -303,130 +338,5 @@
   </div>
 </div>
 
-<script>
-function toggleStatusJSON() {
-  var body = document.getElementById('statusJSONBody');
-  var caret = document.getElementById('statusJSONCaret');
-  var copyBtn = document.getElementById('copyStatusBtn');
-  var hidden = !body.classList.contains('d-none');
-  body.classList.toggle('d-none', hidden);
-  copyBtn.classList.toggle('d-none', hidden);
-  caret.className = hidden ? 'bi bi-chevron-right me-1' : 'bi bi-chevron-down me-1';
-}
-
-function copyAdminStatus(btn) {
-  var text = document.getElementById('adminStatus').innerText;
-  var restore = function () {
-    setTimeout(function () {
-      btn.innerHTML = '<i class="bi bi-clipboard me-1"></i>Copy';
-    }, 1500);
-  };
-  navigator.clipboard.writeText(text).then(function () {
-    btn.innerHTML = '<i class="bi bi-check2 me-1"></i>Copied!';
-    restore();
-  }, function () {
-    btn.innerHTML = '<i class="bi bi-x-lg me-1"></i>Could not copy';
-    restore();
-  });
-}
-
-var llmDetectedServers = [];
-
-function setLLMAutoStatus(text, kind) {
-  var el = document.getElementById('llmAutoStatus');
-  if (!el) return;
-  el.className = 'small ' + (kind === 'error' ? 'text-danger' : kind === 'ok' ? 'text-success' : 'text-muted');
-  el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
-  el.textContent = text || '';
-}
-
-function refreshLLMAutoModels() {
-  var serverSelect = document.getElementById('llmAutoServer');
-  var modelSelect = document.getElementById('llmAutoModel');
-  if (!serverSelect || !modelSelect) return;
-  var server = llmDetectedServers[Number(serverSelect.value || 0)];
-  modelSelect.innerHTML = '';
-  if (!server || !server.models || !server.models.length) {
-    modelSelect.add(new Option('No models', ''));
-    return;
-  }
-  server.models.forEach(function(model) {
-    modelSelect.add(new Option(model, model));
-  });
-}
-
-function renderLLMDetection(data) {
-  llmDetectedServers = data.servers || [];
-  var serverSelect = document.getElementById('llmAutoServer');
-  if (!serverSelect) return;
-  serverSelect.innerHTML = '';
-  if (!llmDetectedServers.length) {
-    serverSelect.add(new Option('No server found', ''));
-    refreshLLMAutoModels();
-    setLLMAutoStatus('No local LLM server found', 'error');
-    return;
-  }
-  llmDetectedServers.forEach(function(server, idx) {
-    var label = server.name + ' · ' + server.base_url + ' · ' + (server.models || []).length + ' models';
-    serverSelect.add(new Option(label, String(idx)));
-  });
-  serverSelect.onchange = refreshLLMAutoModels;
-  refreshLLMAutoModels();
-  setLLMAutoStatus('Detected ' + llmDetectedServers.length + ' server(s)', 'ok');
-}
-
-function detectLLMServers() {
-  var btn = document.getElementById('llmDetectBtn');
-  if (btn.disabled) return;
-  var host = document.getElementById('llmAutoHost').value.trim();
-  var port = document.getElementById('llmAutoPort').value.trim();
-  var params = new URLSearchParams();
-  if (host) params.set('host', host);
-  if (port) params.set('port', port);
-  btn.disabled = true;
-  setLLMAutoStatus('Detecting...', '');
-  fetch('/api/llm/discover?' + params.toString())
-    .then(function(resp) { return resp.json().then(function(data) { return { ok: resp.ok, data: data }; }); })
-    .then(function(resp) {
-      if (!resp.ok) throw new Error(resp.data.error || 'Discovery failed');
-      renderLLMDetection(resp.data);
-    })
-    .catch(function(err) {
-      llmDetectedServers = [];
-      renderLLMDetection({ servers: [] });
-      setLLMAutoStatus(err.message || err.toString(), 'error');
-    })
-    .finally(function() { btn.disabled = false; });
-}
-
-function applyLLMAutoConfig() {
-  var serverSelect = document.getElementById('llmAutoServer');
-  var modelSelect = document.getElementById('llmAutoModel');
-  var server = llmDetectedServers[Number((serverSelect && serverSelect.value) || 0)];
-  var payload = {
-    host: document.getElementById('llmAutoHost').value.trim(),
-    port: document.getElementById('llmAutoPort').value.trim(),
-    base_url: server ? server.base_url : '',
-    model: modelSelect ? modelSelect.value : ''
-  };
-  setLLMAutoStatus('Applying...', '');
-  fetch('/api/llm/autoconfig', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  })
-    .then(function(resp) { return resp.json().then(function(data) { return { ok: resp.ok, data: data }; }); })
-    .then(function(resp) {
-      if (!resp.ok) throw new Error(resp.data.error || 'Auto config failed');
-      document.querySelector('[name="llm_base_url"]').value = resp.data.llm_base_url || '';
-      document.querySelector('[name="llm_model"]').value = resp.data.llm_model || '';
-      document.querySelector('[name="llm_timeout"]').value = resp.data.llm_timeout || '45s';
-      setLLMAutoStatus('LLM settings applied', 'ok');
-    })
-    .catch(function(err) {
-      setLLMAutoStatus(err.message || err.toString(), 'error');
-    });
-}
-</script>
 {{template "base_end" .}}
 {{end}}
