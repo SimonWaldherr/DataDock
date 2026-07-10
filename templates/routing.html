@@ -1,0 +1,43 @@
+{{define "routing"}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" .Table "ActiveConnection" .ActiveConnection "DefaultTheme" .DefaultTheme "DefaultDensity" .DefaultDensity "MaintenanceMode" .MaintenanceMode)}}
+<div class="page-hdr">
+  <h1><i class="bi bi-signpost-2 text-primary"></i>{{.Table}}</h1>
+  <a href="/t/{{.Table}}" class="btn btn-sm btn-outline-secondary"><i class="bi bi-table me-1"></i>Table</a>
+</div>
+
+<div class="routing-workspace" data-table="{{.Table}}">
+  <form id="routingForm" class="routing-controls">
+    <div>
+      <label for="routingMode">Mode</label>
+      <select id="routingMode" class="form-select form-select-sm">
+        <option value="route">Shortest route</option>
+        <option value="reachable">Reachable area</option>
+      </select>
+    </div>
+    <div>
+      <label for="routingFrom">Origin node</label>
+      <input id="routingFrom" class="form-control form-control-sm" required autocomplete="off">
+    </div>
+    <div id="routingDestinationGroup">
+      <label for="routingTo">Destination node</label>
+      <input id="routingTo" class="form-control form-control-sm" autocomplete="off">
+    </div>
+    <div>
+      <label for="routingCost">Cost</label>
+      <input id="routingCost" class="form-control form-control-sm" value="cost" autocomplete="off">
+    </div>
+    <div id="routingMaxCostGroup" class="d-none">
+      <label for="routingMaxCost">Maximum cost</label>
+      <input id="routingMaxCost" class="form-control form-control-sm" type="number" min="0" step="any" autocomplete="off">
+    </div>
+    <label class="routing-checkbox"><input id="routingDirected" type="checkbox" checked> Directed</label>
+    <button class="btn btn-sm btn-primary" type="submit"><i class="bi bi-play-fill me-1"></i>Run</button>
+  </form>
+  <div id="routingResult" aria-live="polite"></div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() { initRoutingPage(); });
+</script>
+{{template "base_end" .}}
+{{end}}

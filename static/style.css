@@ -1117,7 +1117,7 @@
      font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
      padding: .12rem 0;
 }
- .query-map-canvas {
+.query-map-canvas {
      height: min(58vh, 520px);
      min-height: 340px;
      width: 100%;
@@ -1125,6 +1125,142 @@
      border-radius: 7px;
      overflow: hidden;
      background: var(--surface-strong);
+}
+
+.map-layer-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 190px;
+  min-height: 560px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.tile-layer-map {
+  min-height: 560px;
+}
+
+.map-layer-meta {
+  padding: 1rem;
+  border-left: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.map-layer-meta dl {
+  margin: 0;
+}
+
+.map-layer-meta dt {
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 600;
+}
+
+.map-layer-meta dd {
+  margin: 0 0 .9rem;
+  overflow-wrap: anywhere;
+}
+
+.map-layer-notice {
+  position: absolute;
+  left: 1rem;
+  bottom: 1rem;
+  padding: .4rem .6rem;
+  background: rgba(255, 255, 255, .92);
+  border: 1px solid #cbd5e1;
+  color: #334155;
+  font-size: .82rem;
+}
+
+.routing-workspace {
+  display: grid;
+  gap: 1rem;
+}
+
+.routing-controls {
+  display: flex;
+  align-items: end;
+  gap: .75rem;
+  flex-wrap: wrap;
+  padding: .9rem;
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.routing-controls > div {
+  min-width: 150px;
+}
+
+.routing-controls label:not(.routing-checkbox) {
+  display: block;
+  margin-bottom: .25rem;
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 600;
+}
+
+.routing-checkbox {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  min-height: 31px;
+  font-size: .88rem;
+}
+
+.routing-result-summary {
+  margin-bottom: .5rem;
+  color: var(--muted);
+  font-size: .88rem;
+}
+
+.report-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.report-section {
+  padding: 1rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.report-list {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: .5rem .75rem;
+  margin: 0;
+  font-size: .9rem;
+}
+
+.report-list dt {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.report-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.report-hash {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+  font-size: .78rem;
+}
+
+@media (max-width: 720px) {
+  .report-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .map-layer-layout {
+    grid-template-columns: 1fr;
+  }
+  .map-layer-meta {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
 }
  .query-map-svg {
      display: block;

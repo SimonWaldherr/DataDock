@@ -86,7 +86,7 @@
         </div>
         <div>
           <label class="form-label small">File</label>
-          <input class="form-control form-control-sm" type="file" name="file" accept=".csv,.tsv,.json,.ndjson,.xlsx,.xml,.yaml,.yml,.geojson,.gpkg,.gpx,.kml,.osm,.pbf,.mbtiles,.rg,.zip,.shp,.sqlite,.sqlite3,.db,.duckdb,.parquet,.arrow,.feather,.html,.htm,.msgpack,.mpack,.msg,.cbor,.bson,.ics,.ical,.vcf,.vcard" required>
+          <input class="form-control form-control-sm" type="file" name="file" accept=".csv,.tsv,.json,.ndjson,.xlsx,.xml,.yaml,.yml,.geojson,.gpkg,.gpx,.kml,.osm,.pbf,.mbtiles,.pmtiles,.rg,.zip,.shp,.sqlite,.sqlite3,.db,.duckdb,.parquet,.arrow,.feather,.html,.htm,.msgpack,.mpack,.msg,.cbor,.bson,.ics,.ical,.vcf,.vcard" required>
         </div>
         <div class="row g-2">
           <div class="col-md-6">
@@ -119,6 +119,7 @@
               <option value="pbf">OSM PBF</option>
               <option value="shp">Shapefile ZIP</option>
               <option value="mbtiles">MBTiles</option>
+			  <option value="pmtiles">PMTiles</option>
               <option value="rg">Routing graph (RG)</option>
             </select>
           </div>
@@ -150,6 +151,17 @@
           <div class="col-md-3"><div class="metric"><div class="small text-muted">Header</div><div class="fs-5 fw-semibold">{{if .HadHeader}}Yes{{else}}No{{end}}</div></div></div>
           <div class="col-md-3"><div class="metric"><div class="small text-muted">Columns</div><div class="fs-5 fw-semibold">{{len .ColumnNames}}</div></div></div>
         </div>
+		{{with $.SpatialReport}}
+		<div class="card mt-3 border-0 bg-light">
+		  <div class="card-body py-2">
+			<div class="d-flex justify-content-between align-items-center gap-2">
+			  <div><strong class="small">Spatial quality</strong><span class="badge text-bg-{{if eq .Status "ok"}}success{{else if eq .Status "warning"}}warning{{else}}secondary{{end}} ms-2">{{.Status}}</span></div>
+			  <a href="/t/{{.Table}}/quality" class="btn btn-sm btn-outline-secondary"><i class="bi bi-clipboard2-check me-1"></i>Report</a>
+			</div>
+			<div class="small text-muted mt-1">{{.ValidGeometryRows}} valid, {{.MissingGeometryRows}} missing, {{.InvalidGeometryRows}} invalid geometries</div>
+		  </div>
+		</div>
+		{{end}}
         {{with $.Table}}<a href="/t/{{.}}" class="btn btn-primary btn-sm mt-3"><i class="bi bi-table me-1"></i>Open Table</a>{{end}}
       </div>
       {{end}}

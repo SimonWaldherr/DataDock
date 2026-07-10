@@ -1029,6 +1029,8 @@ var sampleQueries = [
     'CALL datadock_agent_context(12, 6000)' },
   { label: 'tinySQL table info PRAGMA', sql:
     'PRAGMA table_info(datadock_demo_people)' },
+  { label: 'tinySQL index catalog', sql:
+    'SELECT name, table_name, columns, is_unique, created_at\nFROM sys.indexes\nORDER BY table_name, name' },
   { label: 'Excel CSV edge cases', sql:
     'SELECT external_id, imported_at, source\nFROM datadock_demo_payloads\nORDER BY external_id' }
 ];
@@ -2919,6 +2921,117 @@ function initResultMap(featureCollection) {
     }
   }
   renderSVGResultMap(target, featureCollection);
+}
+
+function initTileLayerMap(elementID) {
+  var target = document.getElementById(elementID);
+  if (!target || !window.maplibregl || !window.maplibregl.Map) return;
+  var tileJSONURL = target.getAttribute('data-tilejson-url');
+  if (!tileJSONURL) return;
+  fetch(tileJSONURL, {headers: {Accept: 'application/json'}})
+    .then(function(response) {
+      if (!response.ok) throw new Error('Could not load map layer metadata.');
+      return response.json();
+    })
+    .then(function(tileJSON) { renderTileLayerMap(target, tileJSONURL, tileJSON); })
+    .catch(function(error) {
+      target.innerHTML = '<div class="alert alert-danger m-3 py-2">' + escHtml(error.message) + '</div>';
+    });
+}
+
+function initRoutingPage() {
+  var workspace = document.querySelector('.routing-workspace');
+  var form = document.getElementById('routingForm');
+  if (!workspace || !form) return;
+  var mode = document.getElementById('routingMode');
+  var destination = document.getElementById('routingDestinationGroup');
+  var maxCost = document.getElementById('routingMaxCostGroup');
+  function refreshMode() {
+    var reachable = mode.value === 'reachable';
+    destination.classList.toggle('d-none', reachable);
+    maxCost.classList.toggle('d-none', !reachable);
+    document.getElementById('routingTo').required = !reachable;
+    document.getElementById('routingMaxCost').required = reachable;
+  }
+  mode.addEventListener('change', refreshMode);
+  refreshMode();
+  form.addEventListener('submit', function(event) {
+    event.preventDefault();
+    runRoutingRequest(workspace.getAttribute('data-table'), mode.value);
+  });
+}
+
+function runRoutingRequest(table, mode) {
+  var result = document.getElementById('routingResult');
+  var payload = {
+    from_id: document.getElementById('routingFrom').value.trim(),
+    cost_field: document.getElementById('routingCost').value.trim() || 'cost',
+    directed: document.getElementById('routingDirected').checked
+  };
+  if (mode === 'reachable') payload.max_cost = Number(document.getElementById('routingMaxCost').value);
+  else payload.to_id = document.getElementById('routingTo').value.trim();
+  result.innerHTML = '<div class="small text-muted py-3">Calculating…</div>';
+  fetch('/api/routing/' + encodeURIComponent(table) + '/' + (mode === 'reachable' ? 'reachable' : 'route'), {
+    method: 'POST', headers: {'Content-Type': 'application/json', Accept: 'application/json'}, body: JSON.stringify(payload)
+  }).then(function(response) {
+    return response.json().then(function(data) {
+      if (!response.ok) throw new Error((data.detail || data.title || 'Routing request failed.'));
+      return data;
+    });
+  }).then(function(data) {
+    renderRoutingResult(result, data, mode);
+  }).catch(function(error) {
+    result.innerHTML = '<div class="alert alert-danger mt-3 py-2">' + escHtml(error.message) + '</div>';
+  });
+}
+
+function renderRoutingResult(target, data, mode) {
+  var geojson = data.geojson || {type: 'FeatureCollection', features: []};
+  var fc = geojson.type === 'Feature' ? {type: 'FeatureCollection', features: [geojson]} : geojson;
+  var summary = mode === 'reachable'
+    ? String(data.reachable_nodes || 0) + ' reachable node(s), max cost ' + escHtml(String(data.max_cost))
+    : String(data.edge_count || 0) + ' edge(s), cost ' + escHtml(String(data.cost)) + ', distance ' + escHtml(String(Math.round(data.distance_meters || 0))) + ' m';
+  target.innerHTML = '<div class="routing-result-summary">' + summary + '</div><div id="routingMapCanvas" class="query-map-canvas"></div>';
+  var mapTarget = document.getElementById('routingMapCanvas');
+  if (mapTarget) renderSVGResultMap(mapTarget, fc);
+}
+
+function renderTileLayerMap(target, tileJSONURL, tileJSON) {
+  var format = String(tileJSON.format || '').toLowerCase();
+  var vector = /^(pbf|mvt|vector|application\/x-protobuf)$/.test(format);
+  var map = new maplibregl.Map({
+    container: target,
+    style: {version: 8, sources: {}, layers: [{id: 'background', type: 'background', paint: {'background-color': '#eef2f7'}}]},
+    center: [0, 0],
+    zoom: 1,
+    attributionControl: true
+  });
+  map.on('load', function() {
+    if (vector) {
+      map.addSource('datadock-layer', {type: 'vector', url: tileJSONURL});
+      var layers = tileJSON.vector_layers || [];
+      layers.forEach(function(layer, index) {
+        var sourceLayer = String(layer.id || '').trim();
+        if (!sourceLayer) return;
+        var prefix = 'datadock-' + sourceLayer.replace(/[^a-zA-Z0-9_-]/g, '_') + '-' + index;
+        map.addLayer({id: prefix + '-fill', type: 'fill', source: 'datadock-layer', 'source-layer': sourceLayer,
+          filter: ['==', ['geometry-type'], 'Polygon'], paint: {'fill-color': '#3b82f6', 'fill-opacity': 0.18}});
+        map.addLayer({id: prefix + '-line', type: 'line', source: 'datadock-layer', 'source-layer': sourceLayer,
+          filter: ['==', ['geometry-type'], 'LineString'], paint: {'line-color': '#1d4ed8', 'line-width': 1.6}});
+        map.addLayer({id: prefix + '-point', type: 'circle', source: 'datadock-layer', 'source-layer': sourceLayer,
+          filter: ['==', ['geometry-type'], 'Point'], paint: {'circle-color': '#dc2626', 'circle-radius': 3.5, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1}});
+      });
+      if (!layers.length) {
+        target.insertAdjacentHTML('beforeend', '<div class="map-layer-notice">Vector tile metadata has no layer list.</div>');
+      }
+    } else {
+      map.addSource('datadock-layer', {type: 'raster', url: tileJSONURL, tileSize: 256});
+      map.addLayer({id: 'datadock-raster', type: 'raster', source: 'datadock-layer'});
+    }
+    if (Array.isArray(tileJSON.bounds) && tileJSON.bounds.length === 4) {
+      map.fitBounds([[tileJSON.bounds[0], tileJSON.bounds[1]], [tileJSON.bounds[2], tileJSON.bounds[3]]], {padding: 36, duration: 0, maxZoom: tileJSON.maxzoom || 16});
+    }
+  });
 }
 
 function renderMapLibreResult(target, featureCollection) {

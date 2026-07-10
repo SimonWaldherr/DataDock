@@ -255,16 +255,43 @@ func TestImportMBTilesIndexesMetadataAndTiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ImportMBTiles: %v", err)
 	}
-	if res.RowsInserted != 2 {
-		t.Fatalf("RowsInserted = %d, want 2", res.RowsInserted)
+	if res.RowsInserted != 4 {
+		t.Fatalf("RowsInserted = %d, want 4", res.RowsInserted)
 	}
-	rows := selectRows(t, db, "SELECT record_type, name, value, zoom_level, tile_size FROM mbtiles_import")
+	rows := selectRows(t, db, "SELECT record_type, name, value, zoom_level, tile_size, tile_data_base64 FROM mbtiles_import")
 	got := rowStrings(rows)
 	if got[0][0] != "metadata" || got[0][1] != "name" || got[0][2] != "Test Tiles" {
 		t.Fatalf("unexpected metadata row: %#v", got[0])
 	}
-	if got[1][0] != "tile" || got[1][3] != "0" || got[1][4] != "4" {
+	if got[1][0] != "tile" || got[1][3] != "0" || got[1][4] != "4" || got[1][5] != "AQIDBA==" {
 		t.Fatalf("unexpected tile row: %#v", got[1])
+	}
+	if got[2][1] != "datadock:source_format" || got[2][2] != "mbtiles" || got[3][1] != "datadock:tile_scheme" || got[3][2] != "tms" {
+		t.Fatalf("missing DataDock tile metadata: %#v", got)
+	}
+}
+
+func TestImportPMTilesCreatesXYZTileLayer(t *testing.T) {
+	db := tinysql.NewDB()
+	data := createTestPMTiles()
+	res, err := ImportPMTiles(context.Background(), db, "default", "pmtiles_import", bytes.NewReader(data), &ImportOptions{
+		CreateTable:   true,
+		TypeInference: true,
+	})
+	if err != nil {
+		t.Fatalf("ImportPMTiles: %v", err)
+	}
+	if res.RowsInserted != 8 {
+		t.Fatalf("RowsInserted = %d, want 8", res.RowsInserted)
+	}
+	rows := selectRows(t, db, "SELECT zoom_level, tile_column, tile_row, tile_size, tile_data_base64 FROM pmtiles_import WHERE record_type = 'tile'")
+	got := rowStrings(rows)
+	if len(got) != 1 || got[0][0] != "0" || got[0][1] != "0" || got[0][2] != "0" || got[0][3] != "4" || got[0][4] != "AQIDBA==" {
+		t.Fatalf("unexpected PMTiles row: %#v", got)
+	}
+	meta := selectRows(t, db, "SELECT value FROM pmtiles_import WHERE record_type = 'metadata' AND name = 'datadock:source_format'")
+	if values := rowStrings(meta); len(values) != 1 || values[0][0] != "pmtiles" {
+		t.Fatalf("missing PMTiles source metadata: %#v", values)
 	}
 }
 
@@ -435,6 +462,26 @@ func createTestMBTiles(t *testing.T) string {
 		}
 	}
 	return path
+}
+
+func createTestPMTiles() []byte {
+	rootDirectory := []byte{1, 0, 1, 4, 1} // one z/x/y=0/0/0 tile at data offset 0
+	metadata := []byte(`{}`)
+	tile := []byte{1, 2, 3, 4}
+	header := make([]byte, pmtilesHeaderSize)
+	copy(header[:7], "PMTiles")
+	header[7] = 3
+	binary.LittleEndian.PutUint64(header[8:16], pmtilesHeaderSize)
+	binary.LittleEndian.PutUint64(header[16:24], uint64(len(rootDirectory)))
+	binary.LittleEndian.PutUint64(header[24:32], pmtilesHeaderSize+uint64(len(rootDirectory)))
+	binary.LittleEndian.PutUint64(header[32:40], uint64(len(metadata)))
+	binary.LittleEndian.PutUint64(header[40:48], pmtilesHeaderSize+uint64(len(rootDirectory)+len(metadata)))
+	binary.LittleEndian.PutUint64(header[56:64], pmtilesHeaderSize+uint64(len(rootDirectory)+len(metadata)))
+	binary.LittleEndian.PutUint64(header[64:72], uint64(len(tile)))
+	header[97] = 1 // internal compression: none
+	header[98] = 1 // tile compression: none
+	header[99] = 1 // tile type: MVT
+	return append(append(header, rootDirectory...), append(metadata, tile...)...)
 }
 
 func createTestSQLite(t *testing.T) string {

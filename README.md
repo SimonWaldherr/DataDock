@@ -20,7 +20,10 @@ database manager with administrator-managed or per-user credentials.
 | **Record CRUD** | Add, edit, and delete records from any table with an `id INT` column |
 | **Table Design** | Create new tables with a visual column designer (INT, FLOAT, TEXT, BOOL) |
 | **Broad File Import** | Import HTML tables, SQLite databases, MessagePack/CBOR/BSON, iCalendar, vCard, and file manifests for Parquet/Arrow/Feather/DuckDB |
-| **Map Data Import** | Import GeoJSON, GeoPackage, GPX, KML, OSM XML/PBF, Shapefile ZIPs, MBTiles indexes, and JSON/NDJSON routing graphs into queryable tables with GeoJSON geometry columns |
+| **Map Data Import** | Import GeoJSON, GeoPackage, GPX, KML, OSM XML/PBF, Shapefile ZIPs, MBTiles/PMTiles layers, and JSON/NDJSON routing graphs into queryable tables with GeoJSON geometry columns |
+| **Tile Layers** | Open imported MBTiles or PMTiles as local TileJSON-backed raster or vector layers; MBTiles TMS rows are normalized to XYZ at the API boundary |
+| **Routing Analysis** | Calculate directed or undirected shortest paths and reachable areas from imported RG graph nodes and edges, returning GeoJSON for maps or downstream use |
+| **Import Quality Reports** | Persist source name, format, SHA-256, source size, geometry validity, geometry types, and bounds for every local file/API import |
 | **Export** | Download whole tables/views or SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, NDJSON, XML, HTML, SQLite, GeoJSON, GeoJSON summaries, KML, GPX, or Shapefile ZIP |
 | **Drop Table** | Delete any table with a one-click confirmation |
 | **SQL Editor** | Monaco-enhanced SQL editor with SQL syntax highlighting and textarea fallback; selected text can be executed with Run, export, Ctrl+Enter, or F5 |
@@ -74,7 +77,7 @@ Supported import families:
   as file-level manifest rows. Full row-group/page decoding is intentionally not
   bundled yet.
 - **Map data:** GeoJSON, GeoPackage, GPX, KML, OSM XML, OSM PBF, Shapefile ZIP,
-  MBTiles metadata/tile indexes, and JSON/NDJSON routing graphs.
+  MBTiles, PMTiles v3, and JSON/NDJSON routing graphs.
 
 Exports are available from table/view pages, the Manage Tables export tab, and
 `POST /api/export`. Standard table exports include CSV, Excel-safe CSV, TSV,
@@ -89,11 +92,37 @@ geometry engine or optional mapshaper CLI integration. Shapefile exports are
 limited by the format to one geometry type per ZIP; DataDock writes the first
 compatible geometry family it finds.
 
-With tinySQL v0.16.x, map tables can also be queried directly with native geo
+MBTiles and PMTiles are retained as local, queryable tile tables and exposed as
+TileJSON at `GET /api/map/tiles/{table}/tilejson`, with individual XYZ tiles at
+`GET /api/map/tiles/{table}/{z}/{x}/{y}`. The table's **Map Layer** action opens
+a raster or vector map view. Vector layer metadata is read from archive metadata
+or inferred from the first MVT payload when necessary.
+
+Routing graph tables expose **Route**. `POST /api/routing/{table}/route`
+calculates a shortest path by `cost`, `distance`, or a numeric
+`properties.<field>` cost profile. `POST /api/routing/{table}/reachable` returns
+reachable nodes and a clearly labelled convex-hull area approximation as GeoJSON.
+Both endpoints accept node IDs or nearest-node longitude/latitude input.
+
+Every file/API import also stores an **Import Report**. It records the source
+name, original-upload SHA-256, source size and format, normalized table row
+count, geometry columns/types, valid/missing/invalid geometry counts, and WGS84
+bounds. `GET /api/spatial-reports/{table}` returns the same report as JSON.
+
+With tinySQL v0.18.x, map tables can also be queried directly with native geo
 functions. `GEO_POINT`/`ST_MAKEPOINT` creates GeoJSON points, `ST_X`/`ST_Y`
 extract longitude/latitude, `GEO_DISTANCE`/`ST_DISTANCE` computes haversine
 distance in meters, and `GEO_WITHIN_BBOX` / `GEO_DWITHIN` cover common spatial
 filters.
+
+tinySQL v0.18.x also persists `CREATE INDEX` metadata. DataDock can execute
+`CREATE INDEX` / `DROP INDEX` in the SQL editor and inspect the catalog through
+`sys.indexes`; tinySQL still treats indexes as metadata rather than a
+planner-backed access path.
+
+Other v0.18.x engine improvements, including persisted trigger `WHEN` clauses
+and faster raw function predicates for geo/vector/RAG/date filters, are inherited
+automatically by the embedded tinySQL connection.
 
 ## Quick Start
 
@@ -265,13 +294,22 @@ datadock uses stable web and data interchange standards for external integration
 - HTML, SQLite, MessagePack, CBOR, BSON, iCalendar, and vCard imports normalize common non-geospatial files into queryable tables.
 - Parquet, Arrow, Feather, and DuckDB imports currently create file-level manifest rows rather than fully decoding row groups/pages.
 - GeoJSON exports use RFC 7946 FeatureCollection output where geometry or lat/lon columns are present.
-- Map data imports normalize GeoJSON/GeoPackage/GPX/KML/OSM/Shapefile geometries into GeoJSON text columns; MBTiles imports metadata and tile indexes; RG imports JSON/NDJSON routing graph nodes and edges.
-- DataDock tracks tinySQL v0.16.x and exposes its read-only PRAGMA support,
+- Map data imports normalize GeoJSON/GeoPackage/GPX/KML/OSM/Shapefile geometries into GeoJSON text columns; MBTiles and PMTiles v3 persist tile metadata plus payloads for local TileJSON serving; RG imports JSON/NDJSON routing graph nodes and edges.
+- Imported tile tables expose TileJSON at `/api/map/tiles/{table}/tilejson` and XYZ tile payloads at `/api/map/tiles/{table}/{z}/{x}/{y}`; MBTiles TMS rows are translated at the API boundary.
+- Routing requests use `/api/routing/{table}/route` for shortest paths and `/api/routing/{table}/reachable` for cost-bounded reachability GeoJSON. Reachable-area polygons use a convex-hull approximation and declare that method in their feature properties.
+- Each file/API import persists a source SHA-256 and spatial quality report, available in the table's **Import Report** action and from `/api/spatial-reports/{table}`.
+- DataDock tracks tinySQL v0.18.x and exposes its read-only PRAGMA support,
   result-producing stored procedure calls in the SQL editor, and native agent
   context generation for the local tinySQL connection.
 - tinySQL geo functions such as `ST_MAKEPOINT`, `ST_X`, `ST_Y`,
   `ST_DISTANCE`, `GEO_DWITHIN`, and `GEO_WITHIN_BBOX` work in the SQL editor
   against imported map tables.
+- tinySQL index catalog metadata from `CREATE INDEX` is visible through
+  `sys.indexes`, including index name, table, columns, uniqueness, and creation
+  time.
+- tinySQL v0.18.x engine updates for persisted trigger `WHEN` clauses and
+  optimized raw geo/vector/RAG/date predicate execution are available through the
+  embedded local engine.
 - tinySQL-facing error classes can use ISO/IEC 9075 SQLSTATE helpers exposed by
   the public tinySQL API.
 
@@ -508,6 +546,9 @@ cmd/datadock/
 |---|---|---|
 | `GET` | `/` | Redirect to first table, or empty-state |
 | `GET` | `/t/{table}` | Datasheet view (query params: `page`, `sort`, `dir`) |
+| `GET` | `/t/{table}/map` | Render a local MBTiles/PMTiles layer |
+| `GET` | `/t/{table}/route` | Route and reachability workspace for an RG table |
+| `GET` | `/t/{table}/quality` | Persisted import provenance and spatial quality report |
 | `GET` | `/t/{table}/export?format=csv\|csv-excel\|tsv\|xlsx\|json\|xml\|html\|sqlite\|geojson\|geojson-summary\|kml\|gpx\|shp` | Download a full table/view export |
 | `GET` | `/t/{table}/new` | New record form |
 | `POST` | `/t/{table}/new` | Create record |
@@ -522,6 +563,11 @@ cmd/datadock/
 | `GET` | `/api/tinysql/agent-context?max_tables=12&max_chars=6000` | Return tinySQL's native agent-context profile for the local tinySQL connection |
 | `GET` | `/api/catalog` | Return async catalog roots for non-tinySQL connections |
 | `GET` | `/api/catalog/expand` | Expand an async catalog node |
+| `GET` | `/api/map/tiles/{table}/tilejson` | Local TileJSON metadata for an imported MBTiles/PMTiles layer |
+| `GET` | `/api/map/tiles/{table}/{z}/{x}/{y}` | XYZ tile payload; supports MBTiles TMS conversion transparently |
+| `POST` | `/api/routing/{table}/route` | Shortest path as GeoJSON (`from_id`/`to_id` or coordinates, optional cost profile) |
+| `POST` | `/api/routing/{table}/reachable` | Cost-bounded reachable nodes and convex-hull GeoJSON area |
+| `GET` | `/api/spatial-reports/{table}` | Provenance and normalized spatial data-quality report |
 | `GET` | `/api/llm/health` | Test server-side connectivity to the configured LLM provider (Admin session) |
 | `GET` | `/connections` | Connection manager |
 | `POST` | `/connections` | Add a session-private managed connection |

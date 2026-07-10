@@ -1,0 +1,30 @@
+{{define "map_layer"}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" .Table "ActiveConnection" .ActiveConnection "DefaultTheme" .DefaultTheme "DefaultDensity" .DefaultDensity "MaintenanceMode" .MaintenanceMode)}}
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+
+<div class="page-hdr">
+  <h1><i class="bi bi-layers text-primary"></i>{{.Table}}</h1>
+  <div class="toolbar">
+    <a href="/t/{{.Table}}" class="btn btn-sm btn-outline-secondary"><i class="bi bi-table me-1"></i>Table</a>
+    <a href="{{.TileJSONURL}}" class="btn btn-sm btn-outline-secondary"><i class="bi bi-braces me-1"></i>TileJSON</a>
+  </div>
+</div>
+
+<div class="map-layer-layout">
+  <div id="tileLayerMap" class="tile-layer-map" data-tilejson-url="{{.TileJSONURL}}"></div>
+  <aside class="map-layer-meta" aria-label="Layer metadata">
+    <dl>
+      <dt>Archive</dt><dd>{{.Layer.SourceFormat}}</dd>
+      <dt>Format</dt><dd>{{.Layer.Format}}</dd>
+      <dt>Zoom</dt><dd>{{.Layer.MinZoom}}–{{.Layer.MaxZoom}}</dd>
+      <dt>Vector layers</dt><dd>{{len .Layer.VectorLayers}}</dd>
+    </dl>
+  </aside>
+</div>
+
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() { initTileLayerMap('tileLayerMap'); });
+</script>
+{{template "base_end" .}}
+{{end}}

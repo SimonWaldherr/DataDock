@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1344,6 +1346,167 @@ func TestAPIImportHandlerCSV(t *testing.T) {
 	}
 }
 
+func TestMapTileEndpointsServeTileJSONAndPayload(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE city_tiles (record_type TEXT, name TEXT, value TEXT, zoom_level INT, tile_column INT, tile_row INT, tile_size INT, tile_sha256 TEXT, tile_data_base64 TEXT)"); err != nil {
+		t.Fatalf("create tile table: %v", err)
+	}
+	for _, pair := range [][2]string{
+		{"datadock:source_format", "mbtiles"},
+		{"datadock:tile_scheme", "tms"},
+		{"format", "pbf"},
+		{"minzoom", "0"},
+		{"maxzoom", "0"},
+		{"bounds", "13,52,13.1,52.1"},
+	} {
+		if _, err := app.sqlDB.Exec("INSERT INTO city_tiles (record_type, name, value) VALUES (?, ?, ?)", "metadata", pair[0], pair[1]); err != nil {
+			t.Fatalf("insert metadata %q: %v", pair[0], err)
+		}
+	}
+	payload := []byte{0x1a, 0x07, 0x0a, 0x05, 'r', 'o', 'a', 'd', 's'}
+	if _, err := app.sqlDB.Exec("INSERT INTO city_tiles (record_type, zoom_level, tile_column, tile_row, tile_size, tile_data_base64) VALUES (?, ?, ?, ?, ?, ?)", "tile", 0, 0, 0, len(payload), base64.StdEncoding.EncodeToString(payload)); err != nil {
+		t.Fatalf("insert tile: %v", err)
+	}
+	tmsPayload := []byte{5, 6, 7}
+	if _, err := app.sqlDB.Exec("INSERT INTO city_tiles (record_type, zoom_level, tile_column, tile_row, tile_size, tile_data_base64) VALUES (?, ?, ?, ?, ?, ?)", "tile", 1, 0, 1, len(tmsPayload), base64.StdEncoding.EncodeToString(tmsPayload)); err != nil {
+		t.Fatalf("insert TMS tile: %v", err)
+	}
+
+	tileJSONReq := httptest.NewRequest(http.MethodGet, "/api/map/tiles/city_tiles/tilejson", nil)
+	tileJSONReq.SetPathValue("table", "city_tiles")
+	tileJSONRec := httptest.NewRecorder()
+	app.apiMapTileJSONHandler(tileJSONRec, tileJSONReq)
+	if tileJSONRec.Code != http.StatusOK {
+		t.Fatalf("tilejson code = %d; body: %s", tileJSONRec.Code, tileJSONRec.Body.String())
+	}
+	var tileJSON map[string]any
+	if err := json.Unmarshal(tileJSONRec.Body.Bytes(), &tileJSON); err != nil {
+		t.Fatalf("decode tilejson: %v", err)
+	}
+	if tileJSON["scheme"] != "xyz" || tileJSON["format"] != "pbf" {
+		t.Fatalf("unexpected TileJSON: %#v", tileJSON)
+	}
+	if layers, ok := tileJSON["vector_layers"].([]any); !ok || len(layers) != 1 || layers[0].(map[string]any)["id"] != "roads" {
+		t.Fatalf("expected vector layers in TileJSON: %#v", tileJSON)
+	}
+
+	tileReq := httptest.NewRequest(http.MethodGet, "/api/map/tiles/city_tiles/0/0/0", nil)
+	tileReq.SetPathValue("table", "city_tiles")
+	tileReq.SetPathValue("z", "0")
+	tileReq.SetPathValue("x", "0")
+	tileReq.SetPathValue("y", "0")
+	tileRec := httptest.NewRecorder()
+	app.apiMapTileHandler(tileRec, tileReq)
+	if tileRec.Code != http.StatusOK || !bytes.Equal(tileRec.Body.Bytes(), payload) {
+		t.Fatalf("tile response = %d %x", tileRec.Code, tileRec.Body.Bytes())
+	}
+	if got := tileRec.Header().Get("Content-Type"); got != "application/vnd.mapbox-vector-tile" {
+		t.Fatalf("tile Content-Type = %q", got)
+	}
+
+	tmsReq := httptest.NewRequest(http.MethodGet, "/api/map/tiles/city_tiles/1/0/0", nil)
+	tmsReq.SetPathValue("table", "city_tiles")
+	tmsReq.SetPathValue("z", "1")
+	tmsReq.SetPathValue("x", "0")
+	tmsReq.SetPathValue("y", "0")
+	tmsRec := httptest.NewRecorder()
+	app.apiMapTileHandler(tmsRec, tmsReq)
+	if tmsRec.Code != http.StatusOK || !bytes.Equal(tmsRec.Body.Bytes(), tmsPayload) {
+		t.Fatalf("TMS-to-XYZ response = %d %x", tmsRec.Code, tmsRec.Body.Bytes())
+	}
+}
+
+func TestRoutingAPISelectsShortestPathAndReachableNodes(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE route_graph (record_type TEXT, id TEXT, from_id TEXT, to_id TEXT, lat TEXT, lon TEXT, cost TEXT, distance TEXT, geometry TEXT, geometry_type TEXT, properties TEXT)"); err != nil {
+		t.Fatalf("create route graph: %v", err)
+	}
+	statements := []string{
+		`INSERT INTO route_graph (record_type, id, lat, lon, properties) VALUES ('node', 'a', '52', '13', '{}')`,
+		`INSERT INTO route_graph (record_type, id, lat, lon, properties) VALUES ('node', 'b', '52', '13.01', '{}')`,
+		`INSERT INTO route_graph (record_type, id, lat, lon, properties) VALUES ('node', 'c', '52.01', '13', '{}')`,
+		`INSERT INTO route_graph (record_type, id, from_id, to_id, cost, distance, geometry, properties) VALUES ('edge', 'ab', 'a', 'b', '1', '100', '{"type":"LineString","coordinates":[[13,52],[13.01,52]]}', '{}')`,
+		`INSERT INTO route_graph (record_type, id, from_id, to_id, cost, distance, geometry, properties) VALUES ('edge', 'bc', 'b', 'c', '1', '100', '{"type":"LineString","coordinates":[[13.01,52],[13,52.01]]}', '{}')`,
+		`INSERT INTO route_graph (record_type, id, from_id, to_id, cost, distance, geometry, properties) VALUES ('edge', 'ac', 'a', 'c', '5', '300', '{"type":"LineString","coordinates":[[13,52],[13,52.01]]}', '{}')`,
+	}
+	for _, statement := range statements {
+		if _, err := app.sqlDB.Exec(statement); err != nil {
+			t.Fatalf("seed graph: %v", err)
+		}
+	}
+
+	routeReq := httptest.NewRequest(http.MethodPost, "/api/routing/route_graph/route", strings.NewReader(`{"from_id":"a","to_id":"c","cost_field":"cost"}`))
+	routeReq.SetPathValue("table", "route_graph")
+	routeRec := httptest.NewRecorder()
+	app.apiRouteHandler(routeRec, routeReq)
+	if routeRec.Code != http.StatusOK {
+		t.Fatalf("route code = %d; body: %s", routeRec.Code, routeRec.Body.String())
+	}
+	var route map[string]any
+	if err := json.Unmarshal(routeRec.Body.Bytes(), &route); err != nil {
+		t.Fatalf("decode route: %v", err)
+	}
+	if route["cost"] != float64(2) || route["edge_count"] != float64(2) {
+		t.Fatalf("unexpected route: %#v", route)
+	}
+	if nodes, ok := route["node_ids"].([]any); !ok || len(nodes) != 3 || nodes[1] != "b" {
+		t.Fatalf("unexpected route nodes: %#v", route["node_ids"])
+	}
+
+	reachableReq := httptest.NewRequest(http.MethodPost, "/api/routing/route_graph/reachable", strings.NewReader(`{"from_id":"a","cost_field":"cost","max_cost":2}`))
+	reachableReq.SetPathValue("table", "route_graph")
+	reachableRec := httptest.NewRecorder()
+	app.apiReachableHandler(reachableRec, reachableReq)
+	if reachableRec.Code != http.StatusOK {
+		t.Fatalf("reachable code = %d; body: %s", reachableRec.Code, reachableRec.Body.String())
+	}
+	var reachable map[string]any
+	if err := json.Unmarshal(reachableRec.Body.Bytes(), &reachable); err != nil {
+		t.Fatalf("decode reachable: %v", err)
+	}
+	if reachable["reachable_nodes"] != float64(3) {
+		t.Fatalf("unexpected reachable response: %#v", reachable)
+	}
+}
+
+func TestRoutingCostFieldPreservesCustomPropertyCase(t *testing.T) {
+	if got := routingCostFieldName("properties.TravelTime"); got != "properties.TravelTime" {
+		t.Fatalf("cost field = %q, want properties.TravelTime", got)
+	}
+	if got := routingCostFieldName("TravelTime"); got != "properties.TravelTime" {
+		t.Fatalf("implicit property field = %q, want properties.TravelTime", got)
+	}
+}
+
+func TestSpatialImportReportCapturesQualityAndProvenance(t *testing.T) {
+	app := newTestApp(t)
+	content := `{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[13,52]},"properties":{"name":"valid"}},{"type":"Feature","geometry":{"type":"Point","coordinates":[230,95]},"properties":{"name":"invalid"}}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/import", strings.NewReader(`{"table":"quality_places","format":"geojson","content":`+strconv.Quote(content)+`}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	app.apiImportHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("import code = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Report SpatialImportReport `json:"spatial_report"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode import response: %v", err)
+	}
+	if response.Report.Status != "warning" || response.Report.ValidGeometryRows != 1 || response.Report.InvalidGeometryRows != 1 || response.Report.SourceFormat != "geojson" || response.Report.SourceSHA256 == "" {
+		t.Fatalf("unexpected report: %#v", response.Report)
+	}
+
+	reportReq := httptest.NewRequest(http.MethodGet, "/api/spatial-reports/quality_places", nil)
+	reportReq.SetPathValue("table", "quality_places")
+	reportRec := httptest.NewRecorder()
+	app.apiSpatialReportHandler(reportRec, reportReq)
+	if reportRec.Code != http.StatusOK || !strings.Contains(reportRec.Body.String(), `"invalid_geometry_rows":1`) {
+		t.Fatalf("stored report = %d %s", reportRec.Code, reportRec.Body.String())
+	}
+}
+
 func TestAPIJobsCreateAndRun(t *testing.T) {
 	app := newTestApp(t)
 	if _, err := app.sqlDB.Exec("CREATE TABLE vals (id INT, v INT)"); err != nil {
@@ -1472,6 +1635,48 @@ func TestTinySQLPragmaAndAgentContext(t *testing.T) {
 	}
 	if !strings.Contains(ctxRec.Body.String(), "vals") || !strings.Contains(ctxRec.Body.String(), `"max_tables":4`) {
 		t.Fatalf("unexpected agent context response: %s", ctxRec.Body.String())
+	}
+}
+
+func TestTinySQLV018IndexCatalog(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE indexed_people (id INT, name TEXT)"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := app.sqlDB.Exec("CREATE INDEX idx_indexed_people_name ON indexed_people(name)"); err != nil {
+		t.Fatalf("create index: %v", err)
+	}
+
+	body := strings.NewReader(`{"sql":"SELECT name, table_name, columns, is_unique FROM sys.indexes WHERE name = 'idx_indexed_people_name'"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/query", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	app.apiQueryHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected index catalog query 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Rows [][]string `json:"rows"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode index catalog response: %v\n%s", err, rec.Body.String())
+	}
+	if len(got.Rows) != 1 {
+		t.Fatalf("expected one index catalog row, got %#v", got.Rows)
+	}
+	if got.Rows[0][0] != "idx_indexed_people_name" || got.Rows[0][1] != "indexed_people" || got.Rows[0][2] != "name" || got.Rows[0][3] != "false" {
+		t.Fatalf("unexpected index catalog row: %#v", got.Rows[0])
+	}
+
+	if _, err := app.sqlDB.Exec("DROP INDEX idx_indexed_people_name"); err != nil {
+		t.Fatalf("drop index: %v", err)
+	}
+	_, rows, err := app.queryRows(context.Background(), "SELECT name FROM sys.indexes WHERE name = 'idx_indexed_people_name'")
+	if err != nil {
+		t.Fatalf("query dropped index: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("expected dropped index to disappear from sys.indexes, got %#v", rows)
 	}
 }
 

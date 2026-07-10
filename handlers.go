@@ -72,6 +72,9 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 
 	// Table datasheet view.
 	handle("GET /t/{table}", a.tableViewHandler)
+	handle("GET /t/{table}/map", a.mapLayerViewHandler)
+	handle("GET /t/{table}/route", a.routingViewHandler)
+	handle("GET /t/{table}/quality", a.spatialQualityViewHandler)
 	handle("GET /t/{table}/export", a.exportTableHandler)
 	handle("GET /api/tables/{table}/script", a.apiTableScriptHandler)
 
@@ -172,6 +175,11 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /api/jobs", a.requireAdmin(a.requireWritable(a.apiJobsHandler)))
 	handle("POST /api/jobs/run", a.requireAdmin(a.requireWritable(a.apiRunJobHandler)))
 	handle("POST /api/import", a.requireWritable(a.apiImportHandler))
+	handle("GET /api/map/tiles/{table}/tilejson", a.apiMapTileJSONHandler)
+	handle("GET /api/map/tiles/{table}/{z}/{x}/{y}", a.apiMapTileHandler)
+	handle("POST /api/routing/{table}/route", a.apiRouteHandler)
+	handle("POST /api/routing/{table}/reachable", a.apiReachableHandler)
+	handle("GET /api/spatial-reports/{table}", a.apiSpatialReportHandler)
 	handle("POST /api/llm", a.apiLLMHandler)
 	handle("POST /api/llm/preview", a.apiLLMPreviewHandler)
 	handle("GET /api/llm/discover", a.requireAdmin(a.apiLLMDiscoverHandler))
@@ -707,15 +715,18 @@ func (a *App) tableViewHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.render(w, r, "table_view", map[string]interface{}{
-		"Table":      meta.Name, // DB-sourced canonical name
-		"Meta":       meta,
-		"Cols":       cols,
-		"Rows":       rows,
-		"Page":       page,
-		"TotalPages": totalPages,
-		"Sort":       sort,
-		"SortDir":    sortDir,
-		"PageSize":   pageSize,
+		"Table":         meta.Name, // DB-sourced canonical name
+		"Meta":          meta,
+		"MapLayer":      a.isMapTileTable(r.Context(), meta.Name),
+		"RoutingGraph":  a.isRoutingGraphTable(r.Context(), meta.Name),
+		"SpatialReport": a.hasSpatialImportReport(r.Context(), meta.Name),
+		"Cols":          cols,
+		"Rows":          rows,
+		"Page":          page,
+		"TotalPages":    totalPages,
+		"Sort":          sort,
+		"SortDir":       sortDir,
+		"PageSize":      pageSize,
 	})
 }
 
@@ -2178,6 +2189,10 @@ func (a *App) importFileHandler(w http.ResponseWriter, r *http.Request) {
 		"Success":   fmt.Sprintf("Imported %d rows into %s.", res.RowsInserted, table),
 		"Table":     table,
 		"Result":    res,
+		"SpatialReport": func() *SpatialImportReport {
+			report, _ := a.loadSpatialImportReport(ctx, table)
+			return report
+		}(),
 	})
 }
 
@@ -2199,12 +2214,14 @@ func (a *App) importUploadedFile(ctx context.Context, file multipart.File, filen
 	}
 	table = sanitizeIdentifier(table)
 
-	format := importFormatFromName(filename, formatOverride)
+	sourceFormat := importFormatFromName(filename, formatOverride)
+	format := sourceFormat
 	limit := importUploadLimit(format)
 	content, err := readLimitedImport(file, limit)
 	if err != nil {
 		return table, nil, fmt.Errorf("could not read upload: %w", err)
 	}
+	originalContent := content
 	if format == "xlsx" {
 		content, err = xlsxToCSV(content)
 		if err != nil {
@@ -2228,6 +2245,9 @@ func (a *App) importUploadedFile(ctx context.Context, file multipart.File, filen
 	if err != nil {
 		return table, nil, fmt.Errorf("import failed: %w", err)
 	}
+	if _, err := a.recordSpatialImportReport(ctx, table, filename, sourceFormat, originalContent); err != nil {
+		res.Errors = append(res.Errors, "spatial report: "+err.Error())
+	}
 	return table, res, nil
 }
 
@@ -2238,7 +2258,7 @@ const (
 
 func importUploadLimit(format string) int64 {
 	switch strings.ToLower(strings.TrimSpace(format)) {
-	case "geojson", "gpkg", "geopackage", "gpx", "kml", "osm", "pbf", "osmpbf", "osm-pbf", "shp", "shapefile", "shpzip", "mbtiles", "rg", "routing-graph", "routing_graph", "sqlite", "sqlite3", "db", "duckdb", "parquet", "arrow", "feather":
+	case "geojson", "gpkg", "geopackage", "gpx", "kml", "osm", "pbf", "osmpbf", "osm-pbf", "shp", "shapefile", "shpzip", "mbtiles", "pmtiles", "rg", "routing-graph", "routing_graph", "sqlite", "sqlite3", "db", "duckdb", "parquet", "arrow", "feather":
 		return maxMapImportUploadBytes
 	default:
 		return maxImportUploadBytes
@@ -2717,6 +2737,9 @@ func (a *App) dropTableHandler(w http.ResponseWriter, r *http.Request) {
 	if _, err := a.execConn(ctx, conn, "table.drop", dropTableQuery(conn, meta.Name)); err != nil {
 		a.serverError(w, err)
 		return
+	}
+	if conn.IsTinySQL() {
+		_ = a.deleteSpatialImportReport(ctx, meta.Name)
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -3360,6 +3383,7 @@ func (a *App) apiImportHandler(w http.ResponseWriter, r *http.Request) {
 	if format == "" {
 		format = "csv"
 	}
+	sourceFormat := format
 	if format == "tsv" {
 		opts.DelimiterCandidates = []rune{'\t'}
 		format = "csv"
@@ -3393,16 +3417,21 @@ func (a *App) apiImportHandler(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, r, http.StatusBadRequest, "Import failed", err.Error())
 		return
 	}
+	report, reportErr := a.recordSpatialImportReport(ctx, table, "api://inline", sourceFormat, []byte(body.Content))
+	if reportErr != nil {
+		res.Errors = append(res.Errors, "spatial report: "+reportErr.Error())
+	}
 	a.writeJSON(w, http.StatusOK, map[string]any{
-		"table":         table,
-		"rows_inserted": res.RowsInserted,
-		"rows_skipped":  res.RowsSkipped,
-		"delimiter":     string(res.Delimiter),
-		"had_header":    res.HadHeader,
-		"encoding":      res.Encoding,
-		"line_ending":   res.LineEnding,
-		"columns":       res.ColumnNames,
-		"errors":        res.Errors,
+		"table":          table,
+		"rows_inserted":  res.RowsInserted,
+		"rows_skipped":   res.RowsSkipped,
+		"delimiter":      string(res.Delimiter),
+		"had_header":     res.HadHeader,
+		"encoding":       res.Encoding,
+		"line_ending":    res.LineEnding,
+		"columns":        res.ColumnNames,
+		"errors":         res.Errors,
+		"spatial_report": report,
 	})
 }
 
@@ -3514,6 +3543,8 @@ func importContent(ctx context.Context, db *tinysql.DB, tenant, table, format st
 		return dbimporter.ImportShapefileZip(ctx, db, tenant, table, src, opts)
 	case "mbtiles":
 		return dbimporter.ImportMBTiles(ctx, db, tenant, table, src, opts)
+	case "pmtiles":
+		return dbimporter.ImportPMTiles(ctx, db, tenant, table, src, opts)
 	case "rg", "routing-graph", "routing_graph":
 		return dbimporter.ImportRoutingGraph(ctx, db, tenant, table, src, opts)
 	case "geojson":
@@ -3564,7 +3595,7 @@ func importFormatFromName(filename, selected string) string {
 	}
 	if i := strings.LastIndex(name, "."); i >= 0 {
 		switch name[i+1:] {
-		case "csv", "tsv", "json", "ndjson", "xlsx", "xml", "yaml", "yml", "geojson", "gpkg", "gpx", "kml", "osm", "pbf", "mbtiles", "rg", "sqlite", "sqlite3", "db", "duckdb", "parquet", "arrow", "feather", "html", "htm", "msgpack", "mpack", "msg", "cbor", "bson", "ics", "ical", "vcf", "vcard":
+		case "csv", "tsv", "json", "ndjson", "xlsx", "xml", "yaml", "yml", "geojson", "gpkg", "gpx", "kml", "osm", "pbf", "mbtiles", "pmtiles", "rg", "sqlite", "sqlite3", "db", "duckdb", "parquet", "arrow", "feather", "html", "htm", "msgpack", "mpack", "msg", "cbor", "bson", "ics", "ical", "vcf", "vcard":
 			return name[i+1:]
 		case "zip", "shp":
 			return "shp"

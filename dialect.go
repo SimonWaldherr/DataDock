@@ -115,7 +115,8 @@ func tinySQLDialectProfile() DialectProfile {
 		Notes: []string{
 			"Use tinySQL's SQLite-like subset.",
 			"Prefer straightforward SELECT, JOIN, WHERE, GROUP BY, ORDER BY, LIMIT syntax.",
-			"tinySQL supports common SQLite-compatible PRAGMAs, system catalog views, materialized views, triggers, geo/vector/FTS functions, and process-local stored procedures.",
+			"tinySQL supports common SQLite-compatible PRAGMAs, system catalog views including sys.indexes, materialized views, triggers, geo/vector/FTS functions, and process-local stored procedures.",
+			"CREATE INDEX and DROP INDEX maintain metadata visible in sys.indexes; do not assume planner-backed index acceleration.",
 			"Avoid vendor-specific PostgreSQL, MySQL, or SQL Server functions unless explicitly supported by the schema/database.",
 		},
 		BlockedAutoWords: tinySQLBlockedAutoWords(),

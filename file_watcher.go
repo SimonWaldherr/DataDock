@@ -76,7 +76,7 @@ func scanAutoImportDir(ctx context.Context, app *App, dir string, seen map[strin
 
 func isAutoImportFile(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".csv", ".tsv", ".json", ".ndjson", ".xml", ".yaml", ".yml", ".xlsx", ".geojson", ".gpkg", ".gpx", ".kml", ".osm", ".pbf", ".mbtiles", ".rg", ".zip", ".shp", ".sqlite", ".sqlite3", ".db", ".duckdb", ".parquet", ".arrow", ".feather", ".html", ".htm", ".msgpack", ".mpack", ".msg", ".cbor", ".bson", ".ics", ".ical", ".vcf", ".vcard":
+	case ".csv", ".tsv", ".json", ".ndjson", ".xml", ".yaml", ".yml", ".xlsx", ".geojson", ".gpkg", ".gpx", ".kml", ".osm", ".pbf", ".mbtiles", ".pmtiles", ".rg", ".zip", ".shp", ".sqlite", ".sqlite3", ".db", ".duckdb", ".parquet", ".arrow", ".feather", ".html", ".htm", ".msgpack", ".mpack", ".msg", ".cbor", ".bson", ".ics", ".ical", ".vcf", ".vcard":
 		return true
 	default:
 		return false

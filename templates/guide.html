@@ -49,12 +49,20 @@
         <tr><td>GeoJSON / GeoPackage / GPX / KML / OSM</td><td>Imports features with GeoJSON geometry text, geometry type, and useful tags/properties.</td></tr>
         <tr><td>OSM PBF</td><td>Imports tagged nodes and ways from compact binary OSM extracts, building LineString/Polygon geometry from node references where possible.</td></tr>
         <tr><td>Shapefile ZIP</td><td>Reads the first .shp in a ZIP, converting shapes to GeoJSON geometry and DBF attributes to columns.</td></tr>
-        <tr><td>MBTiles</td><td>Imports metadata plus a tile index with size, SHA-256, and base64 tile data for small tiles.</td></tr>
-        <tr><td>RG</td><td>Imports JSON/NDJSON routing graphs as node and edge rows with geometry where present.</td></tr>
+        <tr><td>MBTiles / PMTiles</td><td>Persists archive metadata and tile payloads as a local TileJSON layer; vector layer names come from metadata or the first MVT tile.</td></tr>
+        <tr><td>RG</td><td>Imports JSON/NDJSON routing graphs as node and edge rows with geometry; use the Route action for shortest paths and cost-bounded reachability.</td></tr>
         <tr><td>XLSX</td><td>Reads the first worksheet and imports it through the CSV path.</td></tr>
         <tr><td>Demo Data</td><td>Creates related departments, people, projects, events, invoices, and support tickets.</td></tr>
       </tbody>
     </table>
+  </div>
+</div>
+
+<div class="card mt-3">
+  <div class="card-body">
+    <h2 class="h6">Map Workflows</h2>
+    <p class="small mb-2">Open an imported MBTiles or PMTiles table and choose <strong>Map Layer</strong> to view its local TileJSON layer. Open an RG table and choose <strong>Route</strong> to calculate a path by edge <code>cost</code>, <code>distance</code>, or a numeric value from <code>properties</code>.</p>
+    <p class="small mb-0">Every local import has an <strong>Import Report</strong> with source SHA-256, geometry counts, validity checks, and bounds. The JSON form is available at <code>/api/spatial-reports/{table}</code>.</p>
   </div>
 </div>
 
@@ -88,6 +96,10 @@ SELECT source, external_id, imported_at, payload_json, payload_xml
 FROM datadock_demo_payloads
 ORDER BY imported_at;
 PRAGMA table_info(datadock_demo_people);
+CREATE INDEX IF NOT EXISTS idx_demo_locations_category ON datadock_demo_locations(category);
+SELECT name, table_name, columns, is_unique
+FROM sys.indexes
+ORDER BY table_name, name;
 CALL datadock_agent_context(12, 6000);</pre>
   </div>
 </div>

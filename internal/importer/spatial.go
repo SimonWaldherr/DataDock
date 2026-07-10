@@ -1000,6 +1000,7 @@ func ImportMBTiles(ctx context.Context, db *tinysql.DB, tenant, tableName string
 		return nil, fmt.Errorf("read mbtiles tiles: %w", err)
 	}
 	defer rows.Close()
+	tileCompression := ""
 	for rows.Next() {
 		var z, x, y int
 		var tile []byte
@@ -1007,10 +1008,13 @@ func ImportMBTiles(ctx context.Context, db *tinysql.DB, tenant, tableName string
 			return nil, err
 		}
 		hash := sha256.Sum256(tile)
-		tileData := ""
-		if len(tile) <= 4096 {
-			tileData = base64.StdEncoding.EncodeToString(tile)
+		if tileCompression == "" && len(tile) >= 2 && tile[0] == 0x1f && tile[1] == 0x8b {
+			tileCompression = "gzip"
 		}
+		// Keep the payload with its index row. DataDock serves imported archives
+		// through its local TileJSON endpoint, so retaining only small payloads
+		// would turn larger, otherwise valid archives into unusable map layers.
+		tileData := base64.StdEncoding.EncodeToString(tile)
 		records = append(records, []string{
 			"tile", "", "", strconv.Itoa(z), strconv.Itoa(x), strconv.Itoa(y),
 			strconv.Itoa(len(tile)), fmt.Sprintf("%x", hash[:]), tileData,
@@ -1021,6 +1025,11 @@ func ImportMBTiles(ctx context.Context, db *tinysql.DB, tenant, tableName string
 	}
 	if len(records) == 1 {
 		return nil, fmt.Errorf("mbtiles contains no metadata or tiles")
+	}
+	records = append(records, []string{"metadata", "datadock:source_format", "mbtiles", "", "", "", "", "", ""})
+	records = append(records, []string{"metadata", "datadock:tile_scheme", "tms", "", "", "", "", "", ""})
+	if tileCompression != "" {
+		records = append(records, []string{"metadata", "datadock:tile_compression", tileCompression, "", "", "", "", "", ""})
 	}
 	return importSpatialRecords(ctx, db, tenant, tableName, records, opts)
 }

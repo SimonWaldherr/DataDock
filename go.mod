@@ -3,13 +3,15 @@ module github.com/SimonWaldherr/datadock
 go 1.25.12
 
 require (
-	github.com/SimonWaldherr/tinySQL v0.16.0
+	github.com/SimonWaldherr/tinySQL v0.18.0
+	github.com/andybalholm/brotli v1.2.2
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jonas-p/go-shp v0.1.1
+	github.com/klauspost/compress v1.19.0
 	github.com/lib/pq v1.12.3
 	github.com/microsoft/go-mssqldb v1.10.0
 	github.com/robfig/cron/v3 v3.0.1
-	golang.org/x/crypto v0.53.0
+	golang.org/x/crypto v0.54.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.53.0
 )

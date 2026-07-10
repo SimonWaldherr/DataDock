@@ -44,6 +44,21 @@
     <a href="/t/{{$table}}/export?format=shp" class="btn btn-sm btn-outline-secondary">
       <i class="bi bi-map me-1"></i>SHP ZIP
     </a>
+	{{if .MapLayer}}
+    <a href="/t/{{$table}}/map" class="btn btn-sm btn-outline-primary">
+      <i class="bi bi-layers me-1"></i>Map Layer
+    </a>
+	{{end}}
+	{{if .RoutingGraph}}
+    <a href="/t/{{$table}}/route" class="btn btn-sm btn-outline-primary">
+      <i class="bi bi-signpost-2 me-1"></i>Route
+    </a>
+	{{end}}
+	{{if .SpatialReport}}
+    <a href="/t/{{$table}}/quality" class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-clipboard2-check me-1"></i>Import Report
+    </a>
+	{{end}}
     <a href="/t/{{$table}}/export?format=xlsx" class="btn btn-sm btn-outline-secondary">
       <i class="bi bi-file-earmark-spreadsheet me-1"></i>XLSX
     </a>
