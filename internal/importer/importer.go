@@ -394,11 +394,7 @@ func sanitizeIdentifier(s, fallback string) string {
 }
 
 func exec(ctx context.Context, db *tinysql.DB, tenant, sqlText string) (*tinysql.ResultSet, error) {
-	stmt, err := tinysql.ParseSQL(sqlText)
-	if err != nil {
-		return nil, err
-	}
-	return tinysql.Execute(ctx, db, tenant, stmt)
+	return tinysql.ExecSQL(ctx, db, tenant, sqlText)
 }
 
 func quoteIdent(s string) string {

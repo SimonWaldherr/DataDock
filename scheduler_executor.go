@@ -32,22 +32,7 @@ func (e verboseSQLJobExecutor) ExecuteSQL(ctx context.Context, sqlText string) (
 			SQL:       sqlText,
 		})
 	}
-	stmt, err := tinysql.ParseSQL(sqlText)
-	if err != nil {
-		if e.verbose.Enabled() {
-			e.verbose.Log(VerboseEvent{
-				System:    "database",
-				Direction: "inbound",
-				Operation: "scheduler.execute",
-				Target:    "tinysql://" + tenant,
-				Duration:  time.Since(start),
-				Status:    "error",
-				Error:     err.Error(),
-			})
-		}
-		return nil, err
-	}
-	rs, err := tinysql.Execute(ctx, e.db, tenant, stmt)
+	rs, err := tinysql.ExecSQL(ctx, e.db, tenant, sqlText)
 	if e.verbose.Enabled() {
 		event := VerboseEvent{
 			System:    "database",

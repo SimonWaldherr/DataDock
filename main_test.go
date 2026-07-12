@@ -81,6 +81,36 @@ func TestOpenNativeDBIgnoresStaleWALSidecar(t *testing.T) {
 	}
 }
 
+func TestTinySQLVectorCacheAPI(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+	for _, query := range []string{
+		"CREATE TABLE vector_cache_test (id INT, embedding VECTOR)",
+		"INSERT INTO vector_cache_test VALUES (1, '[1,0]'), (2, '[0,1]')",
+		"SELECT id FROM VEC_SEARCH('vector_cache_test', 'embedding', '[1,0]', 1, 'cosine', 'flat')",
+		"SELECT id FROM VEC_SEARCH('vector_cache_test', 'embedding', '[1,0]', 1, 'cosine', 'flat')",
+	} {
+		if result := app.executeTinySQL(context.Background(), query); result.Err != "" {
+			t.Fatalf("execute %q: %s", query, result.Err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tinysql/vector-cache", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("vector cache status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var stats tinysql.VectorCacheStats
+	if err := json.NewDecoder(rec.Body).Decode(&stats); err != nil {
+		t.Fatalf("decode vector cache stats: %v", err)
+	}
+	if !stats.Enabled || stats.Entries != 1 || stats.Hits != 1 || stats.Misses != 1 || len(stats.RecentQueries) != 2 || !stats.RecentQueries[1].CacheHit {
+		t.Fatalf("unexpected vector cache stats: %#v", stats)
+	}
+}
+
 // newTestApp creates a fully isolated App for testing. Each call uses a unique
 // tenant name so tests don't interfere through the global driver server.
 func newTestApp(t *testing.T) *App {

@@ -9,7 +9,20 @@ import (
 	tinysql "github.com/SimonWaldherr/tinySQL"
 )
 
-const tinySQLAgentContextProcedure = "datadock_agent_context"
+const (
+	tinySQLAgentContextProcedure = "datadock_agent_context"
+	tinySQLVectorCacheEntries    = 128
+)
+
+// configureTinySQLVectorCache enables tinySQL's bounded VEC_SEARCH cache for
+// interactive vector queries. Analytics retain query shape only, never vector
+// values, so the endpoint can be used for local diagnostics safely.
+func configureTinySQLVectorCache() {
+	cfg := tinysql.DefaultVectorCacheConfig()
+	cfg.ResultCacheEntries = tinySQLVectorCacheEntries
+	cfg.Analytics = true
+	tinysql.ConfigureVectorCache(cfg)
+}
 
 func (a *App) registerTinySQLProcedures() {
 	_ = tinysql.RegisterStoredProcedure(tinySQLAgentContextProcedure, func(ctx tinysql.ProcedureContext, args []any) (*tinysql.ResultSet, error) {

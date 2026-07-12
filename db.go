@@ -778,11 +778,7 @@ func (a *App) queryRowsWindow(ctx context.Context, query string, offset, limit i
 }
 
 func (a *App) queryTinySQLRows(ctx context.Context, query string) ([]string, [][]string, error) {
-	stmt, err := tinysql.ParseSQL(query)
-	if err != nil {
-		return nil, nil, err
-	}
-	rs, err := tinysql.Execute(ctx, a.nativeDB, a.tenant, stmt)
+	rs, err := tinysql.ExecSQL(ctx, a.nativeDB, a.tenant, query)
 	if err != nil {
 		return nil, nil, err
 	}

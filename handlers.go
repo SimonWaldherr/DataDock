@@ -33,6 +33,7 @@ import (
 
 // newApp constructs an App value.
 func newApp(nativeDB *tinysql.DB, sqlDB *sql.DB, tenant string, tpl *template.Template) *App {
+	configureTinySQLVectorCache()
 	defaultConn := &DBConnection{
 		ID:      defaultConnectionID,
 		Name:    "tinySQL",
@@ -165,6 +166,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /api/export", a.apiExportHandler)
 	handle("GET /api/schema", a.apiSchemaHandler)
 	handle("GET /api/tinysql/agent-context", a.apiTinySQLAgentContextHandler)
+	handle("GET /api/tinysql/vector-cache", a.apiTinySQLVectorCacheHandler)
 	handle("GET /api/catalog", a.apiCatalogHandler)
 	handle("GET /api/catalog/expand", a.apiCatalogExpandHandler)
 	handle("POST /api/logic-search", a.apiLogicSearchHandler)
@@ -2933,6 +2935,14 @@ func (a *App) apiTinySQLAgentContextHandler(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+func (a *App) apiTinySQLVectorCacheHandler(w http.ResponseWriter, r *http.Request) {
+	if conn := a.activeConn(r.Context()); conn != nil && !conn.IsTinySQL() {
+		a.writeProblem(w, r, http.StatusBadRequest, "Unsupported connection", "tinySQL vector cache statistics are available for the local tinySQL connection only")
+		return
+	}
+	a.writeJSON(w, http.StatusOK, tinysql.VectorCacheAnalytics())
+}
+
 func optionalPositiveIntQuery(r *http.Request, name string, fallback int) (int, error) {
 	raw := strings.TrimSpace(r.URL.Query().Get(name))
 	if raw == "" {
@@ -3447,24 +3457,7 @@ func (a *App) executeTinySQL(ctx context.Context, sqlText string) QueryResult {
 			SQL:       sqlText,
 		})
 	}
-	stmt, err := tinysql.ParseSQL(sqlText)
-	if err != nil {
-		result.Err = err.Error()
-		result.Elapsed = time.Since(start)
-		if a.verboseLogger().Enabled() {
-			a.verboseLogger().Log(VerboseEvent{
-				System:    "database",
-				Direction: "inbound",
-				Operation: "tinysql.execute",
-				Target:    "tinysql://" + a.tenant,
-				Duration:  result.Elapsed,
-				Status:    "error",
-				Error:     err.Error(),
-			})
-		}
-		return result
-	}
-	rs, err := tinysql.Execute(ctx, a.nativeDB, a.tenant, stmt)
+	rs, err := tinysql.ExecSQL(ctx, a.nativeDB, a.tenant, sqlText)
 	if err != nil {
 		result.Err = err.Error()
 		result.Elapsed = time.Since(start)

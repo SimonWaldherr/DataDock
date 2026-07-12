@@ -109,20 +109,22 @@ name, original-upload SHA-256, source size and format, normalized table row
 count, geometry columns/types, valid/missing/invalid geometry counts, and WGS84
 bounds. `GET /api/spatial-reports/{table}` returns the same report as JSON.
 
-With tinySQL v0.18.x, map tables can also be queried directly with native geo
+With tinySQL v0.19.1, map tables can also be queried directly with native geo
 functions. `GEO_POINT`/`ST_MAKEPOINT` creates GeoJSON points, `ST_X`/`ST_Y`
 extract longitude/latitude, `GEO_DISTANCE`/`ST_DISTANCE` computes haversine
 distance in meters, and `GEO_WITHIN_BBOX` / `GEO_DWITHIN` cover common spatial
 filters.
 
-tinySQL v0.18.x also persists `CREATE INDEX` metadata. DataDock can execute
+tinySQL v0.19.1 also persists `CREATE INDEX` metadata. DataDock can execute
 `CREATE INDEX` / `DROP INDEX` in the SQL editor and inspect the catalog through
 `sys.indexes`; tinySQL still treats indexes as metadata rather than a
 planner-backed access path.
 
-Other v0.18.x engine improvements, including persisted trigger `WHEN` clauses
-and faster raw function predicates for geo/vector/RAG/date filters, are inherited
-automatically by the embedded tinySQL connection.
+tinySQL v0.19.1 also adds a bounded 30-second result cache for local
+`VEC_SEARCH` queries. DataDock enables 128 entries and keeps a bounded,
+vector-free query-shape history at `GET /api/tinysql/vector-cache`. The cache
+is most useful for repeated ad-hoc k-NN queries; filtered logic search keeps
+its exact cosine-ranking path to preserve connection/model scoping.
 
 ## Quick Start
 
@@ -298,7 +300,7 @@ datadock uses stable web and data interchange standards for external integration
 - Imported tile tables expose TileJSON at `/api/map/tiles/{table}/tilejson` and XYZ tile payloads at `/api/map/tiles/{table}/{z}/{x}/{y}`; MBTiles TMS rows are translated at the API boundary.
 - Routing requests use `/api/routing/{table}/route` for shortest paths and `/api/routing/{table}/reachable` for cost-bounded reachability GeoJSON. Reachable-area polygons use a convex-hull approximation and declare that method in their feature properties.
 - Each file/API import persists a source SHA-256 and spatial quality report, available in the table's **Import Report** action and from `/api/spatial-reports/{table}`.
-- DataDock tracks tinySQL v0.18.x and exposes its read-only PRAGMA support,
+- DataDock tracks tinySQL v0.19.1 and exposes its read-only PRAGMA support,
   result-producing stored procedure calls in the SQL editor, and native agent
   context generation for the local tinySQL connection.
 - tinySQL geo functions such as `ST_MAKEPOINT`, `ST_X`, `ST_Y`,
@@ -307,9 +309,8 @@ datadock uses stable web and data interchange standards for external integration
 - tinySQL index catalog metadata from `CREATE INDEX` is visible through
   `sys.indexes`, including index name, table, columns, uniqueness, and creation
   time.
-- tinySQL v0.18.x engine updates for persisted trigger `WHEN` clauses and
-  optimized raw geo/vector/RAG/date predicate execution are available through the
-  embedded local engine.
+- tinySQL v0.19.1's bounded `VEC_SEARCH` cache and vector-free cache analytics
+  are enabled for the embedded local engine.
 - tinySQL-facing error classes can use ISO/IEC 9075 SQLSTATE helpers exposed by
   the public tinySQL API.
 
@@ -694,6 +695,11 @@ Returns tinySQL's native `BuildAgentContext` profile for the local tinySQL
 connection. Optional query parameters `max_tables` and `max_chars` control the
 profile size. For SQL-only workflows, `CALL datadock_agent_context(12, 6000)`
 returns a compact non-reentrant context summary in the query result grid.
+
+**GET /api/tinysql/vector-cache**
+
+Returns bounded cache counts, approximate memory use, and recent local
+`VEC_SEARCH` query shapes. Raw embedding vectors are never included.
 
 ## Development Workflows
 
