@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/SimonWaldherr/datadock/internal/typed"
 	tinysql "github.com/SimonWaldherr/tinySQL"
@@ -53,20 +55,58 @@ func ImportCSV(ctx context.Context, db *tinysql.DB, tenant, tableName string, sr
 	if err != nil {
 		return nil, err
 	}
+	text, encoding, err := decodeDelimitedText(data)
+	if err != nil {
+		return nil, err
+	}
 	delimiter := ','
 	if len(opts.DelimiterCandidates) > 0 {
 		delimiter = opts.DelimiterCandidates[0]
-	} else if strings.Count(string(data), "\t") > strings.Count(string(data), ",") {
+	} else if strings.Count(text, "\t") > strings.Count(text, ",") {
 		delimiter = '\t'
 	}
-	reader := csv.NewReader(strings.NewReader(string(data)))
+	reader := csv.NewReader(strings.NewReader(text))
 	reader.Comma = delimiter
 	reader.FieldsPerRecord = -1
 	records, err := reader.ReadAll()
 	if err != nil {
 		return nil, err
 	}
-	return importRecords(ctx, db, tenant, tableName, records, delimiter, opts)
+	result, err := importRecords(ctx, db, tenant, tableName, records, delimiter, opts)
+	if result != nil {
+		result.Encoding = encoding
+	}
+	return result, err
+}
+
+// decodeDelimitedText accepts UTF-8 (with or without BOM) and common
+// UTF-16 spreadsheet exports before CSV parsing. Other byte sequences are
+// rejected rather than silently replacing bytes in a potentially corrupted
+// import; binary values belong in explicitly typed BLOB inputs.
+func decodeDelimitedText(data []byte) (string, string, error) {
+	if len(data) >= 3 && string(data[:3]) == "\xef\xbb\xbf" {
+		data = data[3:]
+	}
+	if len(data) >= 2 && (data[0] == 0xff && data[1] == 0xfe || data[0] == 0xfe && data[1] == 0xff) {
+		little := data[0] == 0xff
+		data = data[2:]
+		if len(data)%2 != 0 {
+			return "", "", fmt.Errorf("UTF-16 delimited input has an odd byte length")
+		}
+		words := make([]uint16, len(data)/2)
+		for i := range words {
+			if little {
+				words[i] = uint16(data[i*2]) | uint16(data[i*2+1])<<8
+			} else {
+				words[i] = uint16(data[i*2+1]) | uint16(data[i*2])<<8
+			}
+		}
+		return string(utf16.Decode(words)), "utf-16", nil
+	}
+	if !utf8.Valid(data) {
+		return "", "", fmt.Errorf("delimited input is not valid UTF-8; convert the file to UTF-8 or UTF-16 before importing")
+	}
+	return string(data), "utf-8", nil
 }
 
 func FuzzyImportCSV(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *FuzzyImportOptions) (*ImportResult, error) {
@@ -394,7 +434,7 @@ func sanitizeIdentifier(s, fallback string) string {
 }
 
 func exec(ctx context.Context, db *tinysql.DB, tenant, sqlText string) (*tinysql.ResultSet, error) {
-	return tinysql.ExecSQL(ctx, db, tenant, sqlText)
+	return tinysql.ExecSQL(tinysql.WithAuditText(ctx, sqlText), db, tenant, sqlText)
 }
 
 func quoteIdent(s string) string {

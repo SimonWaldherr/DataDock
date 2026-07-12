@@ -49,6 +49,8 @@ type RuntimeSettings struct {
 	EmbeddingBaseURL  string
 	EmbeddingAPIKey   string
 	EmbeddingModel    string
+	VectorIndex       string
+	VectorWarm        bool
 	ReadOnlyMode      bool
 	PageSize          int
 	MatchMaxRows      int
@@ -74,6 +76,8 @@ type RuntimeSettingsView struct {
 	EmbeddingConfigured    bool   `json:"embedding_configured"`
 	EmbeddingAPIKeySet     bool   `json:"embedding_api_key_set"`
 	EmbeddingAPIKeyDisplay string `json:"embedding_api_key_display"`
+	VectorIndex            string `json:"vector_index"`
+	VectorWarm             bool   `json:"vector_warm"`
 	ReadOnlyMode           bool   `json:"read_only_mode"`
 	PageSize               int    `json:"page_size"`
 	MatchMaxRows           int    `json:"match_max_rows"`
@@ -147,6 +151,16 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 	if s.Port < 0 || s.Port > 65535 {
 		return fmt.Errorf("port must be between 0 and 65535")
 	}
+	vectorIndex := strings.ToLower(strings.TrimSpace(s.VectorIndex))
+	if vectorIndex == "" {
+		vectorIndex = "flat"
+	}
+	if vectorIndex != "flat" && vectorIndex != "hnsw" {
+		return fmt.Errorf("vector index must be flat or hnsw")
+	}
+	if vectorIndex != "hnsw" {
+		s.VectorWarm = false
+	}
 	authMode, err := normalizeAuthMode(s.AuthMode)
 	if err != nil {
 		return err
@@ -205,6 +219,8 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 	a.llm = llm
 	a.embeddingConfig = embeddingCfg
 	a.embeddingClient = embeddingClient
+	a.vectorIndex = vectorIndex
+	a.vectorWarm = s.VectorWarm
 	a.readOnlyMode = s.ReadOnlyMode
 	a.pageSize = s.PageSize
 	a.matchMaxRows = s.MatchMaxRows
@@ -232,6 +248,8 @@ func (a *App) saveRuntimeSettings(ctx context.Context) error {
 		"embedding_base_url":  s.EmbeddingBaseURL,
 		"embedding_api_key":   s.EmbeddingAPIKey,
 		"embedding_model":     s.EmbeddingModel,
+		"vector_index":        s.VectorIndex,
+		"vector_warm":         strconv.FormatBool(s.VectorWarm),
 		"read_only_mode":      strconv.FormatBool(s.ReadOnlyMode),
 		"page_size":           strconv.Itoa(s.PageSize),
 		"match_max_rows":      strconv.Itoa(s.MatchMaxRows),
@@ -406,6 +424,8 @@ func (a *App) currentRuntimeSettings() RuntimeSettings {
 		EmbeddingBaseURL:  a.embeddingConfig.BaseURL,
 		EmbeddingAPIKey:   a.embeddingConfig.APIKey,
 		EmbeddingModel:    a.embeddingConfig.Model,
+		VectorIndex:       a.vectorIndex,
+		VectorWarm:        a.vectorWarm,
 		ReadOnlyMode:      a.readOnlyMode,
 		PageSize:          a.pageSize,
 		MatchMaxRows:      a.matchMaxRows,
@@ -435,6 +455,8 @@ func (a *App) runtimeSettingsView() RuntimeSettingsView {
 		EmbeddingConfigured:    a.embeddingClient != nil,
 		EmbeddingAPIKeySet:     a.embeddingConfig.APIKey != "",
 		EmbeddingAPIKeyDisplay: maskedSecret(a.embeddingConfig.APIKey),
+		VectorIndex:            a.vectorIndex,
+		VectorWarm:             a.vectorWarm,
 		ReadOnlyMode:           a.readOnlyMode,
 		PageSize:               a.pageSize,
 		MatchMaxRows:           a.matchMaxRows,
@@ -528,6 +550,21 @@ func (a *App) currentEmbeddingModel() string {
 	return a.embeddingConfig.Model
 }
 
+func (a *App) currentVectorWarmEnabled() bool {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	return a.vectorIndex == "hnsw" && a.vectorWarm
+}
+
+func (a *App) currentVectorIndex() string {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	if a.vectorIndex == "hnsw" {
+		return "hnsw"
+	}
+	return "flat"
+}
+
 // firstNonEmpty returns the first non-blank (after trimming) string, or ""
 // if every candidate is blank. Used by applyRuntimeSettings to fall back
 // the embedding config's BaseURL/APIKey to the LLM's when left unset.
@@ -615,6 +652,8 @@ func runtimeSettingsFromStoredValues(values map[string]string) (RuntimeSettings,
 		EmbeddingBaseURL:  values["embedding_base_url"],
 		EmbeddingAPIKey:   values["embedding_api_key"],
 		EmbeddingModel:    values["embedding_model"],
+		VectorIndex:       values["vector_index"],
+		VectorWarm:        strings.EqualFold(values["vector_warm"], "true"),
 		ReadOnlyMode:      readOnlyMode,
 		PageSize:          pageSize,
 		MatchMaxRows:      matchMaxRows,

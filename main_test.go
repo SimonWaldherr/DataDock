@@ -85,6 +85,7 @@ func TestTinySQLVectorCacheAPI(t *testing.T) {
 	app := newTestApp(t)
 	mux := http.NewServeMux()
 	app.registerRoutes(mux)
+	adminCookie := setupAdminSession(t, mux)
 	for _, query := range []string{
 		"CREATE TABLE vector_cache_test (id INT, embedding VECTOR)",
 		"INSERT INTO vector_cache_test VALUES (1, '[1,0]'), (2, '[0,1]')",
@@ -97,6 +98,7 @@ func TestTinySQLVectorCacheAPI(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tinysql/vector-cache", nil)
+	req.AddCookie(adminCookie)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -108,6 +110,63 @@ func TestTinySQLVectorCacheAPI(t *testing.T) {
 	}
 	if !stats.Enabled || stats.Entries != 1 || stats.Hits != 1 || stats.Misses != 1 || len(stats.RecentQueries) != 2 || !stats.RecentQueries[1].CacheHit {
 		t.Fatalf("unexpected vector cache stats: %#v", stats)
+	}
+}
+
+func TestPortableSnapshotRoundTrip(t *testing.T) {
+	app := newTestApp(t)
+	if result := app.executeTinySQL(context.Background(), "CREATE TABLE snapshot_rows (id INTEGER NOT NULL, name TEXT DEFAULT 'unknown')"); result.Err != "" {
+		t.Fatalf("create snapshot table: %s", result.Err)
+	}
+	if result := app.executeTinySQL(context.Background(), "INSERT INTO snapshot_rows (id, name) VALUES (1, 'Ada')"); result.Err != "" {
+		t.Fatalf("insert snapshot row: %s", result.Err)
+	}
+	var snapshot bytes.Buffer
+	if err := tinysql.SaveToWriter(app.nativeDB, &snapshot); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+	restored, err := tinysql.LoadFromReader(bytes.NewReader(snapshot.Bytes()))
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	rs, err := tinysql.ExecSQL(context.Background(), restored, app.tenant, "SELECT name FROM snapshot_rows WHERE id = 1")
+	if err != nil || len(rs.Rows) != 1 || rs.Rows[0]["name"] != "Ada" {
+		t.Fatalf("snapshot roundtrip = %#v, %v", rs, err)
+	}
+}
+
+func TestNativeAuditRecordsOriginalStatement(t *testing.T) {
+	app := newTestApp(t)
+	audit := tinysql.NewAuditLog()
+	app.nativeDB.AttachAuditLog(audit)
+	const sqlText = "CREATE TABLE audit_statement_text (id INTEGER)"
+	if result := app.executeTinySQL(context.Background(), sqlText); result.Err != "" {
+		t.Fatalf("execute audited SQL: %s", result.Err)
+	}
+	entries := audit.Entries()
+	if len(entries) != 1 || entries[0].Statement != sqlText {
+		t.Fatalf("audit entries = %#v", entries)
+	}
+	if err := audit.Verify(); err != nil {
+		t.Fatalf("verify audit chain: %v", err)
+	}
+}
+
+func TestStorageEncryptionKeyFromEnv(t *testing.T) {
+	t.Setenv("DATADOCK_ENCRYPTION_KEY", strings.Repeat("ab", tinysql.EncryptionKeySize))
+	key, err := storageEncryptionKeyFromEnv()
+	if err != nil || len(key) != tinysql.EncryptionKeySize {
+		t.Fatalf("decode encryption key = %d bytes, %v", len(key), err)
+	}
+	t.Setenv("DATADOCK_ENCRYPTION_KEY", "not-a-key")
+	if _, err := storageEncryptionKeyFromEnv(); err == nil {
+		t.Fatal("expected malformed encryption key to fail")
+	}
+}
+
+func TestEncryptedMemoryStorageIsRejected(t *testing.T) {
+	if _, err := openNativeDBWithStorage(":memory:", "memory", bytes.Repeat([]byte{1}, tinysql.EncryptionKeySize)); err == nil {
+		t.Fatal("expected encryption without a disk-backed mode to fail")
 	}
 }
 

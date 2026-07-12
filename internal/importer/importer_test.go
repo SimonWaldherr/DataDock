@@ -52,6 +52,18 @@ func TestImportCSVInfersColumnTypes(t *testing.T) {
 	}
 }
 
+func TestImportCSVDecodesUTF16(t *testing.T) {
+	db := tinysql.NewDB()
+	utf16LE := []byte{0xff, 0xfe, 'n', 0, 'a', 0, 'm', 0, 'e', 0, ',', 0, 'a', 0, 'g', 0, 'e', 0, '\n', 0, 'A', 0, 'd', 0, 'a', 0, ',', 0, '3', 0, '7', 0}
+	res, err := ImportCSV(context.Background(), db, "default", "utf16_import", bytes.NewReader(utf16LE), &ImportOptions{CreateTable: true, TypeInference: true})
+	if err != nil {
+		t.Fatalf("ImportCSV UTF-16: %v", err)
+	}
+	if res.Encoding != "utf-16" || res.RowsInserted != 1 {
+		t.Fatalf("unexpected UTF-16 import result: %#v", res)
+	}
+}
+
 func TestImportGeoJSONCreatesGeometryAndPropertyColumns(t *testing.T) {
 	db := tinysql.NewDB()
 	body := strings.NewReader(`{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[11.5761,48.1372]},"properties":{"name":"Munich","population":1500000}}]}`)

@@ -13,6 +13,8 @@
     <a href="/admin/users" class="btn btn-sm btn-outline-secondary"><i class="bi bi-people me-1"></i>Users</a>
     <a href="/connections" class="btn btn-sm btn-outline-secondary"><i class="bi bi-hdd-network me-1"></i>Connections</a>
     <a href="/jobs" class="btn btn-sm btn-outline-secondary"><i class="bi bi-calendar2-check me-1"></i>Jobs</a>
+    <a href="/api/admin/snapshot" class="btn btn-sm btn-outline-secondary"><i class="bi bi-download me-1"></i>Snapshot</a>
+    <a href="/api/tinysql/vector-cache" class="btn btn-sm btn-outline-secondary"><i class="bi bi-speedometer me-1"></i>Vector Debug</a>
     <form method="post" action="/admin/logout" class="d-inline">
       <button class="btn btn-sm btn-outline-secondary"><i class="bi bi-box-arrow-right me-1"></i>Log out</button>
     </form>
@@ -181,6 +183,16 @@
       </div>
       <div class="col-12 small text-muted">
         Default theme/density apply to browsers without a saved preference — anyone who's picked their own in Display still keeps it.
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small text-muted">Native retrieval index</label>
+        <select class="form-select form-select-sm" name="vector_index">
+          <option value="flat" {{if eq .Settings.VectorIndex "flat"}}selected{{end}}>flat (exact)</option>
+          <option value="hnsw" {{if eq .Settings.VectorIndex "hnsw"}}selected{{end}}>HNSW (opt-in)</option>
+        </select>
+      </div>
+      <div class="col-md-6 d-flex align-items-end">
+        <label class="form-check small mb-1"><input class="form-check-input" type="checkbox" name="vector_warm" {{if .Settings.VectorWarm}}checked{{end}}> Warm HNSW after bulk logic reindex / read-only serving</label>
       </div>
 
       <div class="col-12 admin-section-title mt-2">AI / LLM</div>

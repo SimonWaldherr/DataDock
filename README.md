@@ -123,8 +123,30 @@ planner-backed access path.
 tinySQL v0.19.1 also adds a bounded 30-second result cache for local
 `VEC_SEARCH` queries. DataDock enables 128 entries and keeps a bounded,
 vector-free query-shape history at `GET /api/tinysql/vector-cache`. The cache
-is most useful for repeated ad-hoc k-NN queries; filtered logic search keeps
-its exact cosine-ranking path to preserve connection/model scoping.
+is most useful for repeated ad-hoc k-NN queries; filtered logic search uses an
+exact cosine-ranking fallback to preserve connection/model scoping.
+Logic retrieval uses a widened `VEC_SEARCH` candidate window and reapplies
+connection/model metadata filters before returning results; if that window is
+too noisy, DataDock falls back to exact scoped ranking. `flat` is the default.
+HNSW must be explicitly enabled in Admin Settings and is warmed only after a
+bulk logic reindex, never after ordinary ingestion.
+
+### Storage and Encryption
+
+The default `memory` mode retains DataDock's compatible GOB snapshot behavior.
+For encrypted table files, set `-storage-mode` (or `DATADOCK_STORAGE_MODE`) to
+`disk`, `json`, `hybrid`, or `index`, choose a directory with `-db`, and pass a
+32-byte AES-256 key as hexadecimal or base64 in `DATADOCK_ENCRYPTION_KEY`.
+The key is read only from the environment and is never stored in DataDock
+settings. WAL modes are intentionally rejected with encryption because tinySQL
+does not encrypt WAL files. Storage metadata remains unencrypted.
+
+CSV and TSV inputs accept UTF-8 (including BOM) and UTF-16 BOM exports. Binary
+payloads remain encoded or typed as BLOB values rather than coerced through
+text decoding. GeoJSON, KML, and OSM imports are directly supported. Shapefile
+and MBTiles import support depends on tinySQL builds tagged `shapefile` and
+`sqliteimport` respectively; deployments without these optional capabilities
+receive the importer error instead of a partial decode.
 
 ## Quick Start
 
@@ -699,7 +721,14 @@ returns a compact non-reentrant context summary in the query result grid.
 **GET /api/tinysql/vector-cache**
 
 Returns bounded cache counts, approximate memory use, and recent local
-`VEC_SEARCH` query shapes. Raw embedding vectors are never included.
+`VEC_SEARCH` query shapes. Raw embedding vectors and answer texts are never
+included. This diagnostic endpoint requires an Admin session.
+
+**GET /api/admin/snapshot**
+
+Downloads a portable tinySQL snapshot via `SaveToWriter`. It requires an Admin
+session. DataDock intentionally has no restore endpoint; safe restore requires
+an explicit operator action with size limits, validation, and an atomic swap.
 
 ## Development Workflows
 

@@ -166,7 +166,8 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /api/export", a.apiExportHandler)
 	handle("GET /api/schema", a.apiSchemaHandler)
 	handle("GET /api/tinysql/agent-context", a.apiTinySQLAgentContextHandler)
-	handle("GET /api/tinysql/vector-cache", a.apiTinySQLVectorCacheHandler)
+	handle("GET /api/tinysql/vector-cache", a.requireAdmin(a.apiTinySQLVectorCacheHandler))
+	handle("GET /api/admin/snapshot", a.requireAdmin(a.apiSnapshotExportHandler))
 	handle("GET /api/catalog", a.apiCatalogHandler)
 	handle("GET /api/catalog/expand", a.apiCatalogExpandHandler)
 	handle("POST /api/logic-search", a.apiLogicSearchHandler)
@@ -2943,6 +2944,17 @@ func (a *App) apiTinySQLVectorCacheHandler(w http.ResponseWriter, r *http.Reques
 	a.writeJSON(w, http.StatusOK, tinysql.VectorCacheAnalytics())
 }
 
+// apiSnapshotExportHandler emits a portable native snapshot only. Restore is
+// intentionally not exposed over HTTP: it needs size limits, validation, an
+// atomic swap, and explicit operator approval outside a request handler.
+func (a *App) apiSnapshotExportHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="datadock.snapshot"`)
+	if err := tinysql.SaveToWriter(a.nativeDB, w); err != nil {
+		a.writeProblem(w, r, http.StatusInternalServerError, "Snapshot export failed", err.Error())
+	}
+}
+
 func optionalPositiveIntQuery(r *http.Request, name string, fallback int) (int, error) {
 	raw := strings.TrimSpace(r.URL.Query().Get(name))
 	if raw == "" {
@@ -3457,7 +3469,7 @@ func (a *App) executeTinySQL(ctx context.Context, sqlText string) QueryResult {
 			SQL:       sqlText,
 		})
 	}
-	rs, err := tinysql.ExecSQL(ctx, a.nativeDB, a.tenant, sqlText)
+	rs, err := tinysql.ExecSQL(tinysql.WithAuditText(ctx, sqlText), a.nativeDB, a.tenant, sqlText)
 	if err != nil {
 		result.Err = err.Error()
 		result.Elapsed = time.Since(start)
@@ -3823,6 +3835,8 @@ type runtimeSettingsInput struct {
 	EmbeddingBaseURL string
 	EmbeddingAPIKey  string
 	EmbeddingModel   string
+	VectorIndex      string
+	VectorWarm       bool
 	ReadOnlyMode     bool
 	PageSize         string
 	MatchMaxRows     string
@@ -3842,6 +3856,8 @@ func runtimeSettingsFromForm(r *http.Request) (RuntimeSettings, error) {
 		EmbeddingBaseURL: r.Form.Get("embedding_base_url"),
 		EmbeddingAPIKey:  r.Form.Get("embedding_api_key"),
 		EmbeddingModel:   r.Form.Get("embedding_model"),
+		VectorIndex:      r.Form.Get("vector_index"),
+		VectorWarm:       r.Form.Get("vector_warm") != "",
 		ReadOnlyMode:     r.Form.Get("read_only_mode") != "",
 		PageSize:         r.Form.Get("page_size"),
 		MatchMaxRows:     r.Form.Get("match_max_rows"),
@@ -3890,6 +3906,8 @@ func runtimeSettingsFromInput(in runtimeSettingsInput) (RuntimeSettings, error) 
 		EmbeddingBaseURL: in.EmbeddingBaseURL,
 		EmbeddingAPIKey:  in.EmbeddingAPIKey,
 		EmbeddingModel:   in.EmbeddingModel,
+		VectorIndex:      in.VectorIndex,
+		VectorWarm:       in.VectorWarm,
 		ReadOnlyMode:     in.ReadOnlyMode,
 		PageSize:         pageSize,
 		MatchMaxRows:     matchMaxRows,

@@ -23,6 +23,11 @@ const objectEmbeddingsTable = "__datadock_object_embeddings"
 // with hundreds of routines, small enough to keep any one request modest.
 const logicEmbeddingBatchSize = 16
 
+// logicSearchCandidateMultiplier widens the VEC_SEARCH window before the
+// connection/model filters are applied. An exact fallback below preserves
+// authorization correctness when unrelated rows occupy that window.
+const logicSearchCandidateMultiplier = 8
+
 // LogicIndexReport summarizes one reindexConnectionLogic run, shown on the
 // connections page after it completes.
 type LogicIndexReport struct {
@@ -44,13 +49,20 @@ type LogicSearchHit struct {
 
 func (a *App) ensureObjectEmbeddingsTable(ctx context.Context) error {
 	_, err := a.execConn(ctx, a.localTinySQLConn(), "logic.ensure_table", objectEmbeddingsEnsureTableSQL)
-	if err == nil {
-		return nil
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "already exists") {
+		return fmt.Errorf("ensure object embeddings table: %w", err)
 	}
-	if strings.Contains(strings.ToLower(err.Error()), "already exists") {
-		return nil
+	// Equality predicates are common in the exact fallback and maintenance
+	// queries. These are deliberately single-column indexes; no range-scan or
+	// composite-index behavior is assumed.
+	for _, sqlText := range []string{
+		"CREATE INDEX idx_logic_connection_id ON " + objectEmbeddingsTable + "(connection_id)",
+		"CREATE INDEX idx_logic_embed_model ON " + objectEmbeddingsTable + "(embed_model)",
+		"CREATE INDEX idx_logic_object_name ON " + objectEmbeddingsTable + "(object_name)",
+	} {
+		_, _ = a.execConn(ctx, a.localTinySQLConn(), "logic.ensure_index", sqlText)
 	}
-	return fmt.Errorf("ensure object embeddings table: %w", err)
+	return nil
 }
 
 // logicSearchSupported reports whether conn's dialect exposes retrievable
@@ -283,6 +295,11 @@ func (a *App) applyLogicIndex(ctx context.Context, connID, embedModel string, em
 			}
 		}
 	}
+	if a.currentVectorWarmEnabled() {
+		if _, err := a.execConn(ctx, local, "logic.vector_warm", "SELECT * FROM VEC_WARM('"+objectEmbeddingsTable+"', 'embedding', 'cosine', 'hnsw')"); err != nil {
+			report.Errors = append(report.Errors, "warm HNSW: "+err.Error())
+		}
+	}
 
 	return report, nil
 }
@@ -326,8 +343,27 @@ func (a *App) searchObjectLogic(ctx context.Context, sessionID, connID, query st
 		return nil, err
 	}
 
-	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "logic.search", objectEmbeddingsSearchQuery(topK),
-		string(vecJSON), connID, embedModel)
+	candidates := topK * logicSearchCandidateMultiplier
+	if candidates < topK+32 {
+		candidates = topK + 32
+	}
+	hits, err := a.searchObjectLogicCandidates(ctx, objectEmbeddingsVectorSearchQuery(candidates, a.currentVectorIndex()), string(vecJSON), connID, embedModel, topK)
+	if err != nil {
+		return nil, err
+	}
+	if len(hits) >= topK {
+		return hits, nil
+	}
+
+	// VEC_SEARCH cannot predicate its source table. Fall back to the scoped
+	// exact expression when the widened window is insufficient, so a noisy
+	// shared embedding table never hides an otherwise authorized result.
+	return a.searchObjectLogicCandidates(ctx, objectEmbeddingsExactSearchQuery(topK), string(vecJSON), connID, embedModel, topK)
+}
+
+func (a *App) searchObjectLogicCandidates(ctx context.Context, sqlText, vectorJSON, connID, embedModel string, topK int) ([]LogicSearchHit, error) {
+	rows, err := a.queryConn(ctx, a.localTinySQLConn(), "logic.search", sqlText,
+		vectorJSON, connID, embedModel)
 	if err != nil {
 		return nil, err
 	}
@@ -340,6 +376,9 @@ func (a *App) searchObjectLogic(ctx context.Context, sessionID, connID, query st
 			return nil, err
 		}
 		hits = append(hits, h)
+		if len(hits) == topK {
+			break
+		}
 	}
 	return hits, rows.Err()
 }

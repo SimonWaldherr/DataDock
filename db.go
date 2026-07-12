@@ -29,6 +29,8 @@ type App struct {
 	llmConfig         LLMConfig
 	embeddingClient   EmbeddingClient
 	embeddingConfig   EmbeddingConfig
+	vectorIndex       string
+	vectorWarm        bool
 	auditLog          bool
 	dialect           DialectProfile
 	conns             *ConnectionManager
@@ -778,7 +780,7 @@ func (a *App) queryRowsWindow(ctx context.Context, query string, offset, limit i
 }
 
 func (a *App) queryTinySQLRows(ctx context.Context, query string) ([]string, [][]string, error) {
-	rs, err := tinysql.ExecSQL(ctx, a.nativeDB, a.tenant, query)
+	rs, err := tinysql.ExecSQL(tinysql.WithAuditText(ctx, query), a.nativeDB, a.tenant, query)
 	if err != nil {
 		return nil, nil, err
 	}

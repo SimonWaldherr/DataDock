@@ -187,17 +187,28 @@ const (
 	objectEmbeddingsDeleteForConnectionSQL = "DELETE FROM " + objectEmbeddingsTable + " WHERE connection_id = ?"
 )
 
-// objectEmbeddingsSearchQuery builds the similarity search searchObjectLogic
-// runs: topK is inlined via fmt.Sprintf (not bound as "?"), matching this
-// file's existing convention of inlining a validated int LIMIT rather than
-// relying on unverified parameterized-LIMIT support (see
-// sampleColumnValuesQuery). The query vector, connection_id, and embed_model
-// are still ordinary bound "?" args.
-func objectEmbeddingsSearchQuery(topK int) string {
+// objectEmbeddingsExactSearchQuery is the correctness fallback for a scoped
+// retrieval. VEC_SEARCH itself cannot push connection/model predicates into
+// its table-valued function, so callers use it only after its candidate window
+// did not contain enough authorized hits.
+func objectEmbeddingsExactSearchQuery(topK int) string {
 	return fmt.Sprintf(
 		"SELECT object_name, object_kind, VEC_COSINE_SIMILARITY(embedding, VEC_FROM_JSON(?)) AS score FROM %s "+
 			"WHERE connection_id = ? AND embed_model = ? ORDER BY score DESC LIMIT %d",
 		objectEmbeddingsTable, topK)
+}
+
+// objectEmbeddingsVectorSearchQuery retrieves a widened native VEC_SEARCH
+// candidate window. Scope and metadata predicates remain outside VEC_SEARCH
+// and are applied before rows leave the database driver.
+func objectEmbeddingsVectorSearchQuery(candidates int, indexMode string) string {
+	if indexMode != "hnsw" {
+		indexMode = "flat"
+	}
+	return fmt.Sprintf(
+		"SELECT object_name, object_kind, 1.0 - _vec_distance AS score FROM VEC_SEARCH('%s', 'embedding', VEC_FROM_JSON(?), %d, 'cosine', '%s') "+
+			"WHERE connection_id = ? AND embed_model = ? ORDER BY _vec_rank",
+		objectEmbeddingsTable, candidates, indexMode)
 }
 
 // ─── Matching engine (reads both sides, writes the crosswalk table) ────────

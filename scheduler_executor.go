@@ -32,7 +32,7 @@ func (e verboseSQLJobExecutor) ExecuteSQL(ctx context.Context, sqlText string) (
 			SQL:       sqlText,
 		})
 	}
-	rs, err := tinysql.ExecSQL(ctx, e.db, tenant, sqlText)
+	rs, err := tinysql.ExecSQL(tinysql.WithAuditText(ctx, sqlText), e.db, tenant, sqlText)
 	if e.verbose.Enabled() {
 		event := VerboseEvent{
 			System:    "database",

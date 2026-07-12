@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -37,6 +39,7 @@ func main() {
 	port := flag.Int("port", 0, fmt.Sprintf("HTTP listen port; 0 = use the stored setting or auto-detect a free port between %d and %d", autoPortRangeLow, autoPortRangeHigh))
 	findFreePortFlag := flag.Bool("find-free-port", false, fmt.Sprintf("print a free TCP port between %d and %d and exit (tooling helper)", autoPortRangeLow, autoPortRangeHigh))
 	dbFile := flag.String("db", "datadock.db", "Database file path (empty or :memory: for in-memory)")
+	storageMode := flag.String("storage-mode", envDefault("DATADOCK_STORAGE_MODE", "memory"), "tinySQL storage mode: memory, disk, json, hybrid, or index (encryption is supported only by the disk-backed modes)")
 	tenant := flag.String("tenant", "default", "Tenant / schema name")
 	sqlDialect := flag.String("dialect", envDefault("DATADOCK_SQL_DIALECT", "tinysql"), "SQL dialect profile for LLM guidance (tinysql, sqlite, postgres, mysql, mariadb, mssql)")
 	llmBaseURL := flag.String("llm-base-url", envDefault("DATADOCK_LLM_BASE_URL", ""), "OpenAI-compatible base URL, e.g. https://api.openai.com/v1 or http://127.0.0.1:1234/v1")
@@ -68,7 +71,11 @@ func main() {
 	}
 
 	// Open or create the tinySQL database.
-	nativeDB, err := openNativeDB(*dbFile)
+	encryptionKey, err := storageEncryptionKeyFromEnv()
+	if err != nil {
+		log.Fatalf("storage encryption: %v", err)
+	}
+	nativeDB, err := openNativeDBWithStorage(*dbFile, *storageMode, encryptionKey)
 	if err != nil {
 		log.Fatalf("open database: %v", err)
 	}
@@ -204,6 +211,15 @@ func main() {
 		}
 		app.setAuditLogger(auditLogger)
 		defer auditLogger.Close()
+		// Keep tinySQL's tamper-evident stream separate from DataDock's
+		// request audit JSONL. The engine receives WithAuditText contexts at
+		// every native single-statement execution, preserving exact SQL.
+		nativeAudit, err := tinysql.OpenAuditLog(*auditPath + ".tinysql")
+		if err != nil {
+			log.Fatalf("tinySQL audit log: could not open %q: %v", *auditPath+".tinysql", err)
+		}
+		nativeDB.AttachAuditLog(nativeAudit)
+		defer nativeAudit.Close()
 		log.Printf("audit log: recording write operations to %s", *auditPath)
 	}
 	watchCtx, watchCancel := context.WithCancel(context.Background())
@@ -359,12 +375,30 @@ func recoverMiddleware(next http.Handler) http.Handler {
 
 // openNativeDB loads a file-backed DB or creates a new in-memory one.
 func openNativeDB(filePath string) (*tinysql.DB, error) {
+	return openNativeDBWithStorage(filePath, "memory", nil)
+}
+
+// openNativeDBWithStorage retains the historic memory-plus-snapshot default
+// while allowing disk-backed tinySQL modes to use AES-256-GCM. WAL is never
+// passed an encryption key because tinySQL deliberately does not encrypt WAL.
+func openNativeDBWithStorage(filePath, modeName string, encryptionKey []byte) (*tinysql.DB, error) {
 	if filePath == "" || filePath == ":memory:" {
+		if len(encryptionKey) > 0 {
+			return nil, fmt.Errorf("DATADOCK_ENCRYPTION_KEY requires a disk-backed storage mode (disk, json, hybrid, or index)")
+		}
 		return tinysql.NewDB(), nil
 	}
+	mode, err := tinysql.ParseStorageMode(modeName)
+	if err != nil {
+		return nil, err
+	}
+	if len(encryptionKey) > 0 && mode != tinysql.ModeDisk && mode != tinysql.ModeJSON && mode != tinysql.ModeHybrid && mode != tinysql.ModeIndex {
+		return nil, fmt.Errorf("storage encryption is supported only by disk, json, hybrid, and index modes; WAL is intentionally not encrypted")
+	}
 	db, err := tinysql.OpenDB(tinysql.StorageConfig{
-		Mode: tinysql.ModeMemory,
-		Path: filePath,
+		Mode:          mode,
+		Path:          filePath,
+		EncryptionKey: encryptionKey,
 	})
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -373,6 +407,23 @@ func openNativeDB(filePath string) (*tinysql.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+// storageEncryptionKeyFromEnv accepts a 32-byte AES-256 key encoded as hex
+// or standard base64. It never reads from nor writes to runtime settings.
+func storageEncryptionKeyFromEnv() ([]byte, error) {
+	raw := strings.TrimSpace(os.Getenv("DATADOCK_ENCRYPTION_KEY"))
+	if raw == "" {
+		return nil, nil
+	}
+	if key, err := hex.DecodeString(raw); err == nil && len(key) == tinysql.EncryptionKeySize {
+		return key, nil
+	}
+	key, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil || len(key) != tinysql.EncryptionKeySize {
+		return nil, fmt.Errorf("DATADOCK_ENCRYPTION_KEY must be %d bytes encoded as hex or base64", tinysql.EncryptionKeySize)
+	}
+	return key, nil
 }
 
 // isPortFree reports whether a TCP port is currently available to bind on

@@ -82,3 +82,17 @@ func TestApplyRuntimeSettingsAuthModeNoneRequiresLoopbackOrOptIn(t *testing.T) {
 		t.Error("expected an error for an unknown auth-mode value")
 	}
 }
+
+func TestRuntimeSettingsWithoutVectorFieldsRemainCompatible(t *testing.T) {
+	settings, err := runtimeSettingsFromStoredValues(map[string]string{})
+	if err != nil {
+		t.Fatalf("load legacy settings: %v", err)
+	}
+	app := newTestApp(t)
+	if err := app.applyRuntimeSettings(settings); err != nil {
+		t.Fatalf("apply legacy settings: %v", err)
+	}
+	if app.currentVectorIndex() != "flat" || app.currentVectorWarmEnabled() {
+		t.Fatalf("legacy vector defaults = index %q warm %t", app.currentVectorIndex(), app.currentVectorWarmEnabled())
+	}
+}

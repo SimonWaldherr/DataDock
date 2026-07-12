@@ -18,6 +18,10 @@ const (
 // interactive vector queries. Analytics retain query shape only, never vector
 // values, so the endpoint can be used for local diagnostics safely.
 func configureTinySQLVectorCache() {
+	// The cache is process-wide. Clear any prior configuration before applying
+	// DataDock's profile so test instances and explicit reconfiguration cannot
+	// retain entries or diagnostics from a previous database.
+	tinysql.ConfigureVectorCache(tinysql.VectorCacheConfig{})
 	cfg := tinysql.DefaultVectorCacheConfig()
 	cfg.ResultCacheEntries = tinySQLVectorCacheEntries
 	cfg.Analytics = true
