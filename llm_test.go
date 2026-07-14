@@ -93,6 +93,44 @@ func TestBuildLLMMessagesIncludesUserRequestWhenPresent(t *testing.T) {
 	}
 }
 
+func TestBuildLLMMessagesUsesActionSpecificContracts(t *testing.T) {
+	explain := buildLLMMessages(LLMRequest{
+		Action: llmActionExplainResults,
+		Schema: `{"tables":[{"name":"events"}]}`,
+		Result: &LLMResultContext{Columns: []string{"status"}, Rows: [][]string{{"open"}}},
+	})
+	if !strings.Contains(explain[0].Content, "Return concise plain text only.") {
+		t.Fatalf("expected plain-text explanation contract, got: %s", explain[0].Content)
+	}
+	if strings.Contains(explain[0].Content, `"action":"sql"`) {
+		t.Fatalf("explanation contract must not request SQL JSON, got: %s", explain[0].Content)
+	}
+	if !strings.Contains(explain[0].Content, "untrusted data") {
+		t.Fatalf("expected prompt-injection data boundary, got: %s", explain[0].Content)
+	}
+
+	suggestions := buildLLMMessages(LLMRequest{
+		Action: llmActionSuggestQuestions,
+		Schema: `{"tables":[{"name":"events"}]}`,
+		Result: &LLMResultContext{Columns: []string{"status"}, Rows: [][]string{{"open"}}},
+	})
+	if !strings.Contains(suggestions[0].Content, `"action":"suggestions"`) {
+		t.Fatalf("expected suggestions JSON contract, got: %s", suggestions[0].Content)
+	}
+
+	quality := buildLLMMessages(LLMRequest{
+		Action: llmActionAnalyzeQuality,
+		Schema: `{"tables":[{"name":"events"}]}`,
+		Result: &LLMResultContext{Columns: []string{"status"}, Rows: [][]string{{"open"}}},
+	})
+	if !strings.Contains(quality[0].Content, "observable data-quality signals") {
+		t.Fatalf("expected data-quality contract, got: %s", quality[0].Content)
+	}
+	if strings.Contains(quality[0].Content, `"action":"sql"`) {
+		t.Fatalf("data-quality contract must not request SQL JSON, got: %s", quality[0].Content)
+	}
+}
+
 func TestAPILLMHealthHandler(t *testing.T) {
 	app := newTestApp(t)
 	app.llm = &fakeLLMClient{text: "OK"}
@@ -147,6 +185,232 @@ func TestAPILLMGenerateSQL(t *testing.T) {
 	}
 	if !strings.Contains(fake.lastReqs[0].Schema, "people") || !strings.Contains(fake.lastReqs[0].Schema, `"skill"`) {
 		t.Fatalf("expected schema to include people table, got %q", fake.lastReqs[0].Schema)
+	}
+}
+
+func TestAPILLMFixSQLProducesReviewedDraft(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE people (id INT, name TEXT)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	fake := &fakeLLMClient{texts: []string{
+		`{"action":"sql","sql":"SELECT name FROM people","explanation":"Corrects the SELECT keyword."}`,
+		"The draft is read-only and only reads the people table.",
+	}}
+	app.llm = fake
+
+	req := httptest.NewRequest(http.MethodPost, "/api/llm", strings.NewReader(`{"action":"fix_sql","prompt":"list people","sql":"SELEC name FROM people","error":"syntax error near SELEC"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	app.apiLLMHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["mode"] != llmActionFixSQL || resp["sql"] != "SELECT name FROM people" {
+		t.Fatalf("unexpected repair response: %#v", resp)
+	}
+	if !strings.Contains(resp["review"], "read-only") {
+		t.Fatalf("expected independent review, got %#v", resp)
+	}
+	if len(fake.lastReqs) != 2 || fake.lastReqs[0].Action != llmActionFixSQL || fake.lastReqs[1].Action != llmActionReviewSQL {
+		t.Fatalf("expected repair plus review calls, got %#v", fake.lastReqs)
+	}
+	if !strings.Contains(fake.lastReqs[0].Schema, "people") || fake.lastReqs[1].Schema != "" {
+		t.Fatalf("expected RAG for repair and no RAG for review, got %#v", fake.lastReqs)
+	}
+}
+
+func TestAPILLMFixSQLRequiresErrorAndSQL(t *testing.T) {
+	app := newTestApp(t)
+	app.llm = &fakeLLMClient{text: `{"action":"sql","sql":"SELECT 1"}`}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/llm", strings.NewReader(`{"action":"fix_sql","sql":"SELECT 1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	app.apiLLMHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(app.llm.(*fakeLLMClient).lastReqs) != 0 {
+		t.Fatal("repair validation must not call the LLM")
+	}
+}
+
+func TestAPILLMOptimizeSQLProducesReviewedDraft(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE people (id INT, name TEXT)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	fake := &fakeLLMClient{texts: []string{
+		`{"action":"sql","sql":"SELECT name FROM people ORDER BY name","explanation":"Keeps the selected column and adds a deterministic order."}`,
+		"The draft is read-only and only reads the people table.",
+	}}
+	app.llm = fake
+
+	req := httptest.NewRequest(http.MethodPost, "/api/llm", strings.NewReader(`{"action":"optimize_sql","sql":"SELECT name FROM people"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	app.apiLLMHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["mode"] != llmActionOptimizeSQL || resp["sql"] != "SELECT name FROM people ORDER BY name" {
+		t.Fatalf("unexpected optimization response: %#v", resp)
+	}
+	if !strings.Contains(resp["review"], "read-only") {
+		t.Fatalf("expected independent review, got %#v", resp)
+	}
+	if len(fake.lastReqs) != 2 || fake.lastReqs[0].Action != llmActionOptimizeSQL || fake.lastReqs[1].Action != llmActionReviewSQL {
+		t.Fatalf("expected optimization plus review calls, got %#v", fake.lastReqs)
+	}
+	if !strings.Contains(fake.lastReqs[0].Schema, `"sql_optimizer"`) || fake.lastReqs[1].Schema != "" {
+		t.Fatalf("expected optimizer RAG and no RAG for review, got %#v", fake.lastReqs)
+	}
+}
+
+func TestAPILLMOptimizeSQLRequiresSQL(t *testing.T) {
+	app := newTestApp(t)
+	app.llm = &fakeLLMClient{text: `{"action":"sql","sql":"SELECT 1"}`}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/llm", strings.NewReader(`{"action":"optimize_sql","prompt":"make it faster"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	app.apiLLMHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(app.llm.(*fakeLLMClient).lastReqs) != 0 {
+		t.Fatal("optimizer validation must not call the LLM")
+	}
+}
+
+func TestAPILLMReviewSQLDoesNotBuildRAGContext(t *testing.T) {
+	app := newTestApp(t)
+	app.llm = &fakeLLMClient{text: "The query is read-only and groups by status."}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/llm", strings.NewReader(`{"action":"review_sql","sql":"SELECT status, COUNT(*) FROM invoices GROUP BY status"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	app.apiLLMHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "read-only") {
+		t.Fatalf("expected review text, got: %s", w.Body.String())
+	}
+	if len(app.llm.(*fakeLLMClient).lastReqs) != 1 || app.llm.(*fakeLLMClient).lastReqs[0].Schema != "" {
+		t.Fatalf("review should not send RAG context, got %#v", app.llm.(*fakeLLMClient).lastReqs)
+	}
+}
+
+func TestAPILLMSuggestQuestionsReturnsBoundedPrompts(t *testing.T) {
+	app := newTestApp(t)
+	app.llm = &fakeLLMClient{text: `{"action":"suggestions","suggestions":["Which status has the largest amount?","Which status has the largest amount?","How did the totals change over time?"],"explanation":"Compare the main groups before drilling down."}`}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/llm", strings.NewReader(`{"action":"suggest_questions","columns":["status","amount"],"rows":[["paid","10"],["open","7"]]}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	app.apiLLMHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Action      string   `json:"action"`
+		Suggestions []string `json:"suggestions"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Action != "suggestions" || len(resp.Suggestions) != 2 {
+		t.Fatalf("unexpected suggestions response: %#v", resp)
+	}
+	if len(app.llm.(*fakeLLMClient).lastReqs) != 1 || app.llm.(*fakeLLMClient).lastReqs[0].Result == nil {
+		t.Fatalf("expected result-aware suggestions request, got %#v", app.llm.(*fakeLLMClient).lastReqs)
+	}
+}
+
+func TestAPILLMAnalyzeQualitySendsBoundedResultSummary(t *testing.T) {
+	app := newTestApp(t)
+	fake := &fakeLLMClient{text: "Observed: the status column contains blank values in the sample.\nRecommended checks: measure missingness across the full result."}
+	app.llm = fake
+
+	var rows []string
+	for i := 0; i < maxLLMContextRows+5; i++ {
+		status := "paid"
+		if i%3 == 0 {
+			status = ""
+		}
+		rows = append(rows, `["`+status+`","10"]`)
+	}
+	body := `{"action":"analyze_quality","columns":["status","amount"],"rows":[` + strings.Join(rows, ",") + `]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/llm", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	app.apiLLMHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Observed") {
+		t.Fatalf("expected quality analysis text, got %s", w.Body.String())
+	}
+	if len(fake.lastReqs) != 1 || fake.lastReqs[0].Action != llmActionAnalyzeQuality || fake.lastReqs[0].Result == nil {
+		t.Fatalf("expected result-aware quality request, got %#v", fake.lastReqs)
+	}
+	if !fake.lastReqs[0].Result.Summarized || len(fake.lastReqs[0].Result.Rows) != maxLLMContextRows {
+		t.Fatalf("expected bounded result summary, got %#v", fake.lastReqs[0].Result)
+	}
+	if !strings.Contains(fake.lastReqs[0].Schema, `"result_quality_analyst"`) {
+		t.Fatalf("expected quality skill in RAG context, got %s", fake.lastReqs[0].Schema)
+	}
+}
+
+func TestAPILLMAnalyzeQualityRequiresResult(t *testing.T) {
+	app := newTestApp(t)
+	app.llm = &fakeLLMClient{text: "No result available."}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/llm", strings.NewReader(`{"action":"analyze_quality","prompt":"look for duplicates"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	app.apiLLMHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(app.llm.(*fakeLLMClient).lastReqs) != 0 {
+		t.Fatal("quality validation must not call the LLM")
+	}
+}
+
+func TestFallbackLLMSuggestionsAcceptsOnlyQuestionsAndListItems(t *testing.T) {
+	suggestions := fallbackLLMSuggestions("Summary: paid is largest.\n- Which status changed most?\n2) Compare totals by month\nThis prose must not become a suggestion.")
+	if len(suggestions) != 2 {
+		t.Fatalf("expected two safe fallback suggestions, got %#v", suggestions)
+	}
+	if strings.Contains(strings.Join(suggestions, " "), "prose") {
+		t.Fatalf("unexpected prose suggestion: %#v", suggestions)
 	}
 }
 

@@ -37,7 +37,7 @@ database manager with administrator-managed or per-user credentials.
 | **Session-scoped Active Connection** | Each browser session can use a different active connection |
 | **Table Migration** | Copy a table from one registered connection into another, with optional target table creation |
 | **Matching** | Compare two tables — from the same or different connections, or an uploaded CSV/XLSX file — and find rows that likely describe the same entity (customers, articles, or anything else) despite differing spelling, casing, legal-form suffixes, or address abbreviations; save confirmed matches as a queryable crosswalk table or export as CSV |
-| **LLM Assistant** | Optional OpenAI-compatible assistant for SQL generation, schema context preview, and natural-language explanations |
+| **LLM Assistant** | Optional OpenAI-compatible assistant for SQL generation, draft repair and optimization, SQL review, result explanations and quality signals, next-question prompts, chart specs, and schema context preview |
 | **Runtime Admin Settings** | Dialect, timeouts, LLM provider, page size, and default theme/density can be changed from the Admin UI or API without YAML/JSON config files |
 | **Admin Catalog View** | Authenticated Admin sessions can see DataDock/system tables such as `__datadock_settings`; normal sessions keep them hidden |
 | **Maintenance Mode** | Admin toggle that blocks writes (record edits, DDL, imports, migrations, DML) server-wide while keeping read-only SQL available |
@@ -504,13 +504,44 @@ The SQL editor can call an OpenAI-compatible `/v1/chat/completions` endpoint to:
 
 - turn a natural-language prompt into SQL,
 - safely generate and run read-only result queries,
+- repair a failed query as a reviewable, non-executing SQL draft,
+- optimize current SQL as a reviewable, non-executing draft while preserving its intended result,
+- independently review current SQL for intent, safety, and likely risks,
 - explain query results,
-- explain SQL/database errors.
+- explain SQL/database errors,
+- propose follow-up questions from a result without generating or running them,
+- analyze a current result for observable data-quality signals without generating or executing SQL, or mutating data.
 
 Generated SQL is placed in the editor for review. It is not executed
 automatically unless the user chooses **Ask & Run**. Automatic execution is
 limited to result-producing SQL (`SELECT`, `WITH`, `SHOW`, `EXPLAIN`,
 `DESCRIBE`, `PRAGMA`) and blocks common DDL/DML operations.
+
+**Fix query** uses the current SQL plus the last database error to prepare a
+corrected draft and never executes it. **Review SQL** sends only the user
+request and current SQL to an independent review pass, without schema/RAG
+context. **Suggest next questions** turns an existing result into clickable
+prompts for **Write SQL**; choosing a suggestion never runs a query.
+**Optimize SQL** prepares a revised draft from the current SQL and active
+dialect/schema context; it is placed in the editor but never run automatically.
+**Analyze quality** uses the compact current-result summary and supporting
+schema context. It separates observable signals such as missing values,
+duplicate-looking rows, inconsistent categories, or numeric anomalies from
+recommended next checks and calls out when a result sample limits confidence.
+
+### Assistant Modes
+
+| Mode | Required context | Outcome |
+| --- | --- | --- |
+| **Write SQL** | Prompt, or a current SQL draft | Creates a reviewed SQL draft in the editor; it does not run it. |
+| **Optimize SQL** | Current SQL | Creates a reviewed, dialect-aware SQL draft intended to preserve its result; it does not run it. |
+| **Fix query** | Current SQL and the last database error | Creates a reviewed correction in the editor; it does not run it. |
+| **Review SQL** | Current SQL | Returns an independent text review without sending schema/RAG context. |
+| **Ask & Run** | Prompt | Generates a query and only runs it when the final SQL passes the read-only result-query guard. |
+| **Explain result** | Current query result | Returns a plain-language explanation of the bounded result context. |
+| **Analyze quality** | Current query result | Returns observed quality signals and recommended checks; it does not execute generated SQL or mutate data. |
+| **Create chart** | Current query result | Builds a constrained chart specification from available result columns. |
+| **Suggest next questions** | Current query result | Creates clickable prompts for **Write SQL**; choosing one does not run a query. |
 
 DataDock teaches the LLM the active database shape and SQL dialect on every request
 by sending a compact schema snapshot containing:
@@ -526,6 +557,11 @@ placeholder style, limit/pagination syntax, case-insensitive search operators,
 and words blocked from automatic execution. This is context injection, not model
 training.
 
+The system contract treats prompts, SQL, schema names, sample values, result
+rows, errors, and retrieval/tool output as data rather than model instructions.
+The SQL, chart, and suggestion actions have separate response contracts so an
+explanation is not accidentally parsed as executable SQL.
+
 The SQL editor exposes the same schema snapshot through **Schema** / `GET
 /api/schema`, so users can inspect the exact compact context that will be sent
 to the LLM.
@@ -540,8 +576,14 @@ which returns a compact table/column context from inside SQL.
 DataDock uses small task-specific LLM skills:
 
 - `text_to_sql`: natural language to SQL, with `sql` or `clarify` JSON output.
+- `sql_repair`: correct a failed query into a non-executing SQL draft.
+- `sql_optimizer`: improve a current SQL draft while preserving its intended result.
+- `sql_reviewer`: independently assess SQL intent, read-only status, risks, and likely performance concerns.
 - `result_explainer`: concise explanation of result rows.
 - `sql_error_explainer`: plain-language error diagnosis and correction hints.
+- `result_to_chart`: validate a compact chart specification against current result columns.
+- `result_follow_ups`: return bounded, non-executing follow-up questions for a current result.
+- `result_quality_analyst`: identify observable data-quality signals from a bounded result summary.
 
 For retrieval-augmented generation, DataDock builds a lexical schema index from
 table names, column names, constraints, relationships, and sample values. For
@@ -635,6 +677,9 @@ cmd/datadock/
 | `POST` | `/api/query` | Execute SQL (JSON API) |
 | `POST` | `/api/export` | Download SQL query results as CSV, Excel-safe CSV, TSV, XLSX, JSON, NDJSON, XML, HTML, SQLite, GeoJSON, GeoJSON summary, KML, GPX, or Shapefile ZIP |
 | `GET` | `/api/schema` | Return the compact active-connection schema snapshot used for LLM context |
+| `POST` | `/api/llm` | Run an LLM action: draft-only SQL generation, repair, optimization, review, result/error explanation, result-quality analysis, chart specification, or result follow-up suggestions |
+| `POST` | `/api/llm/preview` | Show the exact system and user messages for an LLM action without contacting a provider |
+| `POST` | `/api/llm/run` | Generate and execute one guarded read-only SQL query |
 | `GET` | `/api/tinysql/agent-context?max_tables=12&max_chars=6000` | Return tinySQL's native agent-context profile for the local tinySQL connection |
 | `GET` | `/api/catalog` | Return async catalog roots for non-tinySQL connections |
 | `GET` | `/api/catalog/expand` | Expand an async catalog node |

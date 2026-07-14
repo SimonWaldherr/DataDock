@@ -73,6 +73,30 @@ func llmSkillForAction(action string) LLMSkillProfile {
 				"Match the active dialect profile exactly.",
 			},
 		}
+	case llmActionFixSQL:
+		return LLMSkillProfile{
+			Name:    "sql_repair",
+			Purpose: "Correct a failing SQL query while preserving the user's intent.",
+			Instructions: []string{
+				"Use the supplied database error and the active dialect profile.",
+				"Use only tables and columns present in the retrieved schema context.",
+				"Return one corrected read-only query when possible.",
+				"Do not execute the correction or claim it was executed.",
+				"Ask one concrete clarification when the error cannot be resolved from context.",
+			},
+		}
+	case llmActionOptimizeSQL:
+		return LLMSkillProfile{
+			Name:    "sql_optimizer",
+			Purpose: "Improve an existing SQL draft without changing the intended result.",
+			Instructions: []string{
+				"Preserve the query's output semantics unless the user explicitly asks for a different result.",
+				"Use only tables and columns present in the retrieved schema context.",
+				"Improve clarity, efficiency, or active-dialect correctness only when the context supports it.",
+				"Return one reviewable SQL draft and never execute or claim to execute it.",
+				"Ask one concrete clarification when preserving the intended result is ambiguous.",
+			},
+		}
 	case llmActionExplainResults:
 		return LLMSkillProfile{
 			Name:    "result_explainer",
@@ -114,6 +138,28 @@ func llmSkillForAction(action string) LLMSkillProfile {
 				"Describe the SQL intent.",
 				"Call out safety concerns and whether it appears read-only.",
 				"Do not assume unavailable schema details.",
+			},
+		}
+	case llmActionSuggestQuestions:
+		return LLMSkillProfile{
+			Name:    "result_follow_ups",
+			Purpose: "Suggest useful next questions about a SQL result without running anything.",
+			Instructions: []string{
+				"Use only the current result sample and retrieved schema context.",
+				"Suggest three or four concrete, answerable questions.",
+				"Do not invent findings or claim that a suggestion has been executed.",
+				"Return the structured suggestions contract.",
+			},
+		}
+	case llmActionAnalyzeQuality:
+		return LLMSkillProfile{
+			Name:    "result_quality_analyst",
+			Purpose: "Identify observable data-quality signals in a bounded SQL result summary.",
+			Instructions: []string{
+				"Base observations only on the supplied result summary and retrieved schema context.",
+				"Check for missing values, inconsistent categories, duplicates, and numeric anomalies when the summary supports it.",
+				"Separate observed signals from recommended checks and mention sampling limitations.",
+				"Do not invent findings, mutate data, generate SQL, or claim that anything was executed.",
 			},
 		}
 	default:

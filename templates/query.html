@@ -23,10 +23,15 @@
           </button>
           <ul id="llmModeMenu" class="dropdown-menu">
             <li><button class="dropdown-item" type="button" data-llm-mode="generate_sql" onclick="setLLMMode('generate_sql')"><i class="bi bi-code-slash me-2"></i>Write SQL<div class="small text-muted">Put a query into the editor for review</div></button></li>
+            <li><button class="dropdown-item" type="button" data-llm-mode="optimize_sql" onclick="setLLMMode('optimize_sql')"><i class="bi bi-speedometer2 me-2"></i>Optimize SQL<div class="small text-muted">Improve the current draft without running it</div></button></li>
+            <li><button class="dropdown-item" type="button" data-llm-mode="fix_sql" onclick="setLLMMode('fix_sql')"><i class="bi bi-wrench-adjustable me-2"></i>Fix query<div class="small text-muted">Correct the last failing SQL without running it</div></button></li>
+            <li><button class="dropdown-item" type="button" data-llm-mode="review_sql" onclick="setLLMMode('review_sql')"><i class="bi bi-shield-check me-2"></i>Review SQL<div class="small text-muted">Check intent, safety, and likely query risks</div></button></li>
             <li><button class="dropdown-item" type="button" data-llm-mode="ask_and_run" onclick="setLLMMode('ask_and_run')"><i class="bi bi-lightning-charge-fill me-2"></i>Ask &amp; Run<div class="small text-muted">Generate and run a read-only query</div></button></li>
             <li><hr class="dropdown-divider"></li>
             <li><button class="dropdown-item" type="button" data-llm-mode="create_chart" onclick="setLLMMode('create_chart')"><i class="bi bi-bar-chart me-2"></i>Create chart<div class="small text-muted">Build a chart from the current result</div></button></li>
             <li><button class="dropdown-item" type="button" data-llm-mode="explain_results" onclick="setLLMMode('explain_results')"><i class="bi bi-card-text me-2"></i>Explain result</button></li>
+            <li><button class="dropdown-item" type="button" data-llm-mode="analyze_quality" onclick="setLLMMode('analyze_quality')"><i class="bi bi-clipboard2-data me-2"></i>Analyze quality<div class="small text-muted">Inspect the current result for data-quality signals</div></button></li>
+            <li><button class="dropdown-item" type="button" data-llm-mode="suggest_questions" onclick="setLLMMode('suggest_questions')"><i class="bi bi-signpost-split me-2"></i>Suggest next questions<div class="small text-muted">Offer follow-up questions without running them</div></button></li>
             <li><button class="dropdown-item" type="button" data-llm-mode="explain_error" onclick="setLLMMode('explain_error')"><i class="bi bi-bug me-2"></i>Explain error</button></li>
           </ul>
         </div>

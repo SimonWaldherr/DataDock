@@ -4145,7 +4145,7 @@ func (a *App) apiLLMHandler(w http.ResponseWriter, r *http.Request) {
 
 	action := strings.TrimSpace(body.Action)
 	switch action {
-	case llmActionGenerateSQL, llmActionExplainResults, llmActionExplainError, llmActionAskRun, llmActionCreateChart:
+	case llmActionGenerateSQL, llmActionFixSQL, llmActionOptimizeSQL, llmActionExplainResults, llmActionExplainError, llmActionAskRun, llmActionCreateChart, llmActionReviewSQL, llmActionSuggestQuestions, llmActionAnalyzeQuality:
 	default:
 		a.writeProblem(w, r, http.StatusBadRequest, "Unsupported LLM action", "unsupported LLM action")
 		return
@@ -4158,11 +4158,38 @@ func (a *App) apiLLMHandler(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, r, http.StatusBadRequest, "Missing LLM input", "prompt, sql, error, or rows are required")
 		return
 	}
+	switch action {
+	case llmActionFixSQL:
+		if sqlText == "" || errorText == "" {
+			a.writeProblem(w, r, http.StatusBadRequest, "Missing SQL repair context", "fix_sql requires the current SQL and a database error")
+			return
+		}
+	case llmActionOptimizeSQL:
+		if sqlText == "" {
+			a.writeProblem(w, r, http.StatusBadRequest, "Missing SQL", "optimize_sql requires the current SQL")
+			return
+		}
+	case llmActionReviewSQL:
+		if sqlText == "" {
+			a.writeProblem(w, r, http.StatusBadRequest, "Missing SQL", "review_sql requires the current SQL")
+			return
+		}
+	case llmActionSuggestQuestions:
+		if len(body.Columns) == 0 || len(body.Rows) == 0 {
+			a.writeProblem(w, r, http.StatusBadRequest, "Missing result", "suggest_questions requires a query result")
+			return
+		}
+	case llmActionAnalyzeQuality:
+		if len(body.Columns) == 0 || len(body.Rows) == 0 {
+			a.writeProblem(w, r, http.StatusBadRequest, "Missing result", "analyze_quality requires a query result")
+			return
+		}
+	}
 
 	req := a.buildLLMRequest(r.Context(), action, prompt, sqlText, errorText, body.Columns, body.Rows)
 	var out string
 	var err error
-	if action == llmActionGenerateSQL || action == llmActionCreateChart {
+	if action == llmActionGenerateSQL || action == llmActionFixSQL || action == llmActionOptimizeSQL || action == llmActionCreateChart {
 		out, err = a.completeSQLWithToolCalls(r.Context(), llm, req)
 	} else {
 		out, err = llm.Complete(r.Context(), req)
@@ -4171,13 +4198,14 @@ func (a *App) apiLLMHandler(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, r, http.StatusBadGateway, "LLM request failed", err.Error())
 		return
 	}
-	if action == llmActionGenerateSQL {
+	if action == llmActionGenerateSQL || action == llmActionFixSQL || action == llmActionOptimizeSQL {
 		parsed := parseLLMSQLResponse(out)
 		if strings.TrimSpace(parsed.SQL) != "" {
 			parsed.Review = a.reviewGeneratedSQL(r.Context(), llm, prompt, parsed.SQL)
 		}
 		resp := map[string]any{
 			"action":      parsed.Action,
+			"mode":        action,
 			"text":        parsed.SQL,
 			"sql":         parsed.SQL,
 			"explanation": parsed.Explanation,
@@ -4186,6 +4214,25 @@ func (a *App) apiLLMHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if parsed.Chart != nil {
 			resp["chart"] = parsed.Chart
+		}
+		a.writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	if action == llmActionSuggestQuestions {
+		parsed := parseLLMSQLResponse(out)
+		suggestions := parsed.Suggestions
+		if len(suggestions) == 0 && parsed.Action != "clarify" {
+			suggestions = fallbackLLMSuggestions(out)
+		}
+		responseAction := parsed.Action
+		if len(suggestions) > 0 {
+			responseAction = "suggestions"
+		}
+		resp := map[string]any{
+			"action":      responseAction,
+			"suggestions": suggestions,
+			"explanation": parsed.Explanation,
+			"follow_up":   parsed.FollowUp,
 		}
 		a.writeJSON(w, http.StatusOK, resp)
 		return
@@ -4204,6 +4251,10 @@ func (a *App) apiLLMHandler(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusOK, resp)
 		return
 	}
+	if action == llmActionReviewSQL {
+		a.writeJSON(w, http.StatusOK, map[string]string{"text": trimForLLM(stripMarkdownCodeFence(out), maxLLMReviewChars)})
+		return
+	}
 
 	a.writeJSON(w, http.StatusOK, map[string]string{"text": out})
 }
@@ -4217,10 +4268,14 @@ func (a *App) buildLLMRequest(ctx context.Context, action, prompt, sqlText, erro
 	if len(columns) > 0 || len(rows) > 0 {
 		resultCtx = summarizeLLMResult(columns, rows)
 	}
+	schema := ""
+	if action != llmActionReviewSQL {
+		schema = a.llmSchemaContext(ctx, action, prompt, sqlText, errorText)
+	}
 	return LLMRequest{
 		Action: action,
 		Prompt: prompt,
-		Schema: a.llmSchemaContext(ctx, action, prompt, sqlText, errorText),
+		Schema: schema,
 		SQL:    sqlText,
 		Error:  errorText,
 		Result: resultCtx,
@@ -4246,7 +4301,7 @@ func (a *App) apiLLMPreviewHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	action := strings.TrimSpace(body.Action)
 	switch action {
-	case llmActionGenerateSQL, llmActionExplainResults, llmActionExplainError, llmActionAskRun, llmActionCreateChart:
+	case llmActionGenerateSQL, llmActionFixSQL, llmActionOptimizeSQL, llmActionExplainResults, llmActionExplainError, llmActionAskRun, llmActionCreateChart, llmActionReviewSQL, llmActionSuggestQuestions, llmActionAnalyzeQuality:
 	default:
 		action = llmActionAskRun
 	}

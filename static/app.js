@@ -1696,10 +1696,10 @@ function llmPayloadForAction(action) {
     prompt: document.getElementById('llmPrompt').value.trim(),
     sql: getEditorValue().trim()
   };
-  if (action === 'explain_error') {
+  if (action === 'explain_error' || action === 'fix_sql') {
     payload.error = lastErrorMessage || '';
   }
-  if ((action === 'explain_results' || action === 'create_chart') && lastResultData) {
+  if ((action === 'explain_results' || action === 'create_chart' || action === 'suggest_questions' || action === 'analyze_quality') && lastResultData) {
     payload.columns = lastResultData.columns || [];
     payload.rows = lastResultData.rows || [];
   }
@@ -1713,11 +1713,26 @@ function validateLLMAction(action, payload) {
   if (action === 'ask_and_run' && !payload.prompt) {
     return {message: 'Describe the read-only query to generate and run.', focus: 'prompt'};
   }
+  if (action === 'fix_sql' && (!payload.sql || !payload.error)) {
+    return {message: 'Run a failing SQL query first, then let AI prepare a correction.', focus: 'editor'};
+  }
+  if (action === 'optimize_sql' && !payload.sql) {
+    return {message: 'Write or select SQL in the editor before asking AI to optimize it.', focus: 'editor'};
+  }
+  if (action === 'review_sql' && !payload.sql) {
+    return {message: 'Write or select SQL in the editor before requesting a review.', focus: 'editor'};
+  }
   if (action === 'explain_results' && (!lastResultData || !(lastResultData.rows || []).length)) {
     return {message: 'Run a query first, then explain its result.', focus: 'editor'};
   }
   if (action === 'create_chart' && (!lastResultData || !(lastResultData.rows || []).length)) {
     return {message: 'Run a query first, then ask AI for a chart.', focus: 'editor'};
+  }
+  if (action === 'suggest_questions' && (!lastResultData || !(lastResultData.rows || []).length)) {
+    return {message: 'Run a query first, then ask AI for follow-up questions.', focus: 'editor'};
+  }
+  if (action === 'analyze_quality' && (!lastResultData || !(lastResultData.rows || []).length)) {
+    return {message: 'Run a query first, then ask AI to inspect its data-quality signals.', focus: 'editor'};
   }
   if (action === 'explain_error' && !payload.error) {
     return {message: 'Run a failing query first, then explain the error.', focus: 'editor'};
@@ -1768,7 +1783,7 @@ function askLLM(action) {
       showLLMAlert('warning', resp.data.error || 'LLM request failed');
       return;
     }
-    if (action === 'generate_sql') {
+    if (action === 'generate_sql' || action === 'fix_sql' || action === 'optimize_sql') {
       if (resp.data.action === 'clarify') {
         handleLLMClarify(resp.data);
         return;
@@ -1780,7 +1795,15 @@ function askLLM(action) {
       }
       setEditorValue(generatedSQL);
       focusEditor();
-      document.getElementById('llmAnswer').innerHTML = renderLLMSQLMetadata(resp.data);
+      document.getElementById('llmAnswer').innerHTML = renderLLMSQLMetadata(resp.data, action);
+      return;
+    }
+    if (action === 'suggest_questions') {
+      if (resp.data.action === 'clarify') {
+        handleLLMClarify(resp.data);
+        return;
+      }
+      renderLLMSuggestions(resp.data);
       return;
     }
     if (action === 'create_chart') {
@@ -1804,8 +1827,14 @@ function askLLM(action) {
   });
 }
 
-function renderLLMSQLMetadata(data) {
-  var parts = ['<div class="alert alert-info py-2 mb-0">SQL generated in the editor. Review it before running.'];
+function renderLLMSQLMetadata(data, action) {
+  var headline = 'SQL generated in the editor. Review it before running.';
+  if (action === 'fix_sql') {
+    headline = 'Corrected SQL is in the editor. Review it before running.';
+  } else if (action === 'optimize_sql') {
+    headline = 'Optimized SQL is in the editor. Review it before running.';
+  }
+  var parts = ['<div class="alert alert-info py-2 mb-0">' + headline];
   if (data.explanation) {
     parts.push('<div class="mt-2" style="white-space:pre-wrap">' + escHtml(data.explanation) + '</div>');
   }
@@ -1820,6 +1849,41 @@ function renderLLMSQLMetadata(data) {
   }
   parts.push('</div>');
   return parts.join('');
+}
+
+function renderLLMSuggestions(data) {
+  var answer = document.getElementById('llmAnswer');
+  var suggestions = Array.isArray(data.suggestions) ? data.suggestions.filter(function (suggestion) {
+    return typeof suggestion === 'string' && suggestion.trim();
+  }) : [];
+  answer.innerHTML = '';
+  if (!suggestions.length) {
+    showLLMAlert('warning', data.explanation || 'The AI did not return usable follow-up questions.');
+    return;
+  }
+
+  var panel = document.createElement('div');
+  panel.className = 'alert alert-info py-2 mb-0';
+  var intro = document.createElement('div');
+  intro.className = 'mb-2';
+  intro.textContent = data.explanation || 'Choose a follow-up question to draft SQL. Nothing runs automatically.';
+  panel.appendChild(intro);
+
+  suggestions.forEach(function (suggestion) {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-outline-primary btn-sm d-block text-start w-100 mb-1';
+    button.textContent = suggestion;
+    button.addEventListener('click', function () {
+      var prompt = document.getElementById('llmPrompt');
+      prompt.value = suggestion;
+      setLLMMode('generate_sql');
+      prompt.focus();
+      updateLLMButtonState();
+    });
+    panel.appendChild(button);
+  });
+  answer.appendChild(panel);
 }
 
 function askAndRunLLM() {
@@ -1922,6 +1986,27 @@ var llmModeMeta = {
     status: 'Drafting and reviewing SQL...',
     placeholder: 'Ask AI to write or improve SQL'
   },
+  fix_sql: {
+    icon: 'bi-wrench-adjustable',
+    label: 'Fix query',
+    title: 'Ask AI to correct the last failing SQL without running it',
+    status: 'Preparing a safe SQL correction...',
+    placeholder: 'Optionally describe the intended result'
+  },
+  optimize_sql: {
+    icon: 'bi-speedometer2',
+    label: 'Optimize SQL',
+    title: 'Ask AI to improve the current SQL without running it',
+    status: 'Optimizing and reviewing SQL...',
+    placeholder: 'Optionally describe the constraint or concern'
+  },
+  review_sql: {
+    icon: 'bi-shield-check',
+    label: 'Review SQL',
+    title: 'Ask AI to review the current SQL for intent, safety, and risks',
+    status: 'Reviewing SQL...',
+    placeholder: 'Optionally describe the intended result'
+  },
   ask_and_run: {
     icon: 'bi-stars',
     label: 'Ask AI',
@@ -1942,6 +2027,20 @@ var llmModeMeta = {
     title: 'Ask AI to explain the current result',
     status: 'Explaining result...',
     placeholder: 'Ask AI what to focus on in the result'
+  },
+  analyze_quality: {
+    icon: 'bi-clipboard2-data',
+    label: 'Analyze quality',
+    title: 'Ask AI to inspect the current result for data-quality signals',
+    status: 'Analyzing result quality...',
+    placeholder: 'Optionally say which quality concern to investigate'
+  },
+  suggest_questions: {
+    icon: 'bi-signpost-split',
+    label: 'Next questions',
+    title: 'Ask AI for follow-up questions without running them',
+    status: 'Finding useful follow-up questions...',
+    placeholder: 'Optionally say what you want to investigate next'
   },
   explain_error: {
     icon: 'bi-stars',
