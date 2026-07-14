@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,10 +15,9 @@ func newBenchmarkApp(b *testing.B, rows int) *App {
 	b.Helper()
 
 	nativeDB := tinysql.NewDB()
-	tsqldriver.SetDefaultDB(nativeDB)
-	tenant := fmt.Sprintf("bench_%s_%d", strings.ReplaceAll(b.Name(), "/", "_"), rows)
+	tenant := "default"
 
-	sqlDB, err := sql.Open("tinysql", "mem://?tenant="+tenant)
+	sqlDB, err := tsqldriver.OpenWithDB(nativeDB)
 	if err != nil {
 		b.Fatalf("open sql db: %v", err)
 	}

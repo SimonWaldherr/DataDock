@@ -170,16 +170,35 @@ func TestEncryptedMemoryStorageIsRejected(t *testing.T) {
 	}
 }
 
+func TestStorageOptionsValidateReadOnlyAndCache(t *testing.T) {
+	if _, err := openNativeDBWithStorageOptions(":memory:", "memory", nil, true, 0); err == nil {
+		t.Fatal("expected read-only memory storage to be rejected")
+	}
+	if _, err := openNativeDBWithStorageOptions(t.TempDir(), "paged_index", nil, false, -1); err == nil {
+		t.Fatal("expected negative storage cache to be rejected")
+	}
+}
+
+func TestPagedIndexStorageModeOpens(t *testing.T) {
+	db, err := openNativeDBWithStorageOptions(t.TempDir(), "paged_index", nil, false, 4<<20)
+	if err != nil {
+		t.Fatalf("open paged index storage: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close paged index storage: %v", err)
+	}
+}
+
 // newTestApp creates a fully isolated App for testing. Each call uses a unique
 // tenant name so tests don't interfere through the global driver server.
 func newTestApp(t *testing.T) *App {
 	t.Helper()
 
 	nativeDB := tinysql.NewDB()
-	tsqldriver.SetDefaultDB(nativeDB)
-	tenant := fmt.Sprintf("test_%d", testCounter.Add(1))
+	tenant := "default"
+	_ = testCounter.Add(1)
 
-	sqlDB, err := sql.Open("tinysql", "mem://?tenant="+tenant)
+	sqlDB, err := tsqldriver.OpenWithDB(nativeDB)
 	if err != nil {
 		t.Fatalf("open sql db: %v", err)
 	}

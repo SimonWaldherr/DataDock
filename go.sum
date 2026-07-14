@@ -12,8 +12,8 @@ github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/internal v1.2.0 h1:nCYfg
 github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/internal v1.2.0/go.mod h1:ucUjca2JtSZboY8IoUqyQyuuXvwbMBVwFOm0vdQPNhA=
 github.com/AzureAD/microsoft-authentication-library-for-go v1.6.0 h1:XRzhVemXdgvJqCH0sFfrBUTnUJSBrBf7++ypk+twtRs=
 github.com/AzureAD/microsoft-authentication-library-for-go v1.6.0/go.mod h1:HKpQxkWaGLJ+D/5H8QRpyQXA1eKjxkFlOMwck5+33Jk=
-github.com/SimonWaldherr/tinySQL v0.19.1 h1:YfRes0Od44R77oECxshFRo/TlGsyLLwxBzZxSDBy4GE=
-github.com/SimonWaldherr/tinySQL v0.19.1/go.mod h1:YUvPGSchgfReG/VODUZvuTYuMuW1/QRByMHjTWaefyk=
+github.com/SimonWaldherr/tinySQL v0.20.0 h1:434hZ8Ya0D/m+GBxYus7W+hq864KjvO+ZRNCuqORf8s=
+github.com/SimonWaldherr/tinySQL v0.20.0/go.mod h1:YUvPGSchgfReG/VODUZvuTYuMuW1/QRByMHjTWaefyk=
 github.com/andybalholm/brotli v1.2.2 h1:HzTuoo2ErYQqf5qvcJInB8uvqSVxRttzkFexPWtnceM=
 github.com/andybalholm/brotli v1.2.2/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=

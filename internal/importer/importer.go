@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -104,7 +105,18 @@ func decodeDelimitedText(data []byte) (string, string, error) {
 		return string(utf16.Decode(words)), "utf-16", nil
 	}
 	if !utf8.Valid(data) {
-		return "", "", fmt.Errorf("delimited input is not valid UTF-8; convert the file to UTF-8 or UTF-16 before importing")
+		if bytes.IndexByte(data, 0) >= 0 {
+			return "", "", fmt.Errorf("delimited input is binary; import binary values through a typed BLOB source")
+		}
+		// ISO-8859-1 remains common in CSV exports. Its byte-to-code-point
+		// mapping is unambiguous, unlike many legacy code pages, so normalize
+		// it without guessing at Windows-specific substitutions.
+		var b strings.Builder
+		b.Grow(len(data))
+		for _, v := range data {
+			b.WriteRune(rune(v))
+		}
+		return b.String(), "iso-8859-1", nil
 	}
 	return string(data), "utf-8", nil
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,8 +12,7 @@ import (
 
 func ExampleApp_apiExportHandler() {
 	nativeDB := tinysql.NewDB()
-	tsqldriver.SetDefaultDB(nativeDB)
-	sqlDB, err := sql.Open("tinysql", "mem://?tenant=example_export")
+	sqlDB, err := tsqldriver.OpenWithDB(nativeDB)
 	if err != nil {
 		panic(err)
 	}
@@ -24,7 +22,7 @@ func ExampleApp_apiExportHandler() {
 	if err != nil {
 		panic(err)
 	}
-	app := newApp(nativeDB, sqlDB, "example_export", tpl)
+	app := newApp(nativeDB, sqlDB, "default", tpl)
 
 	if _, err := app.sqlDB.Exec("CREATE TABLE people (id INT, name TEXT)"); err != nil {
 		panic(err)

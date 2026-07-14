@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"embed"
 	"encoding/base64"
 	"encoding/hex"
@@ -16,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -39,7 +39,9 @@ func main() {
 	port := flag.Int("port", 0, fmt.Sprintf("HTTP listen port; 0 = use the stored setting or auto-detect a free port between %d and %d", autoPortRangeLow, autoPortRangeHigh))
 	findFreePortFlag := flag.Bool("find-free-port", false, fmt.Sprintf("print a free TCP port between %d and %d and exit (tooling helper)", autoPortRangeLow, autoPortRangeHigh))
 	dbFile := flag.String("db", "datadock.db", "Database file path (empty or :memory: for in-memory)")
-	storageMode := flag.String("storage-mode", envDefault("DATADOCK_STORAGE_MODE", "memory"), "tinySQL storage mode: memory, disk, json, hybrid, or index (encryption is supported only by the disk-backed modes)")
+	storageMode := flag.String("storage-mode", envDefault("DATADOCK_STORAGE_MODE", "memory"), "tinySQL storage mode: memory, disk, json, hybrid, index, or paged_index (encryption is supported only by disk/json/hybrid/index)")
+	storageReadOnly := flag.Bool("storage-read-only", envBoolDefault("DATADOCK_STORAGE_READ_ONLY", false), "Open the configured tinySQL storage artifact read-only for serving")
+	storageCacheBytes := flag.Int64("storage-cache-bytes", envInt64Default("DATADOCK_STORAGE_CACHE_BYTES", 0), "Maximum resident storage cache bytes for index, hybrid, and paged_index modes (0 uses tinySQL defaults)")
 	tenant := flag.String("tenant", "default", "Tenant / schema name")
 	sqlDialect := flag.String("dialect", envDefault("DATADOCK_SQL_DIALECT", "tinysql"), "SQL dialect profile for LLM guidance (tinysql, sqlite, postgres, mysql, mariadb, mssql)")
 	llmBaseURL := flag.String("llm-base-url", envDefault("DATADOCK_LLM_BASE_URL", ""), "OpenAI-compatible base URL, e.g. https://api.openai.com/v1 or http://127.0.0.1:1234/v1")
@@ -75,7 +77,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("storage encryption: %v", err)
 	}
-	nativeDB, err := openNativeDBWithStorage(*dbFile, *storageMode, encryptionKey)
+	nativeDB, err := openNativeDBWithStorageOptions(*dbFile, *storageMode, encryptionKey, *storageReadOnly, *storageCacheBytes)
 	if err != nil {
 		log.Fatalf("open database: %v", err)
 	}
@@ -89,11 +91,13 @@ func main() {
 		}
 	}()
 
-	// Register the native DB instance with the database/sql driver so that
-	// sql.Open("tinysql", ...) shares the same underlying storage.
-	tsqldriver.SetDefaultDB(nativeDB)
-
-	sqlDB, err := sql.Open("tinysql", "mem://?tenant="+*tenant)
+	// v0.20 deliberately isolates named mem:// DSNs. OpenWithDB is the
+	// supported embedding path for sharing this native instance with
+	// database/sql callers.
+	if *tenant != "default" {
+		log.Fatalf("tenant %q is not supported with the embedded database/sql bridge; use the default tenant", *tenant)
+	}
+	sqlDB, err := tsqldriver.OpenWithDB(nativeDB)
 	if err != nil {
 		log.Fatalf("sql.Open: %v", err)
 	}
@@ -382,9 +386,16 @@ func openNativeDB(filePath string) (*tinysql.DB, error) {
 // while allowing disk-backed tinySQL modes to use AES-256-GCM. WAL is never
 // passed an encryption key because tinySQL deliberately does not encrypt WAL.
 func openNativeDBWithStorage(filePath, modeName string, encryptionKey []byte) (*tinysql.DB, error) {
+	return openNativeDBWithStorageOptions(filePath, modeName, encryptionKey, false, 0)
+}
+
+func openNativeDBWithStorageOptions(filePath, modeName string, encryptionKey []byte, readOnly bool, maxMemoryBytes int64) (*tinysql.DB, error) {
 	if filePath == "" || filePath == ":memory:" {
 		if len(encryptionKey) > 0 {
 			return nil, fmt.Errorf("DATADOCK_ENCRYPTION_KEY requires a disk-backed storage mode (disk, json, hybrid, or index)")
+		}
+		if readOnly {
+			return nil, fmt.Errorf("read-only serving requires an existing file or storage directory")
 		}
 		return tinysql.NewDB(), nil
 	}
@@ -392,13 +403,18 @@ func openNativeDBWithStorage(filePath, modeName string, encryptionKey []byte) (*
 	if err != nil {
 		return nil, err
 	}
+	if maxMemoryBytes < 0 {
+		return nil, fmt.Errorf("storage cache bytes must not be negative")
+	}
 	if len(encryptionKey) > 0 && mode != tinysql.ModeDisk && mode != tinysql.ModeJSON && mode != tinysql.ModeHybrid && mode != tinysql.ModeIndex {
-		return nil, fmt.Errorf("storage encryption is supported only by disk, json, hybrid, and index modes; WAL is intentionally not encrypted")
+		return nil, fmt.Errorf("storage encryption is supported only by disk, json, hybrid, and index modes; WAL and paged_index are intentionally not encrypted")
 	}
 	db, err := tinysql.OpenDB(tinysql.StorageConfig{
-		Mode:          mode,
-		Path:          filePath,
-		EncryptionKey: encryptionKey,
+		Mode:           mode,
+		Path:           filePath,
+		EncryptionKey:  encryptionKey,
+		ReadOnly:       readOnly,
+		MaxMemoryBytes: maxMemoryBytes,
 	})
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -489,6 +505,19 @@ func envBoolDefault(key string, fallback bool) bool {
 		log.Printf("invalid boolean in %s=%q, using %t", key, v, fallback)
 		return fallback
 	}
+}
+
+func envInt64Default(key string, fallback int64) int64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		log.Printf("invalid integer in %s=%q, using %d", key, v, fallback)
+		return fallback
+	}
+	return n
 }
 
 func mergeRuntimeSettingsWithExplicitFlags(stored, flags RuntimeSettings) RuntimeSettings {

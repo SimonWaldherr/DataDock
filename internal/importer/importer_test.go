@@ -64,6 +64,18 @@ func TestImportCSVDecodesUTF16(t *testing.T) {
 	}
 }
 
+func TestImportCSVDecodesISO88591(t *testing.T) {
+	db := tinysql.NewDB()
+	data := []byte("name\nAndr\xe9\n")
+	res, err := ImportCSV(context.Background(), db, "default", "latin1_import", bytes.NewReader(data), &ImportOptions{CreateTable: true})
+	if err != nil {
+		t.Fatalf("ImportCSV ISO-8859-1: %v", err)
+	}
+	if res.Encoding != "iso-8859-1" || res.RowsInserted != 1 {
+		t.Fatalf("unexpected ISO-8859-1 import result: %#v", res)
+	}
+}
+
 func TestImportGeoJSONCreatesGeometryAndPropertyColumns(t *testing.T) {
 	db := tinysql.NewDB()
 	body := strings.NewReader(`{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[11.5761,48.1372]},"properties":{"name":"Munich","population":1500000}}]}`)

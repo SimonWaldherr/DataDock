@@ -141,6 +141,18 @@ The key is read only from the environment and is never stored in DataDock
 settings. WAL modes are intentionally rejected with encryption because tinySQL
 does not encrypt WAL files. Storage metadata remains unencrypted.
 
+tinySQL v0.20.0 also adds `paged_index` for read-mostly artifacts. Select it
+with `-storage-mode paged_index`, bound page-cache residency with
+`-storage-cache-bytes`/`DATADOCK_STORAGE_CACHE_BYTES`, and use
+`-storage-read-only`/`DATADOCK_STORAGE_READ_ONLY` when serving an existing
+artifact. It is intentionally not offered with encryption because its pager
+backend does not use the disk-table encryptor.
+
+The embedded `database/sql` bridge uses tinySQL's `OpenWithDB` path because
+v0.20 intentionally isolates named `mem://` DSNs. Consequently the embedded
+bridge operates in the `default` tenant; use an external managed connection
+when separate tenant namespaces are required.
+
 CSV and TSV inputs accept UTF-8 (including BOM) and UTF-16 BOM exports. Binary
 payloads remain encoded or typed as BLOB values rather than coerced through
 text decoding. GeoJSON, KML, and OSM imports are directly supported. Shapefile
