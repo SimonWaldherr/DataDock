@@ -3,82 +3,1219 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="DataDock is a SQL-first workspace for the messy, multi-format reality of data work.">
-  <title>DataDock - SQL without the ceremony</title>
+  <meta name="theme-color" content="#11231f">
+  <meta name="description" content="DataDock is a self-hosted, browser-first SQL workspace for databases, files, maps, matching, and portable data delivery.">
+  <meta property="og:title" content="DataDock | SQL for the data you actually have">
+  <meta property="og:description" content="A local, browser-first SQL workspace for databases, files, maps, matching, and exports.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://simonwaldherr.github.io/DataDock/">
+  <title>DataDock | SQL for the data you actually have</title>
   <style>
-    :root { --ink:#11231f; --muted:#52625e; --lime:#c8fa63; --mint:#dff9e2; --paper:#f7f6ed; --orange:#ff7043; --line:rgba(17,35,31,.15); --card:#fffef8; }
-    * { box-sizing:border-box; }
-    html { scroll-behavior:smooth; }
-    body { margin:0; color:var(--ink); background:var(--paper); font-family:Georgia, 'Times New Roman', serif; }
-    a { color:inherit; }
-    .mono, code, .eyebrow, .nav, .btn, .terminal, .stat-value { font-family:'Courier New', Courier, monospace; }
-    .grain { position:fixed; pointer-events:none; inset:0; z-index:20; opacity:.18; background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.32'/%3E%3C/svg%3E"); }
-    .wrap { max-width:1200px; margin:auto; padding:0 28px; }
-    nav { display:flex; align-items:center; justify-content:space-between; padding:24px 0; border-bottom:1px solid var(--line); font-size:12px; letter-spacing:.04em; }
-    .brand { text-decoration:none; font-weight:bold; font-size:16px; display:flex; align-items:center; gap:9px; }
-    .dock { display:grid; grid-template-columns:repeat(3,5px); gap:2px; transform:rotate(45deg); margin:0 3px 0 2px; }
-    .dock i { display:block; width:5px; height:5px; background:var(--orange); }
-    .dock i:nth-child(2), .dock i:nth-child(4), .dock i:nth-child(6), .dock i:nth-child(8) { background:var(--lime); }
-    .nav-links { display:flex; align-items:center; gap:24px; }
-    .nav-links a { text-decoration:none; }
-    .nav-links a:hover { text-decoration:underline; text-underline-offset:4px; }
-    .hero { position:relative; overflow:hidden; padding:86px 0 72px; }
-    .hero:before { content:''; position:absolute; width:580px; height:580px; border-radius:50%; right:-160px; top:-220px; background:radial-gradient(circle at 40% 40%, var(--lime), transparent 67%); opacity:.76; }
-    .hero-grid { display:grid; grid-template-columns:1.08fr .92fr; gap:54px; align-items:center; position:relative; }
-    .eyebrow { color:var(--muted); font-size:12px; letter-spacing:.08em; text-transform:uppercase; }
-    h1 { font-size:clamp(53px,8vw,105px); line-height:.86; letter-spacing:-.075em; margin:20px 0 25px; font-weight:normal; max-width:750px; }
-    h1 em { font-style:normal; color:var(--orange); }
-    .hero-copy { max-width:575px; font-size:20px; line-height:1.36; color:#344541; }
-    .actions { display:flex; flex-wrap:wrap; gap:12px; margin-top:31px; }
-    .btn { display:inline-flex; align-items:center; justify-content:center; min-height:46px; padding:0 18px; font-size:13px; text-decoration:none; border:1px solid var(--ink); transition:transform .2s, box-shadow .2s; }
-    .btn:hover { transform:translate(-3px,-3px); box-shadow:4px 4px 0 var(--ink); }
-    .btn.primary { background:var(--ink); color:var(--lime); }
-    .btn.secondary { background:transparent; }
-    .hero-note { margin-top:18px; color:var(--muted); font-size:13px; }
-    .terminal { background:#13231e; color:#e4f7d7; box-shadow:12px 12px 0 rgba(17,35,31,.17); transform:rotate(1.5deg); overflow:hidden; }
-    .term-head { display:flex; align-items:center; gap:6px; padding:12px 15px; background:#0d1915; border-bottom:1px solid rgba(255,255,255,.13); }
-    .term-head span { width:8px; height:8px; border-radius:50%; background:#ff7657; } .term-head span:nth-child(2){background:#ffd66b}.term-head span:nth-child(3){background:#88e58d}
-    .term-head b { margin-left:7px; color:#91a59c; font-size:11px; font-weight:normal; }
-    .term-body { padding:24px; min-height:330px; font-size:13px; line-height:1.72; }
-    .term-body .p { color:#9be5d1; }.term-body .o { color:#ffc978; }.term-body .c { color:#7f968d; }.term-body .row { display:grid; grid-template-columns:1fr 1fr; border-top:1px solid rgba(255,255,255,.11); padding-top:8px; margin-top:7px; color:#dfead8; }
-    .marquee { border-top:1px solid var(--line); border-bottom:1px solid var(--line); overflow:hidden; white-space:nowrap; padding:13px 0; background:var(--lime); font:13px 'Courier New', monospace; }
-    .marquee b { margin:0 30px; } .marquee b:after { content:'+'; margin-left:30px; color:var(--orange); }
-    section { padding:104px 0; }
-    .section-intro { display:grid; grid-template-columns:190px 1fr; gap:25px; margin-bottom:42px; }.section-intro h2 { font-size:clamp(39px,5vw,65px); letter-spacing:-.055em; line-height:.92; margin:0; font-weight:normal; }.section-intro p { max-width:530px; margin:4px 0 0; font-size:18px; line-height:1.42; color:var(--muted); }
-    .pill { display:inline-block; height:max-content; border:1px solid var(--ink); padding:7px 10px; font:11px 'Courier New', monospace; text-transform:uppercase; }
-    .feature-grid { display:grid; grid-template-columns:repeat(3,1fr); border:1px solid var(--line); }
-    .feature { min-height:250px; padding:25px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); background:var(--card); }.feature:nth-child(3n){border-right:0}.feature:nth-last-child(-n+3){border-bottom:0}
-    .feature-index { display:block; color:var(--orange); font:12px 'Courier New', monospace; margin-bottom:55px; }.feature h3 { font-size:25px; line-height:1; letter-spacing:-.04em; margin:0 0 12px; font-weight:normal; }.feature p { margin:0; color:var(--muted); line-height:1.4; font-size:15px; }
-    .feature:hover { background:var(--mint); }
-    .band { background:var(--ink); color:#f6f4e9; }.band .section-intro p { color:#c5d1cb; }.band .pill { border-color:#c5d1cb; }.workflow { display:grid; grid-template-columns:repeat(4,1fr); gap:0; border-top:1px solid rgba(255,255,255,.25); }.step { padding:24px 24px 10px 0; margin-right:22px; border-right:1px solid rgba(255,255,255,.25); min-height:230px; }.step:last-child{border-right:0}.step b { display:block; color:var(--lime); font:12px 'Courier New', monospace; }.step h3 { font-weight:normal; letter-spacing:-.04em; font-size:28px; line-height:.95; margin:50px 0 12px; }.step p { font-size:14px; line-height:1.4; color:#c5d1cb; }
-    .proof { display:grid; grid-template-columns:.78fr 1.22fr; gap:45px; align-items:start; }.quote { font-size:clamp(32px,4vw,53px); letter-spacing:-.055em; line-height:.98; margin:0; }.quote strong { color:var(--orange); font-weight:normal; }.stats { display:grid; grid-template-columns:repeat(2,1fr); gap:1px; background:var(--line); border:1px solid var(--line); }.stat { background:var(--paper); padding:25px; min-height:145px; }.stat-value { display:block; font-size:31px; margin-bottom:10px; }.stat-label { color:var(--muted); font-size:14px; line-height:1.3; }
-    .capability-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:0; border:1px solid var(--ink); }.capability { padding:33px; border-right:1px solid var(--ink); border-bottom:1px solid var(--ink); background:var(--card); }.capability:nth-child(2n){border-right:0}.capability:nth-last-child(-n+2){border-bottom:0}.capability h3 { margin:15px 0 17px; font-size:34px; line-height:.92; letter-spacing:-.05em; font-weight:normal; }.capability p { color:var(--muted); line-height:1.45; margin:0 0 20px; }.capability ul { columns:2; padding:0; margin:0; list-style:none; font:12px/1.7 'Courier New',monospace; }.capability li:before { content:'+'; color:var(--orange); margin-right:7px; }.capability:hover { background:var(--mint); }.capability:nth-child(3):hover { background:#ffe2c7; }
-    .format-band { background:#e7e7db; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }.format-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:18px; }.format-grid h3 { font:12px 'Courier New',monospace; letter-spacing:.06em; text-transform:uppercase; margin:0 0 12px; }.format-grid p { font-size:15px; line-height:1.42; color:var(--muted); margin:0; }.format-grid strong { color:var(--ink); }.tiny-line { border-left:5px solid var(--orange); padding:3px 0 3px 18px; max-width:890px; color:var(--muted); font-size:18px; line-height:1.45; }.tiny-line code { color:var(--ink); font-size:.85em; }
-    .demo { display:grid; grid-template-columns:1fr 1fr; border:1px solid var(--ink); background:var(--card); }.demo-copy { padding:42px; }.demo-copy h2 { font-size:clamp(43px,5vw,67px); line-height:.9; letter-spacing:-.06em; font-weight:normal; margin:16px 0; }.demo-copy p { color:var(--muted); max-width:440px; font-size:17px; line-height:1.4; }.demo-actions { display:flex; gap:9px; margin-top:25px; }.demo-screen { background:#e7e7db; border-left:1px solid var(--ink); padding:22px; }.tabs { display:flex; gap:6px; border-bottom:1px solid #bfc8b9; padding-bottom:10px; font:11px 'Courier New',monospace; }.tabs span { padding:7px 8px; }.tabs span.active { background:var(--ink); color:var(--lime); }.editor { margin-top:15px; min-height:230px; padding:17px; background:#1c2925; color:#dff4df; font:13px/1.65 'Courier New',monospace; }.editor .line { opacity:.48; display:inline-block; width:26px; }.editor b { color:#e6d981; font-weight:normal; }.editor i { color:#83d6c0; font-style:normal; }.result { display:grid; grid-template-columns:1fr 1fr 1fr; gap:1px; margin-top:12px; background:#b9c5bb; font:11px 'Courier New',monospace; }.result span { padding:8px; background:#fffef8; }.result span:nth-child(-n+3){background:#d6f8d4;font-weight:bold; }
-    footer { padding:30px 0; border-top:1px solid var(--line); display:flex; justify-content:space-between; gap:20px; color:var(--muted); font-size:13px; }.footer-links { display:flex; gap:18px; }.footer-links a { text-underline-offset:3px; }
-    @media (max-width:800px) { .nav-links a:not(.nav-github){display:none}.hero-grid,.proof,.demo,.capability-grid{grid-template-columns:1fr}.terminal{margin:14px 10px 0}.section-intro{grid-template-columns:1fr}.feature-grid{grid-template-columns:1fr}.feature,.feature:nth-child(3n){border-right:0}.feature:nth-last-child(-n+3){border-bottom:1px solid var(--line)}.feature:last-child{border-bottom:0}.workflow{grid-template-columns:1fr 1fr}.step:nth-child(2){border-right:0}.step:nth-child(-n+2){border-bottom:1px solid rgba(255,255,255,.25)}.demo-screen{border-left:0;border-top:1px solid var(--ink)}.capability,.capability:nth-child(2n){border-right:0;border-bottom:1px solid var(--ink)}.capability:last-child{border-bottom:0}.capability ul{columns:1}.format-grid{grid-template-columns:1fr 1fr}h1{font-size:67px}section{padding:72px 0} }
+    :root {
+      --ink: #11231f;
+      --ink-soft: #294039;
+      --muted: #52625e;
+      --lime: #c8fa63;
+      --mint: #dff9e2;
+      --paper: #f7f6ed;
+      --card: #fffef8;
+      --orange: #ff7043;
+      --sand: #e7e7db;
+      --line: rgba(17, 35, 31, 0.16);
+      --display: Georgia, "Times New Roman", serif;
+      --mono: "Courier New", Courier, monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      background: var(--paper);
+    }
+
+    body {
+      min-width: 320px;
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: var(--display);
+    }
+
+    a { color: inherit; }
+
+    button,
+    input { font: inherit; }
+
+    button { cursor: pointer; }
+
+    :focus-visible {
+      outline: 3px solid var(--orange);
+      outline-offset: 4px;
+    }
+
+    .skip-link {
+      position: fixed;
+      z-index: 30;
+      top: 12px;
+      left: 12px;
+      transform: translateY(-160%);
+      padding: 10px 14px;
+      color: var(--ink);
+      background: var(--lime);
+      font: 12px var(--mono);
+      text-decoration: none;
+    }
+
+    .skip-link:focus { transform: translateY(0); }
+
+    .grain {
+      position: fixed;
+      z-index: 20;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.14;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.32'/%3E%3C/svg%3E");
+    }
+
+    .wrap {
+      width: min(1200px, calc(100% - 48px));
+      margin: 0 auto;
+    }
+
+    .mono,
+    code,
+    .eyebrow,
+    .nav,
+    .btn,
+    .command,
+    .terminal,
+    .kicker,
+    .feature-number,
+    .source-label,
+    .compare th,
+    .stat-value { font-family: var(--mono); }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 28px;
+      min-height: 76px;
+      border-bottom: 1px solid var(--line);
+      font-size: 12px;
+      letter-spacing: 0.035em;
+    }
+
+    .brand {
+      display: inline-flex;
+      flex: 0 0 auto;
+      align-items: center;
+      gap: 10px;
+      font-size: 15px;
+      font-weight: bold;
+      text-decoration: none;
+    }
+
+    .dock-mark {
+      display: grid;
+      grid-template-columns: repeat(3, 5px);
+      gap: 2px;
+      margin: 0 3px 0 2px;
+      transform: rotate(45deg);
+    }
+
+    .dock-mark i {
+      display: block;
+      width: 5px;
+      height: 5px;
+      background: var(--orange);
+    }
+
+    .dock-mark i:nth-child(2),
+    .dock-mark i:nth-child(4),
+    .dock-mark i:nth-child(6),
+    .dock-mark i:nth-child(8) { background: var(--lime); }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 23px;
+      white-space: nowrap;
+    }
+
+    .nav-links a {
+      text-decoration: none;
+      text-underline-offset: 4px;
+    }
+
+    .nav-links a:hover { text-decoration: underline; }
+
+    .nav-links .github-link {
+      padding: 8px 10px;
+      color: var(--lime);
+      background: var(--ink);
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: 84px 0 74px;
+    }
+
+    .hero::before {
+      position: absolute;
+      top: -260px;
+      right: -190px;
+      width: 620px;
+      height: 620px;
+      content: "";
+      border-radius: 50%;
+      background: radial-gradient(circle at 38% 42%, var(--lime), transparent 66%);
+      opacity: 0.78;
+    }
+
+    .hero-grid {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 1.08fr) minmax(370px, 0.92fr);
+      gap: 56px;
+      align-items: center;
+    }
+
+    .eyebrow {
+      display: inline-block;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3,
+    p { margin-top: 0; }
+
+    h1 {
+      max-width: 760px;
+      margin: 20px 0 26px;
+      font-size: clamp(58px, 8.15vw, 106px);
+      font-weight: normal;
+      line-height: 0.84;
+      letter-spacing: -0.078em;
+    }
+
+    h1 em {
+      color: var(--orange);
+      font-style: normal;
+    }
+
+    .hero-copy {
+      max-width: 570px;
+      margin-bottom: 0;
+      color: var(--ink-soft);
+      font-size: 20px;
+      line-height: 1.4;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 31px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 46px;
+      padding: 0 18px;
+      border: 1px solid var(--ink);
+      font-size: 13px;
+      text-decoration: none;
+      transition: transform 180ms ease, box-shadow 180ms ease, background 180ms ease, color 180ms ease;
+    }
+
+    .btn:hover {
+      box-shadow: 4px 4px 0 var(--ink);
+      transform: translate(-3px, -3px);
+    }
+
+    .btn-primary {
+      color: var(--lime);
+      background: var(--ink);
+    }
+
+    .btn-secondary { background: transparent; }
+
+    .quick-start {
+      display: flex;
+      align-items: stretch;
+      width: fit-content;
+      max-width: 100%;
+      margin-top: 22px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.48);
+    }
+
+    .command {
+      min-width: 0;
+      padding: 11px 13px;
+      font-size: 12px;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+
+    .copy-command {
+      padding: 0 13px;
+      border: 0;
+      border-left: 1px solid var(--line);
+      color: var(--ink);
+      background: var(--lime);
+      font: 11px var(--mono);
+      transition: background 180ms ease;
+    }
+
+    .copy-command:hover { background: var(--orange); }
+
+    .hero-note {
+      margin: 16px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .terminal {
+      overflow: hidden;
+      color: #e4f7d7;
+      background: #13231e;
+      box-shadow: 12px 12px 0 rgba(17, 35, 31, 0.17);
+      transform: rotate(1.2deg);
+    }
+
+    .term-head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 12px 15px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.13);
+      background: #0d1915;
+    }
+
+    .term-head span {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ff7657;
+    }
+
+    .term-head span:nth-child(2) { background: #ffd66b; }
+    .term-head span:nth-child(3) { background: #88e58d; }
+
+    .term-head b {
+      margin-left: 7px;
+      color: #91a59c;
+      font-size: 11px;
+      font-weight: normal;
+    }
+
+    .term-body {
+      min-height: 335px;
+      padding: 24px;
+      font-size: 13px;
+      line-height: 1.72;
+    }
+
+    .term-prompt { color: #9be5d1; }
+    .term-keyword { color: #ffc978; }
+    .term-muted { color: #7f968d; }
+
+    .term-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      margin-top: 7px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.11);
+      color: #dfead8;
+    }
+
+    .term-row:first-of-type { margin-top: 16px; }
+
+    .signal-strip {
+      overflow: hidden;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      background: var(--lime);
+    }
+
+    .signal-list {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .signal-list li {
+      min-height: 54px;
+      padding: 17px 22px;
+      border-right: 1px solid rgba(17, 35, 31, 0.22);
+      font: 12px var(--mono);
+      text-align: center;
+    }
+
+    .signal-list li:last-child { border-right: 0; }
+
+    section { padding: 108px 0; }
+
+    .section-header {
+      display: grid;
+      grid-template-columns: 190px minmax(0, 1fr);
+      gap: 26px;
+      margin-bottom: 42px;
+    }
+
+    .kicker {
+      align-self: start;
+      width: fit-content;
+      padding: 7px 10px;
+      border: 1px solid currentColor;
+      font-size: 11px;
+      letter-spacing: 0.045em;
+      text-transform: uppercase;
+    }
+
+    .section-header h2,
+    .callout h2 {
+      max-width: 800px;
+      margin-bottom: 0;
+      font-size: clamp(42px, 5.25vw, 68px);
+      font-weight: normal;
+      line-height: 0.89;
+      letter-spacing: -0.062em;
+    }
+
+    .section-header p {
+      max-width: 570px;
+      margin: 17px 0 0;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1.45;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border: 1px solid var(--line);
+    }
+
+    .feature {
+      display: flex;
+      min-height: 265px;
+      flex-direction: column;
+      padding: 26px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      background: var(--card);
+      transition: background 180ms ease;
+    }
+
+    .feature:nth-child(3n) { border-right: 0; }
+    .feature:nth-last-child(-n + 3) { border-bottom: 0; }
+    .feature:hover { background: var(--mint); }
+
+    .feature-number {
+      display: block;
+      margin-bottom: auto;
+      color: var(--orange);
+      font-size: 12px;
+    }
+
+    .feature h3 {
+      margin: 48px 0 13px;
+      font-size: 26px;
+      font-weight: normal;
+      line-height: 0.98;
+      letter-spacing: -0.045em;
+    }
+
+    .feature p {
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.45;
+    }
+
+    .band {
+      color: #f6f4e9;
+      background: var(--ink);
+    }
+
+    .band .section-header p { color: #c5d1cb; }
+
+    .workflow {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      border-top: 1px solid rgba(255, 255, 255, 0.25);
+    }
+
+    .workflow-step {
+      min-height: 245px;
+      margin-right: 22px;
+      padding: 24px 24px 10px 0;
+      border-right: 1px solid rgba(255, 255, 255, 0.25);
+    }
+
+    .workflow-step:last-child { border-right: 0; }
+
+    .workflow-step b {
+      display: block;
+      color: var(--lime);
+      font: 12px var(--mono);
+    }
+
+    .workflow-step h3 {
+      margin: 52px 0 13px;
+      font-size: 29px;
+      font-weight: normal;
+      line-height: 0.93;
+      letter-spacing: -0.047em;
+    }
+
+    .workflow-step p {
+      margin-bottom: 0;
+      color: #c5d1cb;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .sources {
+      background: var(--sand);
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .source-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+    }
+
+    .source-card {
+      min-height: 300px;
+      padding: 28px;
+      border: 1px solid var(--ink);
+      background: var(--card);
+    }
+
+    .source-card:nth-child(2) { background: var(--mint); }
+
+    .source-label {
+      color: var(--orange);
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .source-card h3 {
+      margin: 17px 0 17px;
+      font-size: 35px;
+      font-weight: normal;
+      line-height: 0.92;
+      letter-spacing: -0.055em;
+    }
+
+    .source-card p {
+      margin-bottom: 19px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.45;
+    }
+
+    .source-card ul {
+      display: grid;
+      gap: 7px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      font: 12px/1.35 var(--mono);
+    }
+
+    .source-card li::before {
+      margin-right: 7px;
+      color: var(--orange);
+      content: "+";
+    }
+
+    .use-case-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      border: 1px solid var(--ink);
+    }
+
+    .use-case {
+      min-height: 216px;
+      padding: 30px;
+      border-right: 1px solid var(--ink);
+      border-bottom: 1px solid var(--ink);
+      background: var(--card);
+    }
+
+    .use-case:nth-child(2n) { border-right: 0; }
+    .use-case:nth-last-child(-n + 2) { border-bottom: 0; }
+    .use-case:nth-child(3) { background: #ffe2c7; }
+
+    .use-case h3 {
+      margin: 15px 0 13px;
+      font-size: 31px;
+      font-weight: normal;
+      line-height: 0.95;
+      letter-spacing: -0.052em;
+    }
+
+    .use-case p {
+      max-width: 480px;
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.45;
+    }
+
+    .operator-grid {
+      display: grid;
+      grid-template-columns: 0.82fr 1.18fr;
+      gap: 44px;
+      align-items: start;
+    }
+
+    .operator-quote {
+      margin: 0;
+      font-size: clamp(33px, 4.1vw, 55px);
+      line-height: 0.97;
+      letter-spacing: -0.06em;
+    }
+
+    .operator-quote strong {
+      color: var(--orange);
+      font-weight: normal;
+    }
+
+    .operator-list {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1px;
+      border: 1px solid var(--line);
+      background: var(--line);
+    }
+
+    .operator-item {
+      min-height: 160px;
+      padding: 25px;
+      background: var(--paper);
+    }
+
+    .operator-item h3 {
+      margin: 0 0 10px;
+      font-size: 13px;
+      font-weight: bold;
+      letter-spacing: 0.02em;
+    }
+
+    .operator-item p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.42;
+    }
+
+    .pipeline-note {
+      margin-top: 36px;
+      padding: 4px 0 4px 19px;
+      border-left: 5px solid var(--orange);
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1.48;
+    }
+
+    .pipeline-note code {
+      color: var(--ink);
+      font-size: 0.85em;
+    }
+
+    .compare-wrap { overflow-x: auto; }
+
+    .compare {
+      width: 100%;
+      min-width: 780px;
+      border-collapse: collapse;
+      border: 1px solid var(--ink);
+      font-size: 15px;
+    }
+
+    .compare th {
+      padding: 14px 16px;
+      color: var(--lime);
+      border-right: 1px solid rgba(255, 255, 255, 0.18);
+      background: var(--ink);
+      font-size: 11px;
+      font-weight: normal;
+      letter-spacing: 0.05em;
+      text-align: left;
+      text-transform: uppercase;
+    }
+
+    .compare th:last-child { border-right: 0; }
+
+    .compare td {
+      padding: 18px 16px;
+      vertical-align: top;
+      border-top: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+      line-height: 1.43;
+    }
+
+    .compare td:last-child { border-right: 0; }
+    .compare tbody tr:hover td { background: var(--mint); }
+
+    .compare strong {
+      color: var(--orange);
+      font-weight: normal;
+    }
+
+    .callout {
+      position: relative;
+      overflow: hidden;
+      padding: 63px;
+      border: 1px solid var(--ink);
+      background: var(--lime);
+    }
+
+    .callout::after {
+      position: absolute;
+      right: -74px;
+      bottom: -115px;
+      width: 260px;
+      height: 260px;
+      content: "";
+      border: 1px solid var(--ink);
+      border-radius: 50%;
+    }
+
+    .callout-content {
+      position: relative;
+      z-index: 1;
+      max-width: 720px;
+    }
+
+    .callout h2 { margin: 15px 0 20px; }
+
+    .callout p {
+      max-width: 590px;
+      margin-bottom: 28px;
+      color: var(--ink-soft);
+      font-size: 18px;
+      line-height: 1.45;
+    }
+
+    .callout .btn-primary {
+      color: var(--lime);
+      background: var(--ink);
+    }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 28px;
+      padding: 30px 0;
+      color: var(--muted);
+      border-top: 1px solid var(--line);
+      font-size: 13px;
+    }
+
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 17px;
+    }
+
+    .footer-links a { text-underline-offset: 3px; }
+
+    .reveal { animation: reveal-up 650ms both; }
+    .reveal-delay-1 { animation-delay: 80ms; }
+    .reveal-delay-2 { animation-delay: 160ms; }
+    .reveal-delay-3 { animation-delay: 240ms; }
+
+    @keyframes reveal-up {
+      from { opacity: 0; transform: translateY(17px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @media (max-width: 900px) {
+      .hero-grid { grid-template-columns: 1fr; }
+      .terminal { max-width: 620px; margin: 14px 10px 0; }
+      .source-grid { grid-template-columns: 1fr; }
+      .source-card { min-height: 0; }
+      .operator-grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 700px) {
+      .wrap { width: min(100% - 32px, 1200px); }
+
+      .nav {
+        display: block;
+        min-height: 0;
+        padding: 18px 0;
+      }
+
+      .brand { margin-bottom: 15px; }
+
+      .nav-links {
+        max-width: 100%;
+        gap: 13px;
+        padding-bottom: 1px;
+        overflow-x: auto;
+        scrollbar-width: thin;
+      }
+
+      .hero { padding: 61px 0 58px; }
+      h1 { font-size: clamp(54px, 17vw, 78px); }
+      .hero-copy { font-size: 18px; }
+
+      .quick-start { width: 100%; }
+      .command { overflow: hidden; text-overflow: ellipsis; }
+
+      .signal-list { grid-template-columns: repeat(2, 1fr); }
+      .signal-list li:nth-child(2) { border-right: 0; }
+      .signal-list li:nth-child(-n + 2) { border-bottom: 1px solid rgba(17, 35, 31, 0.22); }
+
+      section { padding: 75px 0; }
+
+      .section-header { grid-template-columns: 1fr; gap: 20px; }
+      .section-header h2,
+      .callout h2 { font-size: clamp(43px, 14vw, 62px); }
+      .section-header p { font-size: 17px; }
+
+      .feature-grid,
+      .use-case-grid { grid-template-columns: 1fr; }
+
+      .feature,
+      .feature:nth-child(3n),
+      .use-case,
+      .use-case:nth-child(2n) { border-right: 0; }
+
+      .feature:nth-last-child(-n + 3),
+      .use-case:nth-last-child(-n + 2) { border-bottom: 1px solid var(--line); }
+
+      .feature:last-child,
+      .use-case:last-child { border-bottom: 0; }
+
+      .feature { min-height: 225px; }
+      .feature h3 { margin-top: 42px; }
+
+      .workflow { grid-template-columns: 1fr 1fr; }
+
+      .workflow-step {
+        min-height: 210px;
+        margin-right: 14px;
+        padding-right: 14px;
+      }
+
+      .workflow-step:nth-child(2) { border-right: 0; }
+      .workflow-step:nth-child(-n + 2) { border-bottom: 1px solid rgba(255, 255, 255, 0.25); }
+      .workflow-step h3 { margin-top: 44px; font-size: 25px; }
+
+      .source-card h3 { font-size: 31px; }
+      .use-case h3 { font-size: 29px; }
+      .operator-list { grid-template-columns: 1fr; }
+      .operator-item { min-height: 0; }
+      .pipeline-note { font-size: 16px; }
+
+      .callout { padding: 38px 28px 42px; }
+      .callout::after { right: -125px; bottom: -155px; }
+
+      footer {
+        flex-direction: column;
+        gap: 14px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
   </style>
 </head>
 <body>
-  <div class="grain"></div>
-  <main>
-    <div class="wrap">
-      <nav class="nav"><a class="brand" href="#top"><span class="dock"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>DATADOCK</a><div class="nav-links"><a href="#why">Why it wins</a><a href="#workflow">Workflow</a><a href="#capabilities">Capabilities</a><a class="nav-github" href="https://github.com/SimonWaldherr/DataDock">GitHub ↗</a></div></nav>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="grain" aria-hidden="true"></div>
+
+  <div class="wrap">
+    <nav class="nav" aria-label="Primary navigation">
+      <a class="brand" href="#top" aria-label="DataDock home">
+        <span class="dock-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+        DATADOCK
+      </a>
+      <div class="nav-links">
+        <a href="#why">Why it fits</a>
+        <a href="#workflow">Workflow</a>
+        <a href="#sources">Sources</a>
+        <a href="#compare">Compare</a>
+        <a class="github-link" href="https://github.com/SimonWaldherr/DataDock">GitHub</a>
+      </div>
+    </nav>
+  </div>
+
+  <main id="main">
+    <header class="hero" id="top">
+      <div class="wrap hero-grid">
+        <div>
+          <span class="eyebrow reveal">A browser-first SQL workspace</span>
+          <h1 class="reveal reveal-delay-1">SQL for the data you <em>actually have.</em></h1>
+          <p class="hero-copy reveal reveal-delay-2">DataDock turns databases, spreadsheets, exports, maps, and matching work into one local SQL workflow. Run one Go process. Open a browser. Keep moving.</p>
+          <div class="actions reveal reveal-delay-3">
+            <a class="btn btn-primary" href="https://github.com/SimonWaldherr/DataDock#quick-start">Start locally</a>
+            <a class="btn btn-secondary" href="#why">See what it does</a>
+          </div>
+          <div class="quick-start reveal reveal-delay-3" aria-label="Quick-start command">
+            <code class="command">go run .</code>
+            <button class="copy-command" type="button" data-copy-command="go run ." aria-label="Copy quick-start command" aria-live="polite">Copy</button>
+          </div>
+          <p class="hero-note mono reveal reveal-delay-3">one Go process | embedded tinySQL | no desktop client required for users</p>
+        </div>
+
+        <div class="terminal reveal reveal-delay-2" aria-label="Example DataDock SQL query and result">
+          <div class="term-head"><span></span><span></span><span></span><b>datadock / local / spatial</b></div>
+          <div class="term-body">
+            <div><span class="term-prompt">datadock&gt;</span> <span class="term-keyword">SELECT</span> district, COUNT(*)</div>
+            <div><span class="term-muted">          FROM</span> permits</div>
+            <div><span class="term-muted">         WHERE</span> GEO_WITHIN_BBOX(geometry, ...)</div>
+            <div><span class="term-muted">      GROUP BY</span> district;</div>
+            <div class="term-row"><span>district</span><span>count</span></div>
+            <div class="term-row"><span>Neukoelln</span><span>184</span></div>
+            <div class="term-row"><span>Wedding</span><span>129</span></div>
+            <div class="term-row"><span>Prenzlauer Berg</span><span>87</span></div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div class="signal-strip" aria-label="DataDock essentials">
+      <ul class="wrap signal-list">
+        <li>LOCAL OR LOCAL-SERVER</li>
+        <li>FIVE RELATIONAL ENGINES</li>
+        <li>FILES AND MAPS IN SQL</li>
+        <li>OPEN SOURCE GO SERVICE</li>
+      </ul>
     </div>
-    <header class="hero" id="top"><div class="wrap hero-grid"><div><span class="eyebrow">The SQL client for data that arrives uninvited</span><h1>Make the messy<br>world <em>queryable.</em></h1><p class="hero-copy">DataDock is the SQL-first workspace for files, databases, maps, matching, and exports. Start local. Ask sharper questions. Leave with data you can use.</p><div class="actions"><a class="btn primary" href="https://github.com/SimonWaldherr/DataDock#quick-start">Run DataDock →</a><a class="btn secondary" href="https://github.com/SimonWaldherr/DataDock">Read the source ↗</a></div><p class="hero-note mono">one Go process · embedded tinySQL v0.19.1 · your data stays close</p></div><div class="terminal" aria-label="Example DataDock SQL session"><div class="term-head"><span></span><span></span><span></span><b>datadock / local / spatial</b></div><div class="term-body"><div><span class="p">datadock&gt;</span> <span class="o">SELECT</span> district, COUNT(*)</div><div><span class="c">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;FROM</span> permits</div><div><span class="c">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;WHERE</span> GEO_WITHIN_BBOX(geometry, ...)</div><div><span class="c">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;GROUP BY</span> district;</div><div class="row"><span>district</span><span>count</span></div><div class="row"><span>Neukölln</span><span>184</span></div><div class="row"><span>Wedding</span><span>129</span></div><div class="row"><span>Prenzlauer Berg</span><span>87</span></div></div></div></div></header>
-    <div class="marquee" aria-hidden="true"><span><b>CSV is a database now</b><b>your map is queryable</b><b>match what should match</b><b>export without detours</b><b>SQL, not ceremony</b></span></div>
-    <section id="why"><div class="wrap"><div class="section-intro"><span class="pill">Why DataDock</span><div><h2>Not another<br>pretty shell.</h2><p>Most SQL clients start once your data is clean, connected, and modeled. DataDock starts before that, when the files, formats, and relationships are still fighting you.</p></div></div><div class="feature-grid"><article class="feature"><span class="feature-index">01 / IMPORT</span><h3>Every file gets a seat at the table.</h3><p>CSV, JSON, XLSX, SQLite, GeoJSON, KML, OSM, PMTiles and more land in one queryable local workspace.</p></article><article class="feature"><span class="feature-index">02 / SEE</span><h3>SQL results that do more than rows.</h3><p>Move from result grids to charts, maps, routes, data sheets, quality reports, and export-ready data without changing tools.</p></article><article class="feature"><span class="feature-index">03 / CONNECT</span><h3>Local-first. Multi-database when needed.</h3><p>Begin with embedded tinySQL, then manage SQLite, PostgreSQL, MySQL/MariaDB, and SQL Server connections in the same cockpit.</p></article><article class="feature"><span class="feature-index">04 / MATCH</span><h3>Find the same thing, spelled differently.</h3><p>Turn inconsistent customer, address, article, and reference data into confirmed, queryable crosswalks.</p></article><article class="feature"><span class="feature-index">05 / ASK</span><h3>AI that knows the schema, not your secrets.</h3><p>Optionally bring an OpenAI-compatible model for SQL drafting, explanations, and grounded schema context.</p></article><article class="feature"><span class="feature-index">06 / OWN</span><h3>Your workflow is not a SaaS dashboard.</h3><p>One Go process, local files, portable snapshots, controlled credentials, and an open source codebase you can inspect.</p></article><article class="feature"><span class="feature-index">07 / BROWSE</span><h3>Inspect, sort, page, and change real records.</h3><p>Use datasheets, visual table design, CRUD for id-backed tables, catalog refreshes, and simple table lifecycle controls.</p></article><article class="feature"><span class="feature-index">08 / SHAPE</span><h3>Turn query output into the right view.</h3><p>Switch an editor result among table, cards, JSON/XML trees, pivots, column profiles, schema graph, notebook, live log, chart, or map.</p></article><article class="feature"><span class="feature-index">09 / REMEMBER</span><h3>Keep the useful questions close.</h3><p>Run selected SQL with Ctrl+Enter or F5, retain browser-local query history, export it, and share a URL that restores the query and view.</p></article><article class="feature"><span class="feature-index">10 / PROVE</span><h3>Know where the data came from.</h3><p>Every local/API import carries source hash, size, format, row count, geometry validity, type, and WGS84-bounds reporting.</p></article><article class="feature"><span class="feature-index">11 / SCHEDULE</span><h3>Make repeat work less repetitive.</h3><p>Use the local scheduler for registered jobs, manual runs, and a bundled demo workflow without operating another service.</p></article><article class="feature"><span class="feature-index">12 / PROTECT</span><h3>Operate deliberately.</h3><p>Roles, maintenance mode, audit logging, read-only operation, and encrypted disk-backed tinySQL modes keep control with the operator.</p></article></div></div></section>
-    <section class="band" id="workflow"><div class="wrap"><div class="section-intro"><span class="pill">One workbench</span><div><h2>From "what is this?"<br>to "ship it."</h2><p>The shortest path from uncooperative data to a useful decision is usually not another browser tab.</p></div></div><div class="workflow"><article class="step"><b>01</b><h3>Drop<br>it in.</h3><p>Bring the messy export, the map archive, the contact dump, or the live database connection.</p></article><article class="step"><b>02</b><h3>Interrogate<br>it.</h3><p>Use a serious SQL editor with schema context, saved history, sample queries, charts, and map output.</p></article><article class="step"><b>03</b><h3>Reconcile<br>it.</h3><p>Match records across systems, inspect data quality, and migrate a table where it needs to go.</p></article><article class="step"><b>04</b><h3>Hand it<br>off.</h3><p>Export a table or a query as CSV, XLSX, JSON, SQLite, GeoJSON, KML, GPX, or Shapefile ZIP.</p></article></div></div></section>
-    <section id="capabilities"><div class="wrap"><div class="section-intro"><span class="pill">Capability map</span><div><h2>The whole<br>data journey.</h2><p>DataDock is not a query box with a connection list. It is a local workbench for turning unfamiliar inputs into inspected, spatially-aware, portable results.</p></div></div><div class="capability-grid"><article class="capability"><span class="eyebrow">Bring it in</span><h3>Files without a detour.</h3><p>Normalize common office, structured, binary, archive, and map formats into tables. Keep columnar files as deliberate manifests when a bundled row decoder is not available.</p><ul><li>CSV and TSV with UTF-8/UTF-16 BOM handling</li><li>JSON, NDJSON, YAML, XML, HTML tables</li><li>Multi-sheet XLSX and SQLite tables/views</li><li>MessagePack, CBOR, BSON, iCalendar, vCard</li><li>Parquet, Arrow, Feather, DuckDB manifests</li><li>Watch a directory for supported file updates</li></ul></article><article class="capability"><span class="eyebrow">Work the map</span><h3>Spatial data is first-class data.</h3><p>Bring geometry into SQL, serve local raster or vector tiles, and take routing questions directly to GeoJSON output instead of exporting to another GIS first.</p><ul><li>GeoJSON, GeoPackage, GPX, KML, OSM XML/PBF</li><li>Shapefile ZIP, MBTiles, PMTiles v3</li><li>TileJSON and XYZ tile endpoints</li><li>Shortest path and reachable-area analysis</li><li>GEO_DISTANCE and GEO_WITHIN_BBOX SQL</li><li>Spatial quality, geometry, and bounds reports</li></ul></article><article class="capability"><span class="eyebrow">Query and reconcile</span><h3>One SQL desk, many sources.</h3><p>Start in embedded tinySQL, switch the active connection per browser session, and carry useful work across engines without losing the local data workbench.</p><ul><li>tinySQL, SQLite, PostgreSQL, MySQL/MariaDB, SQL Server</li><li>Monaco SQL editor with fallback editor</li><li>Examples, prompt starters, shareable query URLs</li><li>Cross-connection table migration</li><li>Domain-agnostic entity matching and review</li><li>Save matches as queryable crosswalks</li></ul></article><article class="capability"><span class="eyebrow">Export and operate</span><h3>Answers that travel well.</h3><p>Turn a full table or a result set into the next system’s preferred format, while keeping the server’s security controls and operational state visible to its owners.</p><ul><li>CSV, Excel-safe CSV, TSV, XLSX, JSON, NDJSON</li><li>XML, HTML, SQLite, GeoJSON, KML, GPX, Shapefile ZIP</li><li>GeoJSON simplify, bbox, fields, and explode options</li><li>Admin roles, maintenance mode, and audit log</li><li>Portable snapshots and read-only serving</li><li>AES-256 encrypted disk, JSON, hybrid, and index modes</li></ul></article></div></div></section>
-    <section class="format-band"><div class="wrap"><div class="format-grid"><div><h3>Table craft</h3><p><strong>Browse, paginate, sort, create, edit, delete.</strong> Datasheets and a visual table designer make everyday database work available without leaving the browser.</p></div><div><h3>Result craft</h3><p><strong>Table, cards, chart, map, pivot, profile, graph, notebook.</strong> Select the representation that helps answer the actual question.</p></div><div><h3>Agent craft</h3><p><strong>Optional OpenAI-compatible assistance.</strong> Draft SQL, explain results or errors, and inspect the same dialect-aware schema context it receives.</p></div><div><h3>tinySQL craft</h3><p><strong>Vector search, native geo functions, index catalog, and agent context.</strong> Modern local capabilities without a separate database service.</p></div></div></div></section>
-    <section><div class="wrap"><div class="section-intro"><span class="pill">No black box</span><div><h2>Power, with<br>operator control.</h2><p>DataDock keeps sophisticated features optional and visible: local data can stay local, administrators can control changes, and automation has stable HTTP and data standards to work with.</p></div></div><p class="tiny-line">Use <code>VEC_SEARCH</code> for repeated local retrieval with a bounded, vector-free cache. Keep ANN HNSW opt-in and warm it after a bulk reindex, never on routine ingestion. Snapshot export is portable; restore remains an explicit operator responsibility.</p></div></section>
-    <section><div class="wrap proof"><p class="quote">"The best SQL client is the one that understands the <strong>whole trip</strong> your data takes before it becomes an answer."</p><div class="stats"><div class="stat"><span class="stat-value">SQL + maps</span><span class="stat-label">Native geospatial functions, TileJSON layers, route analysis, and GeoJSON-aware export.</span></div><div class="stat"><span class="stat-value">SQL + files</span><span class="stat-label">Structured, office, calendar, contact, binary, and spatial formats normalized into tables.</span></div><div class="stat"><span class="stat-value">SQL + context</span><span class="stat-label">Optional schema-grounded AI assistance with local vector retrieval and explicit admin controls.</span></div><div class="stat"><span class="stat-value">SQL + trust</span><span class="stat-label">Read-only serving, audit trails, maintenance mode, local snapshots, and encrypted disk-backed modes.</span></div></div></div></section>
-    <section><div class="wrap"><div class="demo"><div class="demo-copy"><span class="eyebrow">A smaller distance between question and answer</span><h2>Less clicking.<br>More knowing.</h2><p>Open a table. Write a query. Select only what you need. Then chart it, map it, export it, or use it to reconcile another system.</p><div class="demo-actions"><button class="btn primary" id="demoButton" type="button">Run the query</button><a class="btn secondary" href="https://github.com/SimonWaldherr/DataDock#features">Explore features</a></div></div><div class="demo-screen"><div class="tabs"><span class="active">Query</span><span>Results</span><span>Map</span><span>Export</span></div><div class="editor"><span class="line">1</span><b>SELECT</b> district, <i>COUNT</i>(*) <b>AS</b> permits<br><span class="line">2</span><b>FROM</b> permits<br><span class="line">3</span><b>WHERE</b> status = <i>'approved'</i><br><span class="line">4</span><b>GROUP BY</b> district<br><span class="line">5</span><b>ORDER BY</b> permits <b>DESC</b>;</div><div class="result" id="resultGrid"><span>district</span><span>permits</span><span>trend</span><span>Neukölln</span><span>184</span><span>↑ 12%</span><span>Wedding</span><span>129</span><span>↑ 7%</span></div></div></div></div></section>
+
+    <section id="why">
+      <div class="wrap">
+        <div class="section-header">
+          <span class="kicker">Why DataDock</span>
+          <div>
+            <h2>It starts before your data is tidy.</h2>
+            <p>DataDock is a serious SQL client when the job begins with a database. It is more useful when the job also includes exports, local files, location data, uncertain matches, and a team that should not have to install a desktop IDE.</p>
+          </div>
+        </div>
+
+        <div class="feature-grid">
+          <article class="feature">
+            <span class="feature-number">01 / QUERY</span>
+            <h3>Work in SQL, not in browser tabs.</h3>
+            <p>Use a Monaco-enhanced editor, example queries, schema context, local query history, shareable query URLs, and result views designed for inspection.</p>
+          </article>
+          <article class="feature">
+            <span class="feature-number">02 / CONNECT</span>
+            <h3>One desk for local and live systems.</h3>
+            <p>Start in embedded tinySQL, then use managed connections for SQLite, PostgreSQL, MySQL/MariaDB, and Microsoft SQL Server.</p>
+          </article>
+          <article class="feature">
+            <span class="feature-number">03 / IMPORT</span>
+            <h3>Give the file a table before judging it.</h3>
+            <p>Bring in delimited files, office files, structured data, archives, contacts, calendars, databases, and map data without a conversion maze.</p>
+          </article>
+          <article class="feature">
+            <span class="feature-number">04 / SEE</span>
+            <h3>Choose the view that answers the question.</h3>
+            <p>Move among datasheets, cards, JSON or XML trees, pivots, profiles, charts, schema graphs, notebooks, maps, and export-ready results.</p>
+          </article>
+          <article class="feature">
+            <span class="feature-number">05 / MATCH</span>
+            <h3>Reconcile records that almost agree.</h3>
+            <p>Compare customers, articles, addresses, or any two datasets across spellings and formats, then save confirmed links as a queryable crosswalk.</p>
+          </article>
+          <article class="feature">
+            <span class="feature-number">06 / DELIVER</span>
+            <h3>Hand off data without another tool.</h3>
+            <p>Export a table or query result as CSV, TSV, XLSX, JSON, NDJSON, XML, HTML, SQLite, GeoJSON, KML, GPX, or Shapefile ZIP.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="band" id="workflow">
+      <div class="wrap">
+        <div class="section-header">
+          <span class="kicker">One workbench</span>
+          <div>
+            <h2>From unknown input to useful answer.</h2>
+            <p>The shortest path from an uncooperative export to a useful decision should not require a new desktop client, spreadsheet cleanup, and a separate GIS tool.</p>
+          </div>
+        </div>
+
+        <div class="workflow">
+          <article class="workflow-step">
+            <b>01</b>
+            <h3>Bring it in.</h3>
+            <p>Import a file, open a local table, connect a database, or load map and routing data.</p>
+          </article>
+          <article class="workflow-step">
+            <b>02</b>
+            <h3>Interrogate it.</h3>
+            <p>Browse the shape, write SQL, inspect the schema, and turn results into the view that makes the anomaly obvious.</p>
+          </article>
+          <article class="workflow-step">
+            <b>03</b>
+            <h3>Prove it.</h3>
+            <p>Use import provenance, quality reports, matching review, local audit records, and read-only modes when control matters.</p>
+          </article>
+          <article class="workflow-step">
+            <b>04</b>
+            <h3>Hand it off.</h3>
+            <p>Export the result, migrate a table, share the query URL, or package a repeatable read-only pipeline.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="sources" id="sources">
+      <div class="wrap">
+        <div class="section-header">
+          <span class="kicker">Sources</span>
+          <div>
+            <h2>The database is only one kind of input.</h2>
+            <p>Keep a normal database workflow, then add the real-world inputs that normally force a context switch: exports, files, locations, tiles, and routing graphs.</p>
+          </div>
+        </div>
+
+        <div class="source-grid">
+          <article class="source-card">
+            <span class="source-label">Relational systems</span>
+            <h3>Query the engines your team already runs.</h3>
+            <p>Every browser session can select its active connection while the local workspace stays available for imported data and portable work.</p>
+            <ul>
+              <li>Embedded tinySQL</li>
+              <li>SQLite</li>
+              <li>PostgreSQL</li>
+              <li>MySQL and MariaDB</li>
+              <li>Microsoft SQL Server</li>
+              <li>Cross-connection table migration</li>
+            </ul>
+          </article>
+
+          <article class="source-card">
+            <span class="source-label">Files and records</span>
+            <h3>From common exports to unusual source files.</h3>
+            <p>Normalize practical file formats into queryable tables. Columnar and database artifacts can remain deliberate manifests when no row decoder is bundled.</p>
+            <ul>
+              <li>CSV, TSV, XLSX, SQLite</li>
+              <li>JSON, NDJSON, YAML, XML, HTML tables</li>
+              <li>MessagePack, CBOR, BSON</li>
+              <li>iCalendar and vCard</li>
+              <li>Parquet, Arrow, Feather, DuckDB manifests</li>
+              <li>Optional watched import directory</li>
+            </ul>
+          </article>
+
+          <article class="source-card">
+            <span class="source-label">Maps and movement</span>
+            <h3>Keep spatial work inside the query loop.</h3>
+            <p>Map files become SQL tables with geometry columns. Tiles stay local, and routing analysis returns GeoJSON ready for visual inspection or export.</p>
+            <ul>
+              <li>GeoJSON, GeoPackage, GPX, KML</li>
+              <li>OSM XML and OSM PBF</li>
+              <li>Shapefile ZIP, MBTiles, PMTiles v3</li>
+              <li>TileJSON and XYZ tile endpoints</li>
+              <li>Shortest path and reachable area analysis</li>
+              <li>Geometry, bounds, and quality reports</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="use-cases">
+      <div class="wrap">
+        <div class="section-header">
+          <span class="kicker">Use cases</span>
+          <div>
+            <h2>Not just for broken data.</h2>
+            <p>Use DataDock for routine database work, clean analytical datasets, local operational tooling, map analysis, and the awkward joins that appear between otherwise good systems.</p>
+          </div>
+        </div>
+
+        <div class="use-case-grid">
+          <article class="use-case">
+            <span class="eyebrow">Database work</span>
+            <h3>A lighter SQL Server companion.</h3>
+            <p>Run a local or local-server DataDock instance for browsing, SQL, table migration, export, and shared access without requiring every user to install SSMS or a full desktop client.</p>
+          </article>
+          <article class="use-case">
+            <span class="eyebrow">Analysis</span>
+            <h3>Clean data deserves a good cockpit too.</h3>
+            <p>Explore a well-modeled warehouse extract, profile columns, chart a query, open a map, and export an answer without pretending the data must first be "messy."</p>
+          </article>
+          <article class="use-case">
+            <span class="eyebrow">Spatial operations</span>
+            <h3>Ask location questions in the same SQL session.</h3>
+            <p>Bring GeoJSON or OSM data into local tables, analyze routes and reachability, inspect geometry quality, and hand results off in geographic formats.</p>
+          </article>
+          <article class="use-case">
+            <span class="eyebrow">Reconciliation</span>
+            <h3>Turn probable matches into durable links.</h3>
+            <p>Compare exports or live tables across systems, review the likely matches, and retain approved pairs as crosswalks other queries can trust.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="operations">
+      <div class="wrap">
+        <div class="section-header">
+          <span class="kicker">Operate deliberately</span>
+          <div>
+            <h2>Useful power should stay visible to its operator.</h2>
+            <p>DataDock keeps advanced local capabilities optional, explicit, and bounded so a shared browser workspace does not become an opaque data service.</p>
+          </div>
+        </div>
+
+        <div class="operator-grid">
+          <p class="operator-quote">A data workspace should make the fast path <strong>safer</strong>, not make the safe path impossible.</p>
+          <div class="operator-list">
+            <article class="operator-item">
+              <h3>ADMIN CONTROLS</h3>
+              <p>Roles, maintenance mode, audit logging, and read-only serving give operators a clear way to limit changes without stopping inspection.</p>
+            </article>
+            <article class="operator-item">
+              <h3>PORTABLE STATE</h3>
+              <p>Admin-protected snapshots use a backend-independent writer/reader format. Restore is intentionally not exposed as an unbounded web endpoint.</p>
+            </article>
+            <article class="operator-item">
+              <h3>ENCRYPTED STORAGE MODES</h3>
+              <p>tinySQL disk, JSON, hybrid, and index modes can encrypt data at rest. Keys come from the environment; storage metadata remains visible.</p>
+            </article>
+            <article class="operator-item">
+              <h3>OPTIONAL AI AND RETRIEVAL</h3>
+              <p>Use an OpenAI-compatible assistant when it helps. Local vector search uses bounded, vector-free cache entries and admin-only analytics.</p>
+            </article>
+          </div>
+        </div>
+
+        <p class="pipeline-note">Versioned SQL pipelines run only validated read statements. Their portable bundles exclude credentials, runs, and raw result values; run lineage records structure, timing, status, columns, row count, and statement digests instead.</p>
+      </div>
+    </section>
+
+    <section id="compare">
+      <div class="wrap">
+        <div class="section-header">
+          <span class="kicker">Choose the fit</span>
+          <div>
+            <h2>Different tools solve different SQL jobs.</h2>
+            <p>DataDock is not a claim to replace every enterprise admin console or driver catalog. It is the practical choice when browser delivery, local files, maps, matching, and a self-hosted workspace matter as much as the connection itself.</p>
+          </div>
+        </div>
+
+        <div class="compare-wrap" tabindex="0" aria-label="Scrollable comparison table">
+          <table class="compare">
+            <thead>
+              <tr>
+                <th>Tool</th>
+                <th>Best fit</th>
+                <th>DataDock advantage</th>
+                <th>Use the other tool when</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>DataDock</strong></td>
+                <td>Browser-first SQL work across databases, files, map data, and operational handoffs.</td>
+                <td>One Go service, no desktop installation for users, imported local data, spatial output, matching, routing, provenance, and portable exports in one workspace.</td>
+                <td>You need a connector outside its five relational engines or a specialist database-administration workflow.</td>
+              </tr>
+              <tr>
+                <td>JetBrains DataGrip</td>
+                <td>Developer-centric desktop SQL IDE with deep introspection, navigation, and refactoring.</td>
+                <td>DataDock adds a shared web workspace, direct spatial file and tile workflows, entity matching, routing, and embedded local tables for files.</td>
+                <td>You need DataGrip's broad JDBC support, IDE-grade refactoring, schema diff, or desktop-first developer experience.</td>
+              </tr>
+              <tr>
+                <td>DBeaver</td>
+                <td>Broad JDBC/ODBC connectivity across relational, NoSQL, cloud, and analytical platforms.</td>
+                <td>DataDock removes client setup for browser users and keeps imported files, maps, matching, local query work, and exports together.</td>
+                <td>You need its wider connector catalog, driver manager, cloud or NoSQL access, or enterprise integrations.</td>
+              </tr>
+              <tr>
+                <td>Microsoft SSMS</td>
+                <td>Windows-oriented administration and development for SQL Server and related Microsoft services.</td>
+                <td>DataDock is a lighter local-server alternative for SQL browsing, export, matching, file integration, and SQL Server table migration.</td>
+                <td>You need SQL Server-specific administration, execution-plan tuning, backups and restores, Always On, or SSIS/SSAS/SSRS management.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <div class="callout">
+          <div class="callout-content">
+            <span class="eyebrow">Start with the small version of the decision</span>
+            <h2>Open the data. Ask the question. Keep the answer moving.</h2>
+            <p>Run DataDock on a workstation or a local server, then give people a browser instead of another installer. The source, quick start, and full capability list are in the repository.</p>
+            <div class="actions">
+              <a class="btn btn-primary" href="https://github.com/SimonWaldherr/DataDock#quick-start">Read the quick start</a>
+              <a class="btn btn-secondary" href="https://github.com/SimonWaldherr/DataDock">View on GitHub</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
-  <footer class="wrap"><span>DataDock · SQL-first data workbench</span><span class="footer-links"><a href="https://github.com/SimonWaldherr/DataDock">GitHub</a><a href="https://github.com/SimonWaldherr/DataDock#quick-start">Quick start</a><a href="https://github.com/SimonWaldherr/DataDock/blob/main/LICENSE">License</a></span></footer>
+
+  <footer class="wrap">
+    <span>DataDock | SQL-first data workbench</span>
+    <span class="footer-links">
+      <a href="https://github.com/SimonWaldherr/DataDock">GitHub</a>
+      <a href="https://github.com/SimonWaldherr/DataDock#features">Features</a>
+      <a href="https://github.com/SimonWaldherr/DataDock/blob/main/LICENSE">License</a>
+    </span>
+  </footer>
+
   <script>
-    document.getElementById('demoButton').addEventListener('click', function () {
-      const grid = document.getElementById('resultGrid'); this.textContent = 'Results ready ✓'; this.style.background = '#c8fa63'; this.style.color = '#11231f'; grid.animate([{transform:'translateY(5px)',opacity:.4},{transform:'translateY(0)',opacity:1}],{duration:340,easing:'ease-out'});
+    document.querySelectorAll("[data-copy-command]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        var command = button.getAttribute("data-copy-command");
+        if (!command || !navigator.clipboard) {
+          return;
+        }
+
+        navigator.clipboard.writeText(command).then(function () {
+          var original = button.textContent;
+          button.textContent = "Copied";
+          window.setTimeout(function () {
+            button.textContent = original;
+          }, 1800);
+        }).catch(function () {
+          button.textContent = "Copy failed";
+        });
+      });
     });
   </script>
 </body>

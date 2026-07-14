@@ -77,6 +77,33 @@ const (
 	matchConfigsSelectAllSQL = "SELECT config_json FROM " + matchConfigsTable
 )
 
+// ─── Versioned SQL pipelines (__datadock_pipelines) ───────────────────────
+//
+// Pipelines are intentionally stored as immutable version records. Saving an
+// edited pipeline appends a higher version instead of replacing the working
+// definition, so an historical run can always be tied back to the SQL that
+// produced it. Pipeline runs store only structural lineage and status, never
+// query result values.
+
+const (
+	// pipelinesEnsureTableSQL creates one immutable definition row per
+	// pipeline version. Names are not a primary key because tinySQL does not
+	// support the composite key that (name, version) would normally use.
+	pipelinesEnsureTableSQL = "CREATE TABLE " + pipelinesTable +
+		" (name TEXT NOT NULL, version INT NOT NULL, definition_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+	// pipelineRunsEnsureTableSQL records pipeline execution outcomes and their
+	// source/result-artifact lineage separately from the definition history.
+	pipelineRunsEnsureTableSQL = "CREATE TABLE " + pipelineRunsTable +
+		" (run_id TEXT NOT NULL, pipeline_name TEXT NOT NULL, pipeline_version INT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL, status TEXT NOT NULL, lineage_json TEXT NOT NULL, error_message TEXT NOT NULL)"
+	pipelinesSelectAllSQL       = "SELECT name, version, definition_json FROM " + pipelinesTable
+	pipelinesSelectByNameSQL    = "SELECT name, version, definition_json FROM " + pipelinesTable + " WHERE name = ?"
+	pipelinesDeleteByNameSQL    = "DELETE FROM " + pipelinesTable + " WHERE name = ?"
+	pipelinesInsertSQL          = "INSERT INTO " + pipelinesTable + " (name, version, definition_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+	pipelineRunsInsertSQL       = "INSERT INTO " + pipelineRunsTable + " (run_id, pipeline_name, pipeline_version, started_at, finished_at, status, lineage_json, error_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+	pipelineRunsSelectAllSQL    = "SELECT run_id, pipeline_name, pipeline_version, started_at, finished_at, status, lineage_json, error_message FROM " + pipelineRunsTable
+	pipelineRunsSelectByNameSQL = "SELECT run_id, pipeline_name, pipeline_version, started_at, finished_at, status, lineage_json, error_message FROM " + pipelineRunsTable + " WHERE pipeline_name = ?"
+)
+
 // ─── Match Schedules (__datadock_match_schedules) ──────────────────────────
 //
 // At most one recurring cron schedule per saved MatchConfig (see

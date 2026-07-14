@@ -58,7 +58,14 @@ func cteMainVerb(tokens []string) string {
 			if depth > 0 {
 				depth--
 			}
-		case "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE":
+		case "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE":
+			// A data-modifying statement inside a CTE is still a write, even
+			// when the outer statement is SELECT (for example `WITH changed
+			// AS (DELETE ... RETURNING ...) SELECT * FROM changed`). Returning
+			// it immediately keeps read-only authorization and maintenance
+			// mode from treating that statement as harmless.
+			return tok
+		case "SELECT":
 			if depth == 0 {
 				return tok
 			}

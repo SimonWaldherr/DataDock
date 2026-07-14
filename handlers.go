@@ -131,6 +131,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /admin/users/delete", a.requireAdmin(a.requireWritable(a.adminUsersDeleteHandler)))
 
 	handle("GET /jobs", a.requireAdmin(a.jobsHandler))
+	handle("GET /pipelines", a.requireAdmin(a.pipelinesHandler))
 	handle("GET /migrate", a.migrationHandler)
 	handle("POST /migrate", a.requireWritable(a.runMigrationHandler))
 	handle("GET /match", a.matchHandler)
@@ -177,6 +178,12 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("GET /api/jobs", a.requireAdmin(a.apiJobsHandler))
 	handle("POST /api/jobs", a.requireAdmin(a.requireWritable(a.apiJobsHandler)))
 	handle("POST /api/jobs/run", a.requireAdmin(a.requireWritable(a.apiRunJobHandler)))
+	handle("GET /api/pipelines", a.requireAdmin(a.apiPipelinesHandler))
+	handle("POST /api/pipelines", a.requireAdmin(a.requireWritable(a.apiPipelinesHandler)))
+	handle("POST /api/pipelines/run", a.requireAdmin(a.requireWritable(a.apiRunPipelineHandler)))
+	handle("POST /api/pipelines/delete", a.requireAdmin(a.requireWritable(a.apiDeletePipelineHandler)))
+	handle("GET /api/pipelines/export", a.requireAdmin(a.apiExportPipelineBundleHandler))
+	handle("POST /api/pipelines/import", a.requireAdmin(a.requireWritable(a.apiImportPipelineBundleHandler)))
 	handle("POST /api/import", a.requireWritable(a.apiImportHandler))
 	handle("GET /api/map/tiles/{table}/tilejson", a.apiMapTileJSONHandler)
 	handle("GET /api/map/tiles/{table}/{z}/{x}/{y}", a.apiMapTileHandler)
@@ -1067,6 +1074,31 @@ func (a *App) jobsHandler(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "jobs", map[string]interface{}{
 		"Jobs":    a.nativeDB.Catalog().ListJobs(),
 		"History": a.nativeDB.Catalog().ListJobHistory(),
+	})
+}
+
+// pipelinesHandler renders the administrator-only view for reusable, versioned
+// read-only SQL pipelines and their most recent lineage records.
+func (a *App) pipelinesHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	pipelines, err := a.listPipelines(ctx)
+	if err != nil {
+		a.render(w, r, "pipelines", map[string]interface{}{"Error": "Load pipelines: " + err.Error()})
+		return
+	}
+	runs, err := a.listPipelineRuns(ctx, "")
+	if err != nil {
+		a.render(w, r, "pipelines", map[string]interface{}{"Pipelines": pipelines, "Error": "Load pipeline runs: " + err.Error()})
+		return
+	}
+	const recentPipelineRuns = 25
+	if len(runs) > recentPipelineRuns {
+		runs = runs[:recentPipelineRuns]
+	}
+	a.render(w, r, "pipelines", map[string]interface{}{
+		"Pipelines": pipelines,
+		"Runs":      runs,
 	})
 }
 
@@ -3361,6 +3393,158 @@ func (a *App) apiRunJobHandler(w http.ResponseWriter, r *http.Request) {
 		"affected":   result.Affected,
 		"elapsed_ms": result.Elapsed.Milliseconds(),
 		"error":      result.Err,
+	})
+}
+
+// apiPipelinesHandler lists pipeline metadata or appends a new immutable
+// definition version. The write route is wrapped with requireWritable so a
+// maintenance window freezes both data and its reproducible workflow config.
+func (a *App) apiPipelinesHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ctx, cancel := a.withQueryTimeout(r.Context())
+		defer cancel()
+		name := strings.TrimSpace(r.URL.Query().Get("name"))
+		if name != "" {
+			versions, err := a.listPipelineVersions(ctx, name)
+			if err != nil {
+				a.writeProblem(w, r, http.StatusInternalServerError, "Load pipelines", err.Error())
+				return
+			}
+			runs, err := a.listPipelineRuns(ctx, name)
+			if err != nil {
+				a.writeProblem(w, r, http.StatusInternalServerError, "Load pipeline runs", err.Error())
+				return
+			}
+			a.writeJSON(w, http.StatusOK, map[string]any{"pipelines": versions, "runs": runs})
+			return
+		}
+		pipelines, err := a.listPipelines(ctx)
+		if err != nil {
+			a.writeProblem(w, r, http.StatusInternalServerError, "Load pipelines", err.Error())
+			return
+		}
+		runs, err := a.listPipelineRuns(ctx, "")
+		if err != nil {
+			a.writeProblem(w, r, http.StatusInternalServerError, "Load pipeline runs", err.Error())
+			return
+		}
+		a.writeJSON(w, http.StatusOK, map[string]any{"pipelines": pipelines, "runs": runs})
+	case http.MethodPost:
+		var pipeline Pipeline
+		if err := json.NewDecoder(r.Body).Decode(&pipeline); err != nil {
+			a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be a pipeline definition.")
+			return
+		}
+		ctx, cancel := a.withQueryTimeout(r.Context())
+		defer cancel()
+		saved, err := a.savePipeline(ctx, pipeline)
+		if err != nil {
+			a.writeProblem(w, r, http.StatusBadRequest, "Invalid pipeline", err.Error())
+			return
+		}
+		a.auditPipelineEvent(r, "pipeline.save", saved.Name, fmt.Sprintf("version=%d steps=%d", saved.Version, len(saved.Steps)), http.StatusOK)
+		a.writeJSON(w, http.StatusCreated, map[string]any{"pipeline": saved})
+	default:
+		a.writeProblem(w, r, http.StatusMethodNotAllowed, "Method not allowed", "method not allowed")
+	}
+}
+
+// apiRunPipelineHandler executes one explicit immutable pipeline version. A
+// failed SQL step still returns a recorded run in the response so clients can
+// inspect its lineage and failure without needing a second request.
+func (a *App) apiRunPipelineHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name    string `json:"name"`
+		Version int    `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must include a pipeline name.")
+		return
+	}
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	run, err := a.runPipeline(ctx, body.Name, body.Version)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Run pipeline", err.Error())
+		return
+	}
+	status := http.StatusOK
+	if run.Status != "succeeded" {
+		status = http.StatusUnprocessableEntity
+	}
+	a.auditPipelineEvent(r, "pipeline.run", run.PipelineName, fmt.Sprintf("version=%d run_id=%s status=%s", run.PipelineVersion, run.RunID, run.Status), status)
+	a.writeJSON(w, status, map[string]any{"run": run})
+}
+
+func (a *App) apiDeletePipelineHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must include a pipeline name.")
+		return
+	}
+	name := strings.TrimSpace(body.Name)
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	if err := a.deletePipeline(ctx, name); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Delete pipeline", err.Error())
+		return
+	}
+	a.auditPipelineEvent(r, "pipeline.delete", name, "all definition versions removed; run lineage retained", http.StatusOK)
+	a.writeJSON(w, http.StatusOK, map[string]any{"deleted": name})
+}
+
+// apiExportPipelineBundleHandler emits an immutable-definition-only JSON
+// bundle. Building it into a bytes.Buffer first prevents a partial download if
+// a database read or JSON encode fails before HTTP headers are committed.
+func (a *App) apiExportPipelineBundleHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	var bundle bytes.Buffer
+	if err := a.writePipelineBundle(ctx, &bundle); err != nil {
+		a.writeProblem(w, r, http.StatusInternalServerError, "Export pipelines", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", standards.MediaTypeJSON)
+	w.Header().Set("Content-Disposition", `attachment; filename="datadock-pipelines.json"`)
+	_, _ = io.Copy(w, &bundle)
+}
+
+// apiImportPipelineBundleHandler reads an append-only definition bundle. Run
+// history is intentionally not importable, so a transferred workflow cannot
+// create misleading execution provenance on another DataDock instance.
+func (a *App) apiImportPipelineBundleHandler(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxPipelineBundleBytes+1)
+	defer r.Body.Close()
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	result, err := a.readPipelineBundle(ctx, r.Body)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Import pipelines", err.Error())
+		return
+	}
+	a.auditPipelineEvent(r, "pipeline.import", "pipeline bundle", fmt.Sprintf("imported=%d skipped=%d", len(result.Imported), result.Skipped), http.StatusOK)
+	a.writeJSON(w, http.StatusOK, result)
+}
+
+func (a *App) auditPipelineEvent(r *http.Request, operation, target, detail string, status int) {
+	audit := a.auditLogger()
+	if !audit.Enabled() {
+		return
+	}
+	sessionID := sessionIDFromContext(r.Context())
+	username, _, _ := a.currentSessionUser(sessionID)
+	audit.Log(AuditEvent{
+		Session:   sessionID,
+		Username:  username,
+		Method:    r.Method,
+		Path:      r.URL.Path,
+		Operation: operation,
+		Target:    target,
+		Detail:    detail,
+		Status:    status,
 	})
 }
 

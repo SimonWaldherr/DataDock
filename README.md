@@ -30,6 +30,7 @@ database manager with administrator-managed or per-user credentials.
 | **Example Queries & Prompts** | One-click sample SQL queries and natural-language prompts against the demo dataset, so the editor and LLM assistant can be tried immediately with zero setup; picking an example query auto-imports the demo dataset first if it isn't loaded yet |
 | **Local Query History** | Browser-local history for recently executed queries, with JSON/CSV export from the History tab |
 | **Shareable Queries** | Copy a browser URL that restores the editor SQL from a compact hash |
+| **Versioned SQL Pipelines** | Admin-managed, immutable multi-step read-only SQL workflows with opt-in bounded parallelism, portable definition bundles, and result-free run lineage |
 | **Quick Charts** | D3-powered first chart preview for numeric query results |
 | **Geo Views** | Map query results from GeoJSON geometry columns or latitude/longitude columns |
 | **Connection Manager** | Register managed database connections and switch the active connection from the GUI |
@@ -392,6 +393,45 @@ connection. The first implementation supports:
 It does not yet preserve indexes, foreign keys, triggers, views, generated
 columns, or table-specific permissions.
 
+## Pipelines
+
+Open **Pipelines** from the Operations menu to save a reusable sequence of
+read-only tinySQL statements. Saving a definition with an existing name creates
+a new immutable version rather than overwriting the old one. A run is tied to a
+specific version and persists only structural lineage: source tables inferred
+from `FROM`/`JOIN`, a SHA-256 digest of the statement, result columns/row count,
+elapsed time, and status. Raw query result values are never copied into pipeline
+metadata.
+
+Pipelines are currently deliberately restricted to one result-producing SQL
+statement per step (`SELECT`, read-only `WITH`, `SHOW`, `EXPLAIN`, `DESCRIBE`,
+or `PRAGMA`). DDL, DML, procedures, scripts, and write CTEs are rejected. This
+keeps the first pipeline implementation safe to run and audit; materializing,
+external, and scheduled pipeline steps can be added later with explicit
+operator controls.
+
+`max_parallelism` defaults to `1`, preserving step order. It can be raised to
+`2` or `4` only when the steps are independent: they cannot consume each
+other's result artifacts because this release does not materialize outputs.
+DataDock uses a context-cancellable, bounded worker pool and returns lineage in
+definition order even when independent reads finish in another order.
+
+Pipeline bundles are portable JSON definition exports. They include immutable
+pipeline versions but exclude runs, query result values, and connection
+credentials. Imports are bounded to 16 MiB, validate every statement, append
+new local versions, and skip definitions already present by canonical hash.
+
+The admin-protected API is:
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/pipelines` | List current pipeline versions and recorded runs; pass `?name=name` for all versions of one pipeline |
+| `POST` | `/api/pipelines` | Save a new immutable version from `{name, description, max_parallelism, steps:[{name, sql}]}` |
+| `POST` | `/api/pipelines/run` | Run `{name, version}`; omit `version` to run the latest definition |
+| `POST` | `/api/pipelines/delete` | Delete all saved definition versions for `{name}` while retaining run lineage |
+| `GET` | `/api/pipelines/export` | Download a portable definition-only JSON bundle |
+| `POST` | `/api/pipelines/import` | Append validated definitions from a portable JSON bundle; identical definitions are skipped |
+
 ## Matching
 
 Open **Matching** to compare two tables — from the same or different
@@ -629,8 +669,14 @@ cmd/datadock/
 | `GET` | `/api/admin/status` | Admin status JSON (Admin session) |
 | `GET/POST` | `/api/admin/settings` | Read or apply runtime settings as JSON (Admin session) |
 | `GET` | `/jobs` | Job overview (Admin session) |
+| `GET` | `/pipelines` | Versioned SQL pipeline manager (Admin session) |
 | `GET/POST` | `/api/jobs` | List or create jobs (Admin session) |
 | `POST` | `/api/jobs/run` | Run a registered job manually (Admin session) |
+| `GET/POST` | `/api/pipelines` | List pipelines/runs or save a new immutable pipeline version (Admin session; POST blocked in maintenance mode) |
+| `POST` | `/api/pipelines/run` | Run a pipeline version and record structural lineage (Admin session; blocked in maintenance mode) |
+| `POST` | `/api/pipelines/delete` | Delete pipeline definitions while retaining run lineage (Admin session; blocked in maintenance mode) |
+| `GET` | `/api/pipelines/export` | Download portable pipeline definitions without runs or results (Admin session) |
+| `POST` | `/api/pipelines/import` | Import a bounded, validated definition bundle (Admin session; blocked in maintenance mode) |
 | `GET` | `/migrate` | Table migration wizard |
 | `POST` | `/migrate` | Run table migration |
 | `GET` | `/match` | Record matching wizard |

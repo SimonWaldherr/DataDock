@@ -1,0 +1,170 @@
+{{define "pipelines"}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection "DefaultTheme" .DefaultTheme "DefaultDensity" .DefaultDensity "MaintenanceMode" .MaintenanceMode)}}
+
+<div class="page-hdr">
+  <div>
+    <h1><i class="bi bi-diagram-3 text-primary"></i>Pipelines</h1>
+    <p class="text-muted mb-0">Versioned, read-only SQL workflows with structural lineage.</p>
+  </div>
+  <div class="d-flex gap-2"><a class="btn btn-sm btn-outline-secondary" href="/api/pipelines/export"><i class="bi bi-download me-1"></i>Export bundle</a><a class="btn btn-sm btn-outline-secondary" href="/jobs"><i class="bi bi-calendar2-check me-1"></i>Jobs</a></div>
+</div>
+
+{{template "alert" .}}
+
+<div class="alert alert-info small">
+  <i class="bi bi-shield-check me-1"></i>
+  Pipelines currently accept only single result-producing SQL statements. Every save creates a new immutable version. Runs retain source tables, SQL hashes, result shape, and status, but never result values. Parallel execution is opt-in for independent steps only.
+</div>
+
+<div class="card mb-3">
+  <div class="card-body d-flex align-items-end gap-2 flex-wrap">
+    <div><label class="form-label small mb-1" for="pipelineBundleFile">Import a bundle</label><input class="form-control form-control-sm" id="pipelineBundleFile" type="file" accept="application/json,.json"></div>
+    <button class="btn btn-outline-secondary btn-sm" type="button" onclick="importPipelineBundle()"><i class="bi bi-upload me-1"></i>Import definitions</button>
+    <span id="pipelineImportStatus" class="small" role="status" aria-live="polite"></span>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap mb-3">
+      <div>
+        <h2 class="h6 mb-1">Save a pipeline version</h2>
+        <p class="small text-muted mb-0">Use the same name to append a new version; prior versions remain reproducible.</p>
+      </div>
+      <button class="btn btn-outline-secondary btn-sm" type="button" onclick="addPipelineStep()"><i class="bi bi-plus-lg me-1"></i>Add step</button>
+    </div>
+    <form id="pipelineForm" onsubmit="savePipeline(event)">
+      <div class="row g-2 mb-3">
+        <div class="col-md-3"><label class="form-label small" for="pipelineName">Name</label><input class="form-control form-control-sm" id="pipelineName" maxlength="128" required placeholder="daily_sales_review"></div>
+        <div class="col-md-6"><label class="form-label small" for="pipelineDescription">Description</label><input class="form-control form-control-sm" id="pipelineDescription" maxlength="4000" placeholder="Daily sales summary and regional breakdown"></div>
+        <div class="col-md-3"><label class="form-label small" for="pipelineMaxParallelism">Max parallelism</label><select class="form-select form-select-sm" id="pipelineMaxParallelism"><option value="1" selected>1 - sequential (safe default)</option><option value="2">2 - independent steps</option><option value="4">4 - independent steps</option></select></div>
+      </div>
+      <div id="pipelineSteps">
+        <div class="pipeline-step border rounded p-2 mb-2">
+          <div class="d-flex justify-content-between align-items-center mb-2"><strong class="small">Step 1</strong><button class="btn btn-link btn-sm text-danger p-0" type="button" onclick="removePipelineStep(this)">Remove</button></div>
+          <div class="row g-2"><div class="col-md-3"><input class="form-control form-control-sm pipeline-step-name" maxlength="128" required value="summary" aria-label="Step name"></div><div class="col-md-9"><textarea class="form-control form-control-sm pipeline-step-sql font-monospace" rows="3" required aria-label="Read-only SQL">SELECT * FROM your_table LIMIT 100</textarea></div></div>
+        </div>
+      </div>
+      <div class="d-flex align-items-center gap-2"><button class="btn btn-primary btn-sm" type="submit"><i class="bi bi-save me-1"></i>Save new version</button><span id="pipelineStatus" class="small" role="status" aria-live="polite"></span></div>
+    </form>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body">
+    <h2 class="h6">Saved pipelines</h2>
+    <div class="table-responsive">
+      <table class="table table-sm datasheet align-middle">
+        <thead><tr><th>Name</th><th>Version</th><th>Steps</th><th>Workers</th><th>Description</th><th></th></tr></thead>
+        <tbody>
+          {{range .Pipelines}}
+          <tr>
+            <td><code>{{.Name}}</code></td>
+            <td>v{{.Version}}</td>
+            <td>{{len .Steps}}</td>
+            <td>{{.MaxParallelism}}</td>
+            <td class="text-muted">{{.Description}}</td>
+            <td class="text-end text-nowrap"><button class="btn btn-outline-primary btn-sm" type="button" onclick="runPipeline({{printf "%q" .Name}}, {{.Version}}, this)"><i class="bi bi-play-fill me-1"></i>Run</button> <button class="btn btn-outline-danger btn-sm" type="button" onclick="deletePipeline({{printf "%q" .Name}}, this)"><i class="bi bi-trash me-1"></i>Delete</button></td>
+          </tr>
+          {{else}}
+          <tr><td colspan="6" class="text-muted">No pipelines saved.</td></tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <h2 class="h6">Recent runs</h2>
+    <div class="table-responsive">
+      <table class="table table-sm datasheet align-middle">
+        <thead><tr><th>Pipeline</th><th>Version</th><th>Started</th><th>Status</th><th>Lineage</th></tr></thead>
+        <tbody>
+          {{range .Runs}}
+          <tr>
+            <td><code>{{.PipelineName}}</code></td>
+            <td>v{{.PipelineVersion}}</td>
+            <td class="text-nowrap">{{.StartedAt.Format "2006-01-02 15:04:05Z07:00"}}</td>
+            <td><span class="badge {{if eq .Status "succeeded"}}text-bg-success{{else}}text-bg-danger{{end}}">{{.Status}}</span>{{if .Error}} <span class="small text-danger">{{.Error}}</span>{{end}}</td>
+            <td class="small">{{range .Lineage}}<div><strong>{{.StepName}}</strong>: {{len .Sources}} source{{if ne (len .Sources) 1}}s{{end}}, {{.RowCount}} rows, {{.ElapsedMS}} ms</div>{{end}}</td>
+          </tr>
+          {{else}}
+          <tr><td colspan="5" class="text-muted">No pipeline runs recorded.</td></tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  function pipelineStepCount() { return document.querySelectorAll('#pipelineSteps .pipeline-step').length; }
+  function refreshPipelineStepLabels() {
+    document.querySelectorAll('#pipelineSteps .pipeline-step').forEach(function (step, index) {
+      step.querySelector('strong').textContent = 'Step ' + (index + 1);
+    });
+  }
+  function addPipelineStep() {
+    var count = pipelineStepCount() + 1;
+    var wrapper = document.createElement('div');
+    wrapper.className = 'pipeline-step border rounded p-2 mb-2';
+    wrapper.innerHTML = '<div class="d-flex justify-content-between align-items-center mb-2"><strong class="small">Step ' + count + '</strong><button class="btn btn-link btn-sm text-danger p-0" type="button" onclick="removePipelineStep(this)">Remove</button></div><div class="row g-2"><div class="col-md-3"><input class="form-control form-control-sm pipeline-step-name" maxlength="128" required placeholder="step_name" aria-label="Step name"></div><div class="col-md-9"><textarea class="form-control form-control-sm pipeline-step-sql font-monospace" rows="3" required placeholder="SELECT ..." aria-label="Read-only SQL"></textarea></div></div>';
+    document.getElementById('pipelineSteps').appendChild(wrapper);
+  }
+  function removePipelineStep(button) {
+    if (pipelineStepCount() === 1) { window.alert('A pipeline needs at least one step.'); return; }
+    button.closest('.pipeline-step').remove();
+    refreshPipelineStepLabels();
+  }
+  function pipelinePayload() {
+    var steps = [];
+    document.querySelectorAll('#pipelineSteps .pipeline-step').forEach(function (step) {
+      steps.push({name: step.querySelector('.pipeline-step-name').value.trim(), sql: step.querySelector('.pipeline-step-sql').value.trim()});
+    });
+    return {name: document.getElementById('pipelineName').value.trim(), description: document.getElementById('pipelineDescription').value.trim(), max_parallelism: Number(document.getElementById('pipelineMaxParallelism').value) || 1, steps: steps};
+  }
+  function setPipelineStatus(message, isError) {
+    var status = document.getElementById('pipelineStatus');
+    status.textContent = message;
+    status.className = isError ? 'small text-danger' : 'small text-success';
+  }
+  function savePipeline(event) {
+    event.preventDefault();
+    setPipelineStatus('Saving...', false);
+    fetch('/api/pipelines', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(pipelinePayload())})
+      .then(function (response) { return response.json().then(function (body) { if (!response.ok) throw new Error(body.detail || body.error || 'Save failed'); return body; }); })
+      .then(function (body) { setPipelineStatus('Saved ' + body.pipeline.name + ' v' + body.pipeline.version + '.', false); window.setTimeout(function () { window.location.reload(); }, 450); })
+      .catch(function (error) { setPipelineStatus(error.message || String(error), true); });
+  }
+  function runPipeline(name, version, button) {
+    button.disabled = true;
+    fetch('/api/pipelines/run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: name, version: version})})
+      .then(function (response) { return response.json().then(function (body) { if (!response.ok && !body.run) throw new Error(body.detail || body.error || 'Run failed'); return body; }); })
+      .then(function (body) { var run = body.run; window.alert(run.status === 'succeeded' ? 'Pipeline completed: ' + run.lineage.length + ' step(s).' : 'Pipeline failed: ' + (run.error || 'unknown error')); window.location.reload(); })
+      .catch(function (error) { window.alert(error.message || String(error)); button.disabled = false; });
+  }
+  function deletePipeline(name, button) {
+    if (!window.confirm('Delete all saved versions of "' + name + '"? Existing run lineage remains.')) return;
+    button.disabled = true;
+    fetch('/api/pipelines/delete', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: name})})
+      .then(function (response) { return response.json().then(function (body) { if (!response.ok) throw new Error(body.detail || body.error || 'Delete failed'); return body; }); })
+      .then(function () { window.location.reload(); })
+      .catch(function (error) { window.alert(error.message || String(error)); button.disabled = false; });
+  }
+  function importPipelineBundle() {
+    var input = document.getElementById('pipelineBundleFile');
+    var status = document.getElementById('pipelineImportStatus');
+    if (!input.files || !input.files[0]) { status.textContent = 'Choose a JSON bundle first.'; status.className = 'small text-danger'; return; }
+    status.textContent = 'Importing...'; status.className = 'small text-muted';
+    input.files[0].text()
+      .then(function (text) { return fetch('/api/pipelines/import', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: text}); })
+      .then(function (response) { return response.json().then(function (body) { if (!response.ok) throw new Error(body.detail || body.error || 'Import failed'); return body; }); })
+      .then(function (body) { status.textContent = 'Imported ' + body.imported.length + ', skipped ' + body.skipped + '.'; status.className = 'small text-success'; window.setTimeout(function () { window.location.reload(); }, 600); })
+      .catch(function (error) { status.textContent = error.message || String(error); status.className = 'small text-danger'; });
+  }
+</script>
+
+{{template "base_end" .}}
+{{end}}

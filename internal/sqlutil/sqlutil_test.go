@@ -13,6 +13,7 @@ func TestClassify(t *testing.T) {
 		{name: "describe", sql: "DESCRIBE people", want: StatementReadQuery},
 		{name: "read cte", sql: "WITH x AS (SELECT 1) SELECT * FROM x", want: StatementReadQuery},
 		{name: "write cte", sql: "WITH x AS (SELECT 1) DELETE FROM people", want: StatementWriteDML},
+		{name: "write cte with select outer query", sql: "WITH changed AS (DELETE FROM people RETURNING id) SELECT * FROM changed", want: StatementWriteDML},
 		{name: "ddl", sql: "CREATE TABLE people (id INT)", want: StatementDDL},
 		{name: "call", sql: "CALL rebuild_cache()", want: StatementProcedureCall},
 		{name: "exec", sql: "EXEC dbo.rebuild_cache", want: StatementProcedureCall},
