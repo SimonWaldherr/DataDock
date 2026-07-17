@@ -451,6 +451,18 @@ func TestMaintenanceModeBlocksWrites(t *testing.T) {
 		t.Fatalf("expected read-only SELECT to succeed during maintenance mode, got %d: %s", w.Code, w.Body.String())
 	}
 
+	connForm := url.Values{}
+	connForm.Set("name", "blocked-conn")
+	connForm.Set("kind", "sqlite")
+	connForm.Set("dsn", ":memory:")
+	req = httptest.NewRequest(http.MethodPost, "/connections", strings.NewReader(connForm.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected adding a connection to be blocked with 503 during maintenance mode, got %d: %s", w.Code, w.Body.String())
+	}
+
 	if err := app.applyRuntimeSettings(RuntimeSettings{Dialect: "tinysql", ReadOnlyMode: false}); err != nil {
 		t.Fatalf("disable maintenance mode: %v", err)
 	}

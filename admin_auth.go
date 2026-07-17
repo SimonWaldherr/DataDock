@@ -97,6 +97,19 @@ func verifyAdminPassword(hash, plain string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)) == nil
 }
 
+// dummyPasswordHash is a valid bcrypt hash of an arbitrary fixed password, at
+// the same cost as hashAdminPassword. adminLoginSubmitHandler compares
+// against it whenever the submitted username doesn't exist or is disabled,
+// so every login attempt pays the same bcrypt cost and a response-time
+// difference can't be used to enumerate usernames or disabled accounts.
+var dummyPasswordHash = func() string {
+	h, err := bcrypt.GenerateFromPassword([]byte("datadock-constant-time-dummy"), bcrypt.DefaultCost)
+	if err != nil {
+		return ""
+	}
+	return string(h)
+}()
+
 // requireRole gates a handler behind first-run setup and a per-session login
 // with one of the given roles. Browser routes redirect into the setup/login
 // flow; API routes return Problem Details so automation clients can handle
@@ -412,7 +425,15 @@ func (a *App) adminLoginSubmitHandler(w http.ResponseWriter, r *http.Request) {
 			found = true
 		}
 	}
-	if !found || user.Disabled || !verifyAdminPassword(user.PasswordHash, password) {
+	// Always run a bcrypt comparison of equal cost, even when the account
+	// doesn't exist or is disabled, so response time can't be used to
+	// enumerate usernames or disabled accounts (see dummyPasswordHash).
+	hashToCheck := user.PasswordHash
+	if !found || user.Disabled {
+		hashToCheck = dummyPasswordHash
+	}
+	passwordOK := verifyAdminPassword(hashToCheck, password)
+	if !found || user.Disabled || !passwordOK {
 		a.renderAdminAuth(w, "login", next, "Incorrect password.")
 		return
 	}

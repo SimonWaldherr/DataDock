@@ -94,7 +94,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	// Connections are session-scoped by default; admin login is only needed
 	// to persist/share credentials or change the server-wide default.
 	handle("GET /connections", a.connectionsHandler)
-	handle("POST /connections", a.addConnectionHandler)
+	handle("POST /connections", a.requireWritable(a.addConnectionHandler))
 	handle("POST /connections/active", a.setActiveConnectionHandler)
 
 	// Admin area: gated by an admin password. With none set yet, every
@@ -1170,7 +1170,10 @@ func (a *App) addConnectionHandler(w http.ResponseWriter, r *http.Request) {
 // connectionFormEcho captures the "Add Managed Connection" form fields so
 // they can be re-rendered into the form after a failed attempt (e.g. a bad
 // password or unreachable host), instead of forcing the user to retype
-// everything.
+// everything. password and dsn are deliberately left blank on echo: both can
+// carry a plaintext credential, and re-rendering them into a value="..."
+// attribute would leak that secret into view-source, browser history, and
+// any HAR/proxy capture of the response.
 func connectionFormEcho(r *http.Request) map[string]interface{} {
 	get := r.Form.Get
 	return map[string]interface{}{
@@ -1181,13 +1184,13 @@ func connectionFormEcho(r *http.Request) map[string]interface{} {
 		"port":      get("port"),
 		"database":  get("database"),
 		"user":      get("user"),
-		"password":  get("password"),
+		"password":  "",
 		"instance":  get("instance"),
 		"sslmode":   get("sslmode"),
 		"encrypt":   get("encrypt"),
 		"authmode":  get("authmode"),
 		"params":    get("params"),
-		"dsn":       get("dsn"),
+		"dsn":       "",
 		"trustCert": get("trust_cert") != "",
 	}
 }

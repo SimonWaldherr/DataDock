@@ -638,6 +638,10 @@ func securityHeaders(next http.Handler) http.Handler {
 				"img-src 'self' data:; worker-src 'self' blob: data:; form-action 'self'; frame-ancestors 'none'; base-uri 'self'")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		// Belt-and-suspenders alongside the CSP's frame-ancestors 'none' for
+		// browsers that only honor the older header.
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
 		next.ServeHTTP(w, r)
 	})
 }
