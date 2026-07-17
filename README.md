@@ -34,6 +34,7 @@ database manager with administrator-managed or per-user credentials.
 | **Quick Charts** | D3-powered first chart preview for numeric query results |
 | **Geo Views** | Map query results from GeoJSON geometry columns or latitude/longitude columns |
 | **Connection Manager** | Register managed database connections and switch the active connection from the GUI |
+| **Logic Search** | Semantic search over indexed view/procedure/function definitions on PostgreSQL, MariaDB/MySQL, and Microsoft SQL Server connections — ask for what a routine does, not just its name |
 | **Session-scoped Active Connection** | Each browser session can use a different active connection |
 | **Table Migration** | Copy a table from one registered connection into another, with optional target table creation |
 | **Matching** | Compare two tables — from the same or different connections, or an uploaded CSV/XLSX file — and find rows that likely describe the same entity (customers, articles, or anything else) despite differing spelling, casing, legal-form suffixes, or address abbreviations; save confirmed matches as a queryable crosswalk table or export as CSV |
@@ -120,6 +121,19 @@ tinySQL v0.19.1 also persists `CREATE INDEX` metadata. DataDock can execute
 `CREATE INDEX` / `DROP INDEX` in the SQL editor and inspect the catalog through
 `sys.indexes`; tinySQL still treats indexes as metadata rather than a
 planner-backed access path.
+
+**Logic Search** embeds the SQL definitions of views, procedures, and
+functions on a connection so they can be found by meaning instead of by name.
+It only supports dialects that expose retrievable definitions today
+(PostgreSQL, MariaDB/MySQL, and Microsoft SQL Server — not the embedded
+tinySQL connection). Configure an embedding model in **Admin Settings**, then
+reindex a connection from its **Reindex** button on the Connections page, or
+reindex every shared connection at once with `POST
+/admin/logic-search/reindex-all` (Admin session). Search it with `POST
+/api/logic-search` (`{connection_id, query}`), which returns ranked
+`{objectName, objectKind, score}` hits linking back to the existing `/t/{name}`
+(view) or `/r/{name}` (routine) pages — the definition text itself is never
+returned over the API.
 
 tinySQL v0.19.1 also adds a bounded 30-second result cache for local
 `VEC_SEARCH` queries. DataDock enables 128 entries and keeps a bounded,
@@ -626,47 +640,95 @@ server-to-provider, not directly from browser JavaScript to LM Studio.
 
 ## Architecture
 
+DataDock is a single Go module at the repo root (`github.com/SimonWaldherr/datadock`,
+package `main`) — there is no `cmd/` layout. Every top-level `.go` file has a
+matching `_test.go` file; both are omitted below per source file for brevity.
+
 ```
-cmd/datadock/
-├── main.go          # Server setup, embed, flag parsing, template funcs
-├── db.go            # App struct, table/record helpers, SQL execution
-├── connections.go   # Managed sql.DB connections and dialect-aware helpers
-├── dialect.go       # SQL dialect profiles for LLM guidance and adapters
-├── settings.go      # Runtime settings stored in the embedded tinySQL DB
-├── llm.go           # OpenAI-compatible assistant client and workflows
-├── migration.go     # Table-copy migration between managed connections
-├── matching.go      # Cross-table/cross-connection record matching orchestration
-├── rag.go           # Schema retrieval and result profiling for LLM context
-├── handlers.go      # HTTP route handlers
-├── main_test.go     # HTTP integration tests
-├── internal/
-│   └── match/       # Domain-agnostic normalization, similarity, and matching engine
-├── static/
-│   └── app.js       # Minimal client-side helpers
-└── templates/
-    ├── base.html    # Layout: top nav + sidebar (shared across pages)
-    ├── index.html   # Empty-state landing page
-    ├── table_view.html   # Datasheet with pagination + sort
-    ├── record_form.html  # Create/edit record form
-    ├── query.html   # SQL editor with async JSON API
-    ├── admin.html   # Admin status and runtime settings
-    ├── jobs.html    # Job overview and manual execution
-    ├── connections.html  # Managed connection UI
-    ├── migration.html    # Table migration UI
-    ├── match.html         # Record matching wizard
-    └── create_table.html # Table design wizard
+main.go               # Server setup, embed, flag parsing, template funcs
+db.go                 # App struct, table/record helpers, SQL execution
+connections.go        # Managed sql.DB connections and dialect-aware helpers
+dialect.go            # SQL dialect profiles for LLM guidance and adapters
+settings.go           # Runtime settings stored in the embedded tinySQL DB
+session.go            # Browser session store and active-connection scoping
+auth_mode.go          # Local no-login vs Admin-gated auth mode selection
+admin_auth.go         # Admin setup/login/logout and password handling
+admin_users.go        # Local user account admin handlers
+users.go              # Local user/role persistence
+audit.go              # Redacted audit logging for mutating actions
+verbose.go            # Verbose stdout logging for LLM/db/import activity
+handlers.go           # HTTP route registration and page/API handlers
+queries.go            # Shared SQL text used across handlers
+catalog_browser.go    # Async catalog tree for non-tinySQL connections
+matching.go           # Cross-table/cross-connection record matching orchestration
+match_config.go       # Saved matching configurations
+match_schedule.go     # Scheduled matching runs
+migration.go          # Table-copy migration between managed connections
+pipelines.go          # Versioned, immutable SQL pipeline definitions and runs
+scheduler_executor.go # Runs registered jobs/pipelines on their schedule
+file_watcher.go       # Watches imported source files for external changes
+excel_csv.go          # Excel-safe CSV helpers
+geojson_export.go     # GeoJSON/GeoJSON-summary/KML/GPX export
+map_export.go         # Shapefile ZIP and other map export formats
+map_tiles.go          # MBTiles/PMTiles TileJSON and XYZ tile serving
+routing.go            # Shortest-path and reachable-area routing over RG tables
+spatial_report.go     # Import provenance and spatial data-quality reports
+tinysql_features.go   # tinySQL-specific stored procedure/function registration
+embeddings.go         # Embedding provider client used for vector/logic search
+logic_search.go       # Semantic search over view/procedure/function definitions
+llm.go                # OpenAI-compatible assistant client and workflows
+llm_discovery.go      # LAN/localhost LLM server auto-discovery
+rag.go                # Schema retrieval and result profiling for LLM context
+internal/
+├── catalog/     # Schema/object listing for the async catalog tree
+├── importer/    # Structured and geospatial file-format import pipeline
+├── jobs/        # Scheduled job configuration and execution
+├── match/       # Domain-agnostic normalization, similarity, and matching engine
+├── resultutil/  # Result-set column profiling/summarization helpers
+├── sqlutil/     # SQL statement classification (read/write/DDL/procedure call)
+├── standards/   # Shared HTTP media types and Problem+JSON error helpers
+└── typed/       # Typed value inference/conversion for imports (int/float/bool/date/…)
+static/
+├── app.js       # Client-side app: editor wiring, async API calls, charts, maps
+└── style.css    # Application styling (light/dark themes, density modes)
+templates/
+├── base.html           # Layout: top nav + sidebar (shared across pages)
+├── index.html          # Empty-state landing page
+├── table_view.html     # Datasheet with pagination + sort
+├── record_form.html    # Create/edit record form
+├── manage_table.html   # Table design wizard and per-table management tabs
+├── query.html          # SQL editor with async JSON API
+├── admin.html          # Admin status and runtime settings
+├── admin_auth.html     # Admin setup/login forms
+├── admin_users.html    # Local user account management
+├── jobs.html           # Job overview and manual execution
+├── pipelines.html      # Versioned SQL pipeline manager
+├── connections.html    # Managed connection UI and Logic Search reindexing
+├── migrate.html        # Table migration wizard
+├── match.html          # Record matching wizard
+├── routine_view.html   # Read-only procedure/function definition view
+├── map_layer.html      # MBTiles/PMTiles map layer view
+├── routing.html        # Routing graph analysis view
+├── spatial_quality.html # Import provenance and spatial quality report
+├── history.html        # Local query history page
+├── guide.html          # In-app usage guide
+├── about.html          # Runtime and local browser storage information
+└── object_missing.html # Fallback view for a missing table/view/routine
 ```
 
 ### HTTP Routes
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/healthz` | Unauthenticated liveness/readiness probe for process supervisors (systemd, Docker, Kubernetes) |
 | `GET` | `/` | Redirect to first table, or empty-state |
 | `GET` | `/t/{table}` | Datasheet view (query params: `page`, `sort`, `dir`) |
 | `GET` | `/t/{table}/map` | Render a local MBTiles/PMTiles layer |
 | `GET` | `/t/{table}/route` | Route and reachability workspace for an RG table |
 | `GET` | `/t/{table}/quality` | Persisted import provenance and spatial quality report |
 | `GET` | `/t/{table}/export?format=csv\|csv-excel\|tsv\|xlsx\|json\|xml\|html\|sqlite\|geojson\|geojson-summary\|kml\|gpx\|shp` | Download a full table/view export |
+| `GET` | `/api/tables/{table}/script` | Return the table's `CREATE TABLE` script as JSON |
+| `GET` | `/r/{routine}?kind=procedure\|function` | Read-only definition view for a stored procedure or function |
 | `GET` | `/t/{table}/new` | New record form |
 | `POST` | `/t/{table}/new` | Create record |
 | `GET` | `/t/{table}/{id}/edit` | Edit record form |
@@ -689,9 +751,14 @@ cmd/datadock/
 | `POST` | `/api/routing/{table}/reachable` | Cost-bounded reachable nodes and convex-hull GeoJSON area |
 | `GET` | `/api/spatial-reports/{table}` | Provenance and normalized spatial data-quality report |
 | `GET` | `/api/llm/health` | Test server-side connectivity to the configured LLM provider (Admin session) |
+| `GET` | `/api/llm/discover` | Probe localhost/LAN for OpenAI-compatible LLM servers (Admin session) |
+| `POST` | `/api/llm/autoconfig` | Apply a discovered LLM server as the active provider configuration (Admin session) |
 | `GET` | `/connections` | Connection manager |
 | `POST` | `/connections` | Add a session-private managed connection |
 | `POST` | `/connections/active` | Switch the active connection for the current session |
+| `POST` | `/connections/reindex-logic` | Reindex one connection's Logic Search embeddings (connection owner, or Admin session for shared connections) |
+| `POST` | `/admin/logic-search/reindex-all` | Reindex Logic Search embeddings for every shared connection (Admin session) |
+| `POST` | `/api/logic-search` | Semantic search over indexed view/procedure/function definitions (`{connection_id, query}`) |
 | `GET` | `/admin/setup` | First-run auth-mode chooser or Admin account setup |
 | `POST` | `/admin/setup/mode` | Choose local no-login mode for loopback-only solo use |
 | `POST` | `/admin/setup` | Create the initial Admin account |
@@ -729,8 +796,12 @@ cmd/datadock/
 | `POST` | `/match/tables` | Submit target for the Tables step: resolves each side's connection/table, importing an uploaded file first if that side is set to "File Upload" |
 | `GET` | `/create-table` | Table designer |
 | `POST` | `/create-table` | Create table |
+| `GET` | `/import` | File/API import form |
+| `POST` | `/import` | Run a file/API import |
+| `POST` | `/api/import` | Run a file/API import (JSON API used by the async import UI) |
 | `GET` | `/export` | Export query form |
 | `GET` | `/history` | Local query history page |
+| `GET` | `/guide` | In-app usage guide |
 | `GET` | `/about` | Runtime and local browser storage information |
 | `POST` | `/demo-data` | Load (or reset) the built-in demo dataset plus a sample scheduled job (Admin session) |
 | `POST` | `/demo-data/remove` | Drop every demo table and the sample demo job (Admin session) |
