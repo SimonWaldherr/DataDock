@@ -36,6 +36,14 @@ func TestClassify(t *testing.T) {
 		{name: "e-prefixed backslash-quote without a stacked statement stays a read query", sql: `SELECT E'\'' AS value`, want: StatementReadQuery},
 		{name: "plain (non-E) string with trailing backslash is unaffected", sql: `SELECT 'C:\Users\test\' AS path`, want: StatementReadQuery},
 		{name: "e-prefixed doubled-quote escape still works", sql: `SELECT E'it''s fine' AS value`, want: StatementReadQuery},
+		{name: "harmless pragma stays a read query", sql: "PRAGMA table_info(people)", want: StatementReadQuery},
+		{name: "pragma setter disabling foreign keys is a write", sql: "PRAGMA foreign_keys = OFF", want: StatementWriteDML},
+		{name: "pragma getter for a side-effecting name is still treated as a write", sql: "PRAGMA journal_mode", want: StatementWriteDML},
+		{name: "select calling pg_terminate_backend is a write", sql: "SELECT pg_terminate_backend(1234)", want: StatementWriteDML},
+		{name: "select calling setval is a write", sql: "SELECT setval('people_id_seq', 1000)", want: StatementWriteDML},
+		{name: "select calling sleep is a write", sql: "SELECT SLEEP(10)", want: StatementWriteDML},
+		{name: "select mentioning a volatile name as plain text stays read", sql: "SELECT 'setval' AS label", want: StatementReadQuery},
+		{name: "select with a column literally named sleep stays read", sql: "SELECT sleep FROM schedules", want: StatementReadQuery},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -39,8 +39,17 @@ func classifyTokens(tokens []string) StatementClass {
 		}
 		return StatementReadQuery
 	}
+	if first == "PRAGMA" {
+		if pragmaHasSideEffect(tokens) {
+			return StatementWriteDML
+		}
+		return StatementReadQuery
+	}
 	switch first {
-	case "SELECT", "SHOW", "DESCRIBE", "DESC", "PRAGMA":
+	case "SELECT", "SHOW", "DESCRIBE", "DESC":
+		if containsVolatileCall(tokens) {
+			return StatementWriteDML
+		}
 		return StatementReadQuery
 	case "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "TRUNCATE":
 		return StatementWriteDML
@@ -51,6 +60,65 @@ func classifyTokens(tokens []string) StatementClass {
 	default:
 		return StatementUnknown
 	}
+}
+
+// pragmaSideEffectNames are PRAGMA options that change connection/database
+// state on SQLite/tinySQL rather than simply reporting it. A dialect-
+// agnostic classifier can't reliably tell a getter ("PRAGMA foreign_keys;")
+// from a setter ("PRAGMA foreign_keys = OFF;") apart without a real
+// expression parser, so any mention of one of these names is treated as a
+// write — over-blocking a rare read-only getter is an acceptable cost for
+// closing a real path to disabling FK/journal/durability guarantees through
+// what every maintenance-mode, read-only-role, and audit-log check
+// otherwise assumes is an inert introspection query. Not exhaustive.
+var pragmaSideEffectNames = map[string]bool{
+	"FOREIGN_KEYS":    true,
+	"JOURNAL_MODE":    true,
+	"SYNCHRONOUS":     true,
+	"LOCKING_MODE":    true,
+	"WRITABLE_SCHEMA": true,
+	"AUTO_VACUUM":     true,
+	"CACHE_SIZE":      true,
+	"APPLICATION_ID":  true,
+	"USER_VERSION":    true,
+	"SCHEMA_VERSION":  true,
+	"WAL_CHECKPOINT":  true,
+	"OPTIMIZE":        true,
+}
+
+func pragmaHasSideEffect(tokens []string) bool {
+	for _, tok := range tokens[1:] {
+		if pragmaSideEffectNames[tok] {
+			return true
+		}
+	}
+	return false
+}
+
+// volatileFunctionNames are callables that mutate server/session state or
+// consume unbounded resources even when invoked from inside an ordinary
+// SELECT, so they pass every check keyed off the leading statement verb.
+// Not exhaustive — a real allowlist would need per-dialect knowledge this
+// classifier doesn't have; this denylist targets the specific,
+// well-known, high-impact cases.
+var volatileFunctionNames = map[string]bool{
+	"PG_TERMINATE_BACKEND": true, // PostgreSQL: kill another session
+	"PG_CANCEL_BACKEND":    true, // PostgreSQL: cancel another session's query
+	"PG_RELOAD_CONF":       true, // PostgreSQL: reload server configuration
+	"SETVAL":               true, // PostgreSQL: set a sequence's current value
+	"NEXTVAL":              true, // PostgreSQL: advance a sequence
+	"SLEEP":                true, // MySQL: SLEEP(n) as a resource-exhaustion/DoS primitive
+	"BENCHMARK":            true, // MySQL: BENCHMARK(count, expr), CPU-exhaustion primitive
+	"LOAD_FILE":            true, // MySQL: arbitrary local file read
+}
+
+func containsVolatileCall(tokens []string) bool {
+	for i, tok := range tokens {
+		if volatileFunctionNames[tok] && i+1 < len(tokens) && tokens[i+1] == "(" {
+			return true
+		}
+	}
+	return false
 }
 
 // explainWrappedStatement looks past a leading EXPLAIN for an ANALYZE
