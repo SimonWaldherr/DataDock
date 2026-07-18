@@ -81,6 +81,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("open database: %v", err)
 	}
+	if len(encryptionKey) == 0 {
+		if mode, err := tinysql.ParseStorageMode(*storageMode); err == nil {
+			switch mode {
+			case tinysql.ModeDisk, tinysql.ModeJSON, tinysql.ModeHybrid, tinysql.ModeIndex:
+				// This mode CAN encrypt at rest but isn't; settings and
+				// managed-connection DSNs (which can carry credentials and
+				// LLM/embedding API keys) are being written to disk in
+				// plaintext, indistinguishable in the logs from an
+				// encrypted setup unless this is called out explicitly.
+				log.Printf("WARNING: storage mode %q writes to disk without DATADOCK_ENCRYPTION_KEY set; settings and stored connection credentials are stored in plaintext", *storageMode)
+			}
+		}
+	}
 
 	// Persist and close cleanly on shutdown. File-backed DataDock uses
 	// tinySQL's memory mode with a save path (see openNativeDB), so Close
