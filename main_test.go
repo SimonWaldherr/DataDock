@@ -247,6 +247,26 @@ func lastSessionCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Cooki
 	return last
 }
 
+// TestStyleCSSHasShortCacheControl guards against style.css going back to
+// its previous "no-cache" header, which forced a full re-download on every
+// single page navigation.
+func TestStyleCSSHasShortCacheControl(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/static/style.css", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected style.css to be served, got %d", rec.Code)
+	}
+	cc := rec.Header().Get("Cache-Control")
+	if cc == "" || cc == "no-cache" || !strings.Contains(cc, "max-age") {
+		t.Fatalf("expected a positive max-age Cache-Control, got %q", cc)
+	}
+}
+
 func TestIndexRedirectsToFirstTable(t *testing.T) {
 	app := newTestApp(t)
 

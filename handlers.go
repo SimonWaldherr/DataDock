@@ -206,7 +206,12 @@ func styleCSSHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
+	// A short max-age (rather than the previous no-cache, which forced a
+	// full re-download on every single navigation) noticeably cuts repeat
+	// transfers within one browsing session, while staying short enough
+	// that a DataDock upgrade's CSS changes show up well within a typical
+	// session rather than needing a hard refresh.
+	w.Header().Set("Cache-Control", "public, max-age=300")
 	_, _ = w.Write(content)
 }
 

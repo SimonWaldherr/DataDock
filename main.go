@@ -254,7 +254,7 @@ func main() {
 	// and must not depend on anything that could itself be degraded.
 	mux.HandleFunc("GET /healthz", healthzHandler)
 	app.registerRoutes(mux)
-	mux.Handle("GET /static/", http.FileServer(http.FS(webFS)))
+	mux.Handle("GET /static/", cacheableStaticHandler(http.FileServer(http.FS(webFS))))
 
 	// Middleware order (outermost first): every request is logged exactly
 	// once with its final status, including ones recovered from a panic;
@@ -644,6 +644,20 @@ func parseTemplates() (*template.Template, error) {
 }
 
 // securityHeaders adds baseline browser security headers.
+// cacheableStaticHandler adds a short-lived Cache-Control to everything
+// under /static/ (app.js, style.css, and any other embedded static asset),
+// which previously had no cache headers or validators at all and was
+// re-downloaded in full on every single page navigation. Short enough
+// (5 minutes) that a DataDock upgrade's frontend changes show up well
+// within a typical browsing session without needing a build-time cache-
+// busting/content-hash scheme.
+func cacheableStaticHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy",
