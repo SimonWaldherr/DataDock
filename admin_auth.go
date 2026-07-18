@@ -447,6 +447,72 @@ func (a *App) adminLoginHandler(w http.ResponseWriter, r *http.Request) {
 	a.renderAdminAuth(w, "login", r.URL.Query().Get("next"), "")
 }
 
+// loginAttemptState tracks recent failed login attempts for one username.
+type loginAttemptState struct {
+	failures    int
+	lockedUntil time.Time
+}
+
+const (
+	// maxLoginFailuresBeforeLockout is how many consecutive failed
+	// attempts for a username are allowed before it's locked out.
+	maxLoginFailuresBeforeLockout = 5
+	// loginLockoutDuration is how long a username stays locked out once
+	// maxLoginFailuresBeforeLockout is reached.
+	loginLockoutDuration = 15 * time.Minute
+)
+
+// loginLockedOut reports whether username is currently locked out from
+// login attempts, and clears any expired lockout it finds along the way.
+func (a *App) loginLockedOut(username string) bool {
+	a.loginAttemptsMu.Lock()
+	defer a.loginAttemptsMu.Unlock()
+	state := a.loginAttempts[username]
+	if state == nil {
+		return false
+	}
+	if state.lockedUntil.IsZero() {
+		return false
+	}
+	if time.Now().After(state.lockedUntil) {
+		delete(a.loginAttempts, username)
+		return false
+	}
+	return true
+}
+
+// recordLoginFailure counts one more failed attempt for username, locking
+// it out once maxLoginFailuresBeforeLockout is reached. Deliberately keyed
+// by username, not client IP: DataDock has no reliable client IP behind an
+// arbitrary reverse proxy without trusting a spoofable header, and the
+// actual attack this defends is unlimited parallel guessing against one
+// known account (typically "admin"), which per-username lockout already
+// stops regardless of how many source addresses it's spread across.
+func (a *App) recordLoginFailure(username string) {
+	a.loginAttemptsMu.Lock()
+	defer a.loginAttemptsMu.Unlock()
+	if a.loginAttempts == nil {
+		a.loginAttempts = make(map[string]*loginAttemptState)
+	}
+	state := a.loginAttempts[username]
+	if state == nil {
+		state = &loginAttemptState{}
+		a.loginAttempts[username] = state
+	}
+	state.failures++
+	if state.failures >= maxLoginFailuresBeforeLockout {
+		state.lockedUntil = time.Now().Add(loginLockoutDuration)
+	}
+}
+
+// clearLoginFailures resets username's failure count after a successful
+// login.
+func (a *App) clearLoginFailures(username string) {
+	a.loginAttemptsMu.Lock()
+	defer a.loginAttemptsMu.Unlock()
+	delete(a.loginAttempts, username)
+}
+
 func (a *App) adminLoginSubmitHandler(w http.ResponseWriter, r *http.Request) {
 	if a.currentAuthMode() == AuthModeNone {
 		http.Redirect(w, r, "/admin", http.StatusSeeOther)
@@ -461,6 +527,10 @@ func (a *App) adminLoginSubmitHandler(w http.ResponseWriter, r *http.Request) {
 	password := r.Form.Get("password")
 	if username == "" {
 		username = "admin"
+	}
+	if a.loginLockedOut(username) {
+		a.renderAdminAuth(w, "login", next, "Too many failed attempts for this account. Try again later.")
+		return
 	}
 	user, found, err := a.getUserByUsername(r.Context(), username)
 	if err != nil {
@@ -486,9 +556,11 @@ func (a *App) adminLoginSubmitHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	passwordOK := verifyAdminPassword(hashToCheck, password)
 	if !found || user.Disabled || !passwordOK {
+		a.recordLoginFailure(username)
 		a.renderAdminAuth(w, "login", next, "Incorrect password.")
 		return
 	}
+	a.clearLoginFailures(username)
 	a.rotateSessionOnAuth(w, r, user.Username, user.Role)
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }

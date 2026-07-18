@@ -76,6 +76,13 @@ type App struct {
 	adminAuthMu         sync.Mutex
 	adminAuthedSessions map[string]sessionAuth
 
+	// loginAttemptsMu/loginAttempts back a simple per-username login
+	// lockout (see recordLoginFailure/loginLockedOut in admin_auth.go).
+	// Process-local like everything else here: a restart clears it, same
+	// as adminAuthedSessions.
+	loginAttemptsMu sync.Mutex
+	loginAttempts   map[string]*loginAttemptState
+
 	// matchCron runs saved Match Configurations (see match_config.go) on a
 	// cron schedule (see match_schedule.go). It is DataDock's own scheduler,
 	// separate from tinySQL's built-in job scheduler, because that one only

@@ -1212,6 +1212,49 @@ func TestLoginRotatesSessionIDPreventingFixation(t *testing.T) {
 	}
 }
 
+// TestLoginLockoutAfterRepeatedFailures guards against unlimited online
+// password guessing: previously nothing rate-limited /admin/login attempts
+// at all, so an attacker could brute-force the well-known default "admin"
+// username as fast as bcrypt cost-10 allows, in parallel, with no lockout.
+func TestLoginLockoutAfterRepeatedFailures(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+	_ = setupAdminSession(t, mux) // creates the "admin" account with password "secret123"
+
+	attempt := func(password string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/admin/login", strings.NewReader(
+			url.Values{"username": {"admin"}, "password": {password}, "next": {"/admin"}}.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for i := 0; i < maxLoginFailuresBeforeLockout; i++ {
+		rec := attempt("wrong-password")
+		if !strings.Contains(rec.Body.String(), "Incorrect password") {
+			t.Fatalf("attempt %d: expected an incorrect-password response, got: %s", i, rec.Body.String())
+		}
+	}
+
+	// The account is now locked out, even with the CORRECT password.
+	lockedRec := attempt("secret123")
+	if !strings.Contains(lockedRec.Body.String(), "Too many failed attempts") {
+		t.Fatalf("expected the account to be locked out after %d failures, got: %s", maxLoginFailuresBeforeLockout, lockedRec.Body.String())
+	}
+
+	// Lifting the lockout (simulating loginLockoutDuration elapsing) lets a
+	// correct login through again.
+	app.loginAttemptsMu.Lock()
+	delete(app.loginAttempts, "admin")
+	app.loginAttemptsMu.Unlock()
+	recoveredRec := attempt("secret123")
+	if recoveredRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected login to succeed once the lockout is lifted, got %d: %s", recoveredRec.Code, recoveredRec.Body.String())
+	}
+}
+
 func TestAdminLoginLogoutAndExpiry(t *testing.T) {
 	app := newTestApp(t)
 	mux := http.NewServeMux()
