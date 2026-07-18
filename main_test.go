@@ -493,6 +493,7 @@ func TestMaintenanceModeBlocksWrites(t *testing.T) {
 
 	insertBody := `{"sql":"INSERT INTO people (id, name) VALUES (1, 'Blocked')"}`
 	req = httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(insertBody))
+	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -504,6 +505,7 @@ func TestMaintenanceModeBlocksWrites(t *testing.T) {
 
 	selectBody := `{"sql":"SELECT * FROM people"}`
 	req = httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(selectBody))
+	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), `"error"`) {
@@ -885,6 +887,7 @@ func TestAPILLMAutoConfigAppliesSelectedServer(t *testing.T) {
 
 	body := `{"base_url":"http://llm.local/v1","model":"local-model"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/llm/autoconfig", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	app.apiLLMAutoConfigHandler(rec, req)
 	if rec.Code != http.StatusOK {
@@ -1512,6 +1515,43 @@ func TestAnonymousWriteAllowedInAuthModeNone(t *testing.T) {
 	}
 	if _, err := app.sqlDB.Exec("SELECT 1 FROM anon_none_test"); err != nil {
 		t.Fatalf("expected the table to exist after an anonymous create in AuthModeNone, got: %v", err)
+	}
+}
+
+// TestJSONAPIRejectsWrongContentType guards a Content-Type confusion gap:
+// JSON API endpoints previously decoded the request body as JSON
+// regardless of the actual Content-Type header, so a request sent with a
+// "simple" content type a plain cross-site <form> can submit without
+// triggering a CORS preflight (e.g. text/plain) would still be parsed and
+// acted on.
+func TestJSONAPIRejectsWrongContentType(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	body := `{"sql":"SELECT 1"}`
+
+	wrongTypeReq := httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(body))
+	wrongTypeReq.Header.Set("Content-Type", "text/plain")
+	wrongTypeRec := httptest.NewRecorder()
+	mux.ServeHTTP(wrongTypeRec, wrongTypeReq)
+	if wrongTypeRec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected a non-JSON Content-Type to be rejected with 415, got %d: %s", wrongTypeRec.Code, wrongTypeRec.Body.String())
+	}
+
+	missingTypeReq := httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(body))
+	missingTypeRec := httptest.NewRecorder()
+	mux.ServeHTTP(missingTypeRec, missingTypeReq)
+	if missingTypeRec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected a missing Content-Type to be rejected with 415, got %d: %s", missingTypeRec.Code, missingTypeRec.Body.String())
+	}
+
+	correctTypeReq := httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(body))
+	correctTypeReq.Header.Set("Content-Type", "application/json; charset=utf-8")
+	correctTypeRec := httptest.NewRecorder()
+	mux.ServeHTTP(correctTypeRec, correctTypeReq)
+	if correctTypeRec.Code != http.StatusOK {
+		t.Fatalf("expected application/json (with charset) to succeed, got %d: %s", correctTypeRec.Code, correctTypeRec.Body.String())
 	}
 }
 

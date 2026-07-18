@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -294,6 +295,30 @@ func (a *App) writeJSON(w http.ResponseWriter, status int, v interface{}) {
 
 func (a *App) writeProblem(w http.ResponseWriter, r *http.Request, status int, title, detail string) {
 	standards.WriteProblem(w, standards.NewProblem(status, title, detail, r.URL.Path))
+}
+
+// decodeJSONBody decodes r's body as JSON into dst, requiring a
+// Content-Type of application/json (ignoring an optional charset
+// parameter) rather than decoding whatever content type arrives. Without
+// this, a JSON API endpoint would still parse a body submitted with a
+// different Content-Type — including the small set of "simple" content
+// types (text/plain, application/x-www-form-urlencoded, multipart/form-
+// data) a plain cross-site <form> can send without triggering a CORS
+// preflight. invalidJSONDetail is used for the decode-failure response,
+// letting callers keep their own wording for that case. Returns false
+// (having already written a response) when either check fails, so callers
+// just do `if !a.decodeJSONBody(w, r, &body, "...") { return }`.
+func (a *App) decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any, invalidJSONDetail string) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		a.writeProblem(w, r, http.StatusUnsupportedMediaType, "Unsupported Content-Type", "Content-Type must be application/json.")
+		return false
+	}
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", invalidJSONDetail)
+		return false
+	}
+	return true
 }
 
 func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]string, format, filenameBase string, opts ...exportOptions) bool {
@@ -776,8 +801,7 @@ func (a *App) apiLogicSearchHandler(w http.ResponseWriter, r *http.Request) {
 		ConnectionID string `json:"connection_id"`
 		Query        string `json:"query"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+	if !a.decodeJSONBody(w, r, &body, "Request body must be valid JSON.") {
 		return
 	}
 	ctx, cancel := a.withQueryTimeout(r.Context())
@@ -2715,8 +2739,7 @@ func (a *App) apiQueryHandler(w http.ResponseWriter, r *http.Request) {
 		Limit  int    `json:"limit"`
 		Offset int    `json:"offset"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+	if !a.decodeJSONBody(w, r, &body, "Request body must be valid JSON.") {
 		return
 	}
 	limit := clampQueryWindowLimit(body.Limit)
@@ -2799,8 +2822,7 @@ func (a *App) apiExportHandler(w http.ResponseWriter, r *http.Request) {
 		Fields            []string  `json:"fields"`
 		DropFields        []string  `json:"drop_fields"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+	if !a.decodeJSONBody(w, r, &body, "Request body must be valid JSON.") {
 		return
 	}
 
@@ -2992,8 +3014,7 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			DefaultTheme   string `json:"default_theme"`
 			DefaultDensity string `json:"default_density"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+		if !a.decodeJSONBody(w, r, &body, "Request body must be valid JSON.") {
 			return
 		}
 		pageSize := ""
@@ -3064,8 +3085,7 @@ func (a *App) apiLLMAutoConfigHandler(w http.ResponseWriter, r *http.Request) {
 		BaseURL string `json:"base_url"`
 		Model   string `json:"model"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+	if !a.decodeJSONBody(w, r, &body, "Request body must be valid JSON.") {
 		return
 	}
 
@@ -3235,8 +3255,7 @@ func (a *App) apiJobsHandler(w http.ResponseWriter, r *http.Request) {
 			NoOverlap    bool   `json:"no_overlap"`
 			MaxRuntimeMs int64  `json:"max_runtime_ms"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+		if !a.decodeJSONBody(w, r, &body, "Request body must be valid JSON.") {
 			return
 		}
 		var runAt *time.Time
@@ -3280,8 +3299,7 @@ func (a *App) apiRunJobHandler(w http.ResponseWriter, r *http.Request) {
 		Name      string `json:"name"`
 		TimeoutMS int64  `json:"timeout_ms"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+	if !a.decodeJSONBody(w, r, &body, "Request body must be valid JSON.") {
 		return
 	}
 	job, err := a.nativeDB.Catalog().GetJob(strings.TrimSpace(body.Name))
@@ -3364,8 +3382,7 @@ func (a *App) apiPipelinesHandler(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusOK, map[string]any{"pipelines": pipelines, "runs": runs})
 	case http.MethodPost:
 		var pipeline Pipeline
-		if err := json.NewDecoder(r.Body).Decode(&pipeline); err != nil {
-			a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be a pipeline definition.")
+		if !a.decodeJSONBody(w, r, &pipeline, "Request body must be a pipeline definition.") {
 			return
 		}
 		ctx, cancel := a.withQueryTimeout(r.Context())
@@ -3390,8 +3407,7 @@ func (a *App) apiRunPipelineHandler(w http.ResponseWriter, r *http.Request) {
 		Name    string `json:"name"`
 		Version int    `json:"version"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must include a pipeline name.")
+	if !a.decodeJSONBody(w, r, &body, "Request body must include a pipeline name.") {
 		return
 	}
 	ctx, cancel := a.withQueryTimeout(r.Context())
@@ -3413,8 +3429,7 @@ func (a *App) apiDeletePipelineHandler(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name string `json:"name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must include a pipeline name.")
+	if !a.decodeJSONBody(w, r, &body, "Request body must include a pipeline name.") {
 		return
 	}
 	name := strings.TrimSpace(body.Name)
@@ -3500,8 +3515,7 @@ func (a *App) apiImportHandler(w http.ResponseWriter, r *http.Request) {
 		// otherwise-supported formats for no reason.
 		Fuzzy bool `json:"fuzzy"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+	if !a.decodeJSONBody(w, r, &body, "Request body must be valid JSON.") {
 		return
 	}
 	table := strings.TrimSpace(body.Table)
@@ -3853,8 +3867,7 @@ func (a *App) apiLLMHandler(w http.ResponseWriter, r *http.Request) {
 		Columns []string   `json:"columns"`
 		Rows    [][]string `json:"rows"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+	if !a.decodeJSONBody(w, r, &body, "Request body must be valid JSON.") {
 		return
 	}
 
@@ -4010,8 +4023,7 @@ func (a *App) apiLLMPreviewHandler(w http.ResponseWriter, r *http.Request) {
 		Columns []string   `json:"columns"`
 		Rows    [][]string `json:"rows"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+	if !a.decodeJSONBody(w, r, &body, "Request body must be valid JSON.") {
 		return
 	}
 	action := strings.TrimSpace(body.Action)
@@ -4088,8 +4100,7 @@ func (a *App) apiLLMRunHandler(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Prompt string `json:"prompt"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		a.writeProblem(w, r, http.StatusBadRequest, "Invalid JSON", "Request body must be valid JSON.")
+	if !a.decodeJSONBody(w, r, &body, "Request body must be valid JSON.") {
 		return
 	}
 	prompt := strings.TrimSpace(body.Prompt)
