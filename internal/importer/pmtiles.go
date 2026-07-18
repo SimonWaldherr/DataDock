@@ -56,6 +56,20 @@ type pmtilesDirEntry struct {
 	Offset    uint64
 }
 
+const (
+	// maxPMTilesRunLength bounds a single directory entry's claimed tile
+	// count. Real-world PMTiles archives never legitimately need anywhere
+	// near this many contiguous tile IDs collapsed into one run-length
+	// entry; it exists only to stop a crafted archive from claiming
+	// billions of tiles from a few bytes of directory data.
+	maxPMTilesRunLength = 1 << 20 // ~1,048,576 tiles per entry
+
+	// maxPMTilesTotalTiles bounds the cumulative tile count across an
+	// entire archive's directory tree, so many entries each just under
+	// maxPMTilesRunLength can't still add up to an unbounded import.
+	maxPMTilesTotalTiles = 5_000_000
+)
+
 func pmtilesRecords(data []byte) ([][]string, error) {
 	header, err := parsePMTilesHeader(data)
 	if err != nil {
@@ -105,6 +119,7 @@ func pmtilesRecords(data []byte) ([][]string, error) {
 	}
 
 	seenDirectories := map[uint64]bool{}
+	var totalTiles uint64
 	var appendEntries func([]pmtilesDirEntry) error
 	appendEntries = func(dir []pmtilesDirEntry) error {
 		for _, entry := range dir {
@@ -125,6 +140,17 @@ func pmtilesRecords(data []byte) ([][]string, error) {
 					return err
 				}
 				continue
+			}
+			// RunLength is an attacker-controlled varint straight from the
+			// archive; without a bound, a single directory entry can claim
+			// billions of tiles and exhaust memory expanding this loop
+			// before any real tile data is even read.
+			if entry.RunLength > maxPMTilesRunLength {
+				return fmt.Errorf("PMTiles directory entry run length %d exceeds the %d limit", entry.RunLength, maxPMTilesRunLength)
+			}
+			totalTiles += entry.RunLength
+			if totalTiles > maxPMTilesTotalTiles {
+				return fmt.Errorf("PMTiles archive expands to more than %d tiles, exceeding the import limit", maxPMTilesTotalTiles)
 			}
 			tile, err := pmtilesRange(data, header.TileOffset+entry.Offset, entry.Length)
 			if err != nil {

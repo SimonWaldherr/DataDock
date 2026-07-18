@@ -488,8 +488,31 @@ func createTestMBTiles(t *testing.T) string {
 	return path
 }
 
+// TestImportPMTilesRejectsOversizedRunLength locks in a fix for a real DoS:
+// a directory entry's RunLength is an attacker-controlled varint read
+// straight from the archive: without a bound, a single ~20-byte directory
+// entry can claim billions of tiles and exhaust memory expanding the
+// tile-emission loop, before any real tile data is even decoded.
+func TestImportPMTilesRejectsOversizedRunLength(t *testing.T) {
+	data := createTestPMTilesWithRootDirectory(maliciousPMTilesRootDirectory(10_000_000_000))
+	db := tinysql.NewDB()
+	_, err := ImportPMTiles(context.Background(), db, "default", "pmtiles_import", bytes.NewReader(data), &ImportOptions{
+		CreateTable:   true,
+		TypeInference: true,
+	})
+	if err == nil {
+		t.Fatal("expected ImportPMTiles to reject an oversized RunLength, got no error")
+	}
+	if !strings.Contains(err.Error(), "run length") && !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("expected a run-length/limit error, got: %v", err)
+	}
+}
+
 func createTestPMTiles() []byte {
-	rootDirectory := []byte{1, 0, 1, 4, 1} // one z/x/y=0/0/0 tile at data offset 0
+	return createTestPMTilesWithRootDirectory([]byte{1, 0, 1, 4, 1}) // one z/x/y=0/0/0 tile at data offset 0
+}
+
+func createTestPMTilesWithRootDirectory(rootDirectory []byte) []byte {
 	metadata := []byte(`{}`)
 	tile := []byte{1, 2, 3, 4}
 	header := make([]byte, pmtilesHeaderSize)
@@ -506,6 +529,36 @@ func createTestPMTiles() []byte {
 	header[98] = 1 // tile compression: none
 	header[99] = 1 // tile type: MVT
 	return append(append(header, rootDirectory...), append(metadata, tile...)...)
+}
+
+// encodePMTilesVarint LEB128-encodes v, matching pmtilesVarint's decoder.
+func encodePMTilesVarint(v uint64) []byte {
+	var out []byte
+	for {
+		b := byte(v & 0x7f)
+		v >>= 7
+		if v != 0 {
+			b |= 0x80
+		}
+		out = append(out, b)
+		if v == 0 {
+			return out
+		}
+	}
+}
+
+// maliciousPMTilesRootDirectory builds a one-entry root directory claiming
+// runLength tiles from a single ~4-byte tile payload, matching the directory
+// layout decodePMTilesDirectory expects: count, then TileID deltas, then
+// RunLengths, then Lengths, then Offsets (offset is stored as value+1).
+func maliciousPMTilesRootDirectory(runLength uint64) []byte {
+	var dir []byte
+	dir = append(dir, encodePMTilesVarint(1)...) // count
+	dir = append(dir, encodePMTilesVarint(0)...) // TileID delta
+	dir = append(dir, encodePMTilesVarint(runLength)...)
+	dir = append(dir, encodePMTilesVarint(4)...) // Length
+	dir = append(dir, encodePMTilesVarint(1)...) // Offset (stored value+1 => real offset 0)
+	return dir
 }
 
 func createTestSQLite(t *testing.T) string {
