@@ -425,6 +425,49 @@ func TestDemoDataRemoveDropsTablesAndJob(t *testing.T) {
 	}
 }
 
+// TestCSRFProtectionRejectsCrossSiteWrites guards the defense-in-depth CSRF
+// layer added on top of the session cookie's SameSite=Lax: a browser
+// request whose Sec-Fetch-Site header says it came from another site must
+// be rejected, while a same-origin request (or a header-less non-browser
+// request, like curl) must go through unaffected.
+func TestCSRFProtectionRejectsCrossSiteWrites(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+	handler := app.csrfProtectedHandler(mux)
+	if err := app.applyRuntimeSettings(RuntimeSettings{Dialect: "tinysql", AuthMode: "none"}); err != nil {
+		t.Fatalf("apply settings: %v", err)
+	}
+
+	form := func() *strings.Reader {
+		return strings.NewReader(url.Values{"table_name": {"csrf_test"}, "col_name": {"note"}, "col_type": {"TEXT"}}.Encode())
+	}
+
+	crossSiteReq := httptest.NewRequest(http.MethodPost, "/create-table", form())
+	crossSiteReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	crossSiteReq.Header.Set("Sec-Fetch-Site", "cross-site")
+	crossSiteRec := httptest.NewRecorder()
+	handler.ServeHTTP(crossSiteRec, crossSiteReq)
+	if crossSiteRec.Code != http.StatusForbidden {
+		t.Fatalf("expected a cross-site write to be rejected with 403, got %d: %s", crossSiteRec.Code, crossSiteRec.Body.String())
+	}
+	if _, err := app.sqlDB.Exec("SELECT 1 FROM csrf_test"); err == nil {
+		t.Fatal("expected the cross-site create-table attempt to not actually create the table")
+	}
+
+	sameSiteReq := httptest.NewRequest(http.MethodPost, "/create-table", form())
+	sameSiteReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	sameSiteReq.Header.Set("Sec-Fetch-Site", "same-origin")
+	sameSiteRec := httptest.NewRecorder()
+	handler.ServeHTTP(sameSiteRec, sameSiteReq)
+	if sameSiteRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected a same-origin write to succeed, got %d: %s", sameSiteRec.Code, sameSiteRec.Body.String())
+	}
+	if _, err := app.sqlDB.Exec("SELECT 1 FROM csrf_test"); err != nil {
+		t.Fatalf("expected the same-origin create-table to have created the table: %v", err)
+	}
+}
+
 func TestMaintenanceModeBlocksWrites(t *testing.T) {
 	app := newTestApp(t)
 	mux := http.NewServeMux()

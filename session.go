@@ -14,6 +14,27 @@ const sessionCookieName = "datadock_session"
 type sessionIDContextKey struct{}
 type activeConnectionContextKey struct{}
 
+// csrfProtectedHandler wraps next with Go's stdlib http.CrossOriginProtection:
+// defense-in-depth against CSRF on top of the session cookie's
+// SameSite=Lax, rejecting state-changing (non-GET/HEAD/OPTIONS) browser
+// requests whose Sec-Fetch-Site/Origin header indicates they came from
+// another site. Requires no token in any template or fetch() call — non-
+// browser clients (curl, automation scripts) send neither header by
+// default and are unaffected, matching CrossOriginProtection.Check's own
+// documented behavior.
+func (a *App) csrfProtectedHandler(next http.Handler) http.Handler {
+	protection := http.NewCrossOriginProtection()
+	protection.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		const detail = "This request looks like a cross-site request rather than a normal same-origin form submission or fetch call, and was rejected."
+		if isAPIRequest(r) {
+			a.writeProblem(w, r, http.StatusForbidden, "Cross-origin request rejected", detail)
+			return
+		}
+		writeErrorPage(w, http.StatusForbidden, "Request rejected", detail, `<a href="javascript:history.back()">Go back</a>`)
+	}))
+	return protection.Handler(next)
+}
+
 func (a *App) withSession(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID := sessionIDFromRequest(r)

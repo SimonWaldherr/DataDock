@@ -261,7 +261,7 @@ func main() {
 	// recoverMiddleware sits between logging and the actual routes so a
 	// panic becomes a clean 500 the access log can still see, instead of
 	// net/http's default behavior of just aborting the connection.
-	handler := loggingMiddleware(recoverMiddleware(securityHeaders(mux)))
+	handler := loggingMiddleware(recoverMiddleware(securityHeaders(app.csrfProtectedHandler(mux))))
 	log.Printf("DataDock listening on %s  (db: %s, tenant: %s, dialect: %s, auth-mode: %s)", listenAddr, dbLabel(*dbFile), *tenant, app.currentDialect().Name, effectiveAuthMode)
 	srv := &http.Server{
 		Addr:    listenAddr,
