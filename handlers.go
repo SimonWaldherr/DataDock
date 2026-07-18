@@ -2893,9 +2893,27 @@ func (a *App) apiTinySQLVectorCacheHandler(w http.ResponseWriter, r *http.Reques
 // apiSnapshotExportHandler emits a portable native snapshot only. Restore is
 // intentionally not exposed over HTTP: it needs size limits, validation, an
 // atomic swap, and explicit operator approval outside a request handler.
+// apiSnapshotExportHandler exports the entire native database verbatim,
+// including __datadock_settings (LLM/embedding API keys, saved connection
+// passwords when storage encryption isn't in use) and __datadock_users
+// (password hashes) — there is no filtered/redacted export mode, so the
+// filename says so plainly and every export is audit-logged, mirroring how
+// a write would be recorded even though this is a GET.
 func (a *App) apiSnapshotExportHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", `attachment; filename="datadock.snapshot"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="datadock-snapshot-CONTAINS-SECRETS.gob"`)
+	sessionID := sessionIDFromContext(r.Context())
+	username, _, _ := a.currentSessionUser(sessionID)
+	if audit := a.auditLogger(); audit.Enabled() {
+		audit.Log(AuditEvent{
+			Session:   sessionID,
+			Username:  username,
+			Method:    r.Method,
+			Path:      r.URL.Path,
+			Operation: "snapshot_export",
+			Detail:    "full database snapshot exported, including stored secrets",
+		})
+	}
 	if err := tinysql.SaveToWriter(a.nativeDB, w); err != nil {
 		a.writeProblem(w, r, http.StatusInternalServerError, "Snapshot export failed", err.Error())
 	}

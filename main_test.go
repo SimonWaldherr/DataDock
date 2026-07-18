@@ -949,6 +949,43 @@ func TestRuntimeSettingsPersistInTinySQL(t *testing.T) {
 	}
 }
 
+// TestSnapshotExportWarnsAndAudits guards against treating the full-database
+// snapshot export (which includes every stored secret in plaintext) like an
+// ordinary, harmless backup: the filename must say so plainly, and the
+// export must be audit-logged like a write would be.
+func TestSnapshotExportWarnsAndAudits(t *testing.T) {
+	app := newTestApp(t)
+	auditPath := t.TempDir() + "/audit.log"
+	audit, err := NewAuditLogger(auditPath)
+	if err != nil {
+		t.Fatalf("new audit logger: %v", err)
+	}
+	t.Cleanup(func() { _ = audit.Close() })
+	app.setAuditLogger(audit)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+	adminCookie := setupAdminSession(t, mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/snapshot", nil)
+	req.AddCookie(adminCookie)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected snapshot export to succeed, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if disp := rec.Header().Get("Content-Disposition"); !strings.Contains(disp, "SECRETS") {
+		t.Fatalf("expected the snapshot filename to warn about secrets, got %q", disp)
+	}
+
+	logged, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	if !strings.Contains(string(logged), "snapshot_export") {
+		t.Fatalf("expected the snapshot export to be audit-logged, got: %s", logged)
+	}
+}
+
 func TestAdminSessionCanSeeDataDockSystemTables(t *testing.T) {
 	app := newTestApp(t)
 	if err := app.saveRuntimeSettings(context.Background()); err != nil {
