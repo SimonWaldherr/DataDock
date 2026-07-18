@@ -24,6 +24,7 @@ var sensitiveJSONKeys = map[string]bool{
 	"dsn":           true,
 	"key":           true,
 	"password":      true,
+	"pwd":           true, // SQL Server ADO connection strings (Pwd=...)
 	"secret":        true,
 	"token":         true,
 }
@@ -237,6 +238,9 @@ func redactInlineSecrets(s string) string {
 		regexp.MustCompile(`(?i)(authorization\s*[:=]\s*(?:bearer\s+|basic\s+)?)[^\s,;]+`),
 		regexp.MustCompile(`(?i)(api[_-]?key\s*[:=]\s*)[^\s,;]+`),
 		regexp.MustCompile(`(?i)(password\s*[=:]\s*)[^\s,;]+`),
+		// "Pwd" is the ADO/ODBC connection-string alias for the same
+		// credential (e.g. SQL Server's "Server=...;Uid=sa;Pwd=secret;").
+		regexp.MustCompile(`(?i)(pwd\s*[=:]\s*)[^\s,;]+`),
 		regexp.MustCompile(`(?i)(token\s*[=:]\s*)[^\s,;]+`),
 		regexp.MustCompile(`(?i)(secret\s*[=:]\s*)[^\s,;]+`),
 	}

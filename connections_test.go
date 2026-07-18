@@ -9,6 +9,45 @@ import (
 	"testing"
 )
 
+func TestMaskedDSNRedactsAllSupportedShapes(t *testing.T) {
+	tests := []struct {
+		name       string
+		dsn        string
+		mustHide   string
+		mustRemain string
+	}{
+		{
+			name:       "url style",
+			dsn:        "postgres://appuser:hunter2@db.example.com:5432/mydb",
+			mustHide:   "hunter2",
+			mustRemain: "db.example.com",
+		},
+		{
+			name:       "ado style",
+			dsn:        "Server=sql.example.com;Database=mydb;Uid=sa;Pwd=hunter2;",
+			mustHide:   "hunter2",
+			mustRemain: "sa",
+		},
+		{
+			name:       "libpq keyword style",
+			dsn:        "host=db.example.com dbname=mydb user=appuser password=hunter2",
+			mustHide:   "hunter2",
+			mustRemain: "appuser",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := maskedDSN(tt.dsn)
+			if strings.Contains(got, tt.mustHide) {
+				t.Fatalf("maskedDSN(%q) = %q, still contains the password %q", tt.dsn, got, tt.mustHide)
+			}
+			if !strings.Contains(got, tt.mustRemain) {
+				t.Fatalf("maskedDSN(%q) = %q, expected non-secret %q to remain visible", tt.dsn, got, tt.mustRemain)
+			}
+		})
+	}
+}
+
 func TestConnectionManagerSQLiteActiveConnection(t *testing.T) {
 	app := newTestApp(t)
 	conn, err := OpenManagedConnection(context.Background(), "sqlite-test", "SQLite Test", "sqlite", ":memory:")

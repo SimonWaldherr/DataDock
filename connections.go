@@ -755,7 +755,11 @@ func maskedDSN(dsn string) string {
 			return prefix + "******@" + rest[at+1:]
 		}
 	}
-	return dsn
+	// Not a scheme://user:pass@host URL — cover the other DSN shapes
+	// DataDock explicitly supports: ADO/ODBC ("Server=...;Uid=sa;Pwd=...;")
+	// and libpq keyword ("host=... password=..."). Both carry the same
+	// plaintext-credential risk the URL branch above already masks.
+	return redactInlineSecrets(dsn)
 }
 
 func encodeManagedConnectionConfigs(configs []ManagedConnectionConfig) (string, error) {
