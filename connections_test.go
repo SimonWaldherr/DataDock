@@ -7,7 +7,33 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestRowCountCacheHitsAndExpires(t *testing.T) {
+	conn := &DBConnection{ID: "test"}
+
+	if _, ok := conn.cachedRowCount("people"); ok {
+		t.Fatal("expected no cached row count before any set")
+	}
+
+	conn.setCachedRowCount("people", 42)
+	if got, ok := conn.cachedRowCount("people"); !ok || got != 42 {
+		t.Fatalf("expected a fresh cache hit of 42, got %d, ok=%v", got, ok)
+	}
+	// Lookups are case-insensitive, matching table-name lookups elsewhere.
+	if got, ok := conn.cachedRowCount("PEOPLE"); !ok || got != 42 {
+		t.Fatalf("expected a case-insensitive cache hit of 42, got %d, ok=%v", got, ok)
+	}
+
+	// Force expiry without sleeping the real TTL.
+	conn.rowCountCacheMu.Lock()
+	conn.rowCountCache["people"] = rowCountCacheEntry{count: 42, expiresAt: time.Now().Add(-time.Second)}
+	conn.rowCountCacheMu.Unlock()
+	if _, ok := conn.cachedRowCount("people"); ok {
+		t.Fatal("expected an expired cache entry to miss")
+	}
+}
 
 func TestMaskedDSNRedactsAllSupportedShapes(t *testing.T) {
 	tests := []struct {
@@ -45,6 +71,54 @@ func TestMaskedDSNRedactsAllSupportedShapes(t *testing.T) {
 				t.Fatalf("maskedDSN(%q) = %q, expected non-secret %q to remain visible", tt.dsn, got, tt.mustRemain)
 			}
 		})
+	}
+}
+
+// TestTableMetaRowCountIsCached confirms tableMeta actually goes through
+// the row-count cache in real use: a second call within the TTL must not
+// see a row inserted after the first call, proving the count came from
+// cache rather than a fresh COUNT(*).
+func TestTableMetaRowCountIsCached(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE cache_test (id INT, name TEXT)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := app.sqlDB.Exec("INSERT INTO cache_test (id, name) VALUES (1, 'a')"); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	meta, err := app.tableMeta(context.Background(), "cache_test")
+	if err != nil {
+		t.Fatalf("tableMeta: %v", err)
+	}
+	if meta.RowCount != 1 {
+		t.Fatalf("expected initial row count 1, got %d", meta.RowCount)
+	}
+
+	if _, err := app.sqlDB.Exec("INSERT INTO cache_test (id, name) VALUES (2, 'b')"); err != nil {
+		t.Fatalf("second insert: %v", err)
+	}
+
+	meta, err = app.tableMeta(context.Background(), "cache_test")
+	if err != nil {
+		t.Fatalf("tableMeta (cached): %v", err)
+	}
+	if meta.RowCount != 1 {
+		t.Fatalf("expected the cached row count to still read 1 within the TTL, got %d", meta.RowCount)
+	}
+
+	// Expire the cache directly rather than sleeping the real TTL.
+	nativeConn := app.conns.Get(defaultConnectionID)
+	nativeConn.rowCountCacheMu.Lock()
+	nativeConn.rowCountCache["cache_test"] = rowCountCacheEntry{count: 1, expiresAt: time.Now().Add(-time.Second)}
+	nativeConn.rowCountCacheMu.Unlock()
+
+	meta, err = app.tableMeta(context.Background(), "cache_test")
+	if err != nil {
+		t.Fatalf("tableMeta (post-expiry): %v", err)
+	}
+	if meta.RowCount != 2 {
+		t.Fatalf("expected the row count to reflect the second insert once the cache expired, got %d", meta.RowCount)
 	}
 }
 

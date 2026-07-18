@@ -48,6 +48,47 @@ type DBConnection struct {
 	// within a single connection (PostgreSQL). Lazily populated.
 	crossDBMu sync.Mutex
 	crossDB   map[string]*sql.DB
+
+	// rowCountCache short-circuits the uncached SELECT COUNT(*) tableMeta
+	// otherwise runs on every table-view page load, sort change, and
+	// page-size change (tinySQL has no index-accelerated path for it, so
+	// each call is a full scan). A short TTL — not invalidated by writes —
+	// keeps the pager's row count fresh enough for display without needing
+	// to hook every insert/update/delete/import/migration call site; the
+	// actual paginated row data returned alongside it is always live.
+	rowCountCacheMu sync.Mutex
+	rowCountCache   map[string]rowCountCacheEntry
+}
+
+// rowCountCacheTTL bounds how stale a cached row count can be. Deliberately
+// short and time-based rather than write-invalidated: correct enough for a
+// pager display, without needing every write path in the app to know it
+// must invalidate this cache too.
+const rowCountCacheTTL = 5 * time.Second
+
+type rowCountCacheEntry struct {
+	count     int
+	expiresAt time.Time
+}
+
+// cachedRowCount returns a still-fresh cached row count for name, if any.
+func (c *DBConnection) cachedRowCount(name string) (int, bool) {
+	c.rowCountCacheMu.Lock()
+	defer c.rowCountCacheMu.Unlock()
+	entry, ok := c.rowCountCache[strings.ToLower(name)]
+	if !ok || time.Now().After(entry.expiresAt) {
+		return 0, false
+	}
+	return entry.count, true
+}
+
+func (c *DBConnection) setCachedRowCount(name string, count int) {
+	c.rowCountCacheMu.Lock()
+	defer c.rowCountCacheMu.Unlock()
+	if c.rowCountCache == nil {
+		c.rowCountCache = make(map[string]rowCountCacheEntry)
+	}
+	c.rowCountCache[strings.ToLower(name)] = rowCountCacheEntry{count: count, expiresAt: time.Now().Add(rowCountCacheTTL)}
 }
 
 // closeCrossDB closes any secondary cross-database connections opened for

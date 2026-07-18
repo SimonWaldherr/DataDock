@@ -504,13 +504,23 @@ func (a *App) tableMeta(ctx context.Context, name string) (TableMeta, error) {
 		}
 	}
 
-	// Row count (best-effort; ignore error). Use the DB-sourced meta.Name, not
-	// the user-provided name, when building the SQL query.
-	if rows, err := a.queryConn(ctx, a.localTinySQLConn(), "metadata.row_count", nativeRowCountQuery(meta.Name)); err == nil {
+	// Row count (best-effort; ignore error; short-TTL cached — see
+	// rowCountCacheTTL). Use the DB-sourced meta.Name, not the user-provided
+	// name, when building the SQL query. Cache against the connection
+	// manager's persistent tinySQL *DBConnection, not localTinySQLConn()'s
+	// fresh value-per-call: caching on the latter would never actually hit.
+	nativeConn := a.conns.Get(defaultConnectionID)
+	if nativeConn == nil {
+		nativeConn = a.localTinySQLConn()
+	}
+	if cached, ok := nativeConn.cachedRowCount(meta.Name); ok {
+		meta.RowCount = cached
+	} else if rows, err := a.queryConn(ctx, a.localTinySQLConn(), "metadata.row_count", nativeRowCountQuery(meta.Name)); err == nil {
 		if rows.Next() {
 			_ = rows.Scan(&meta.RowCount)
 		}
 		rows.Close()
+		nativeConn.setCachedRowCount(meta.Name, meta.RowCount)
 	}
 
 	return meta, nil
@@ -555,11 +565,14 @@ func (a *App) queryBackedMeta(ctx context.Context, name, kind string) (TableMeta
 			meta.HasID = true
 		}
 	}
-	if rows, err := a.queryConn(ctx, conn, "metadata.row_count", rowCountQuery(conn, name)); err == nil {
+	if cached, ok := conn.cachedRowCount(name); ok {
+		meta.RowCount = cached
+	} else if rows, err := a.queryConn(ctx, conn, "metadata.row_count", rowCountQuery(conn, name)); err == nil {
 		if rows.Next() {
 			_ = rows.Scan(&meta.RowCount)
 		}
 		rows.Close()
+		conn.setCachedRowCount(name, meta.RowCount)
 	}
 	return meta, nil
 }
@@ -975,11 +988,14 @@ func (c *DBConnection) tableMeta(ctx context.Context, name string) (TableMeta, e
 			meta.HasID = true
 		}
 	}
-	if rows, err := c.queryContext(ctx, "metadata.row_count", rowCountQuery(c, canonical)); err == nil {
+	if cached, ok := c.cachedRowCount(canonical); ok {
+		meta.RowCount = cached
+	} else if rows, err := c.queryContext(ctx, "metadata.row_count", rowCountQuery(c, canonical)); err == nil {
 		if rows.Next() {
 			_ = rows.Scan(&meta.RowCount)
 		}
 		rows.Close()
+		c.setCachedRowCount(canonical, meta.RowCount)
 	}
 	return meta, nil
 }
