@@ -93,10 +93,10 @@ func (a *App) adminUsersRoleHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
 }
 
-// adminUsersDisableHandler toggles a user's enabled/disabled state. Note:
-// this does not revoke an already-authenticated session for that user (see
-// sessionAuth's doc comment) — the account just can't log in again, and its
-// existing session (if any) expires naturally within sessionAuthTTL.
+// adminUsersDisableHandler toggles a user's enabled/disabled state, and —
+// when disabling — revokes any already-authenticated session for that
+// account immediately rather than letting it keep working until its normal
+// sessionAuthTTL expiry.
 func (a *App) adminUsersDisableHandler(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -122,6 +122,9 @@ func (a *App) adminUsersDisableHandler(w http.ResponseWriter, r *http.Request) {
 	if err := a.setUserDisabled(r.Context(), username, disabled); err != nil {
 		a.serverError(w, err)
 		return
+	}
+	if disabled {
+		a.revokeSessionsForUsername(username)
 	}
 	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
 }
@@ -151,6 +154,11 @@ func (a *App) adminUsersResetPasswordHandler(w http.ResponseWriter, r *http.Requ
 		a.serverError(w, err)
 		return
 	}
+	// Revoke any already-authenticated session for this account: an admin
+	// resetting a password is usually responding to a compromise or
+	// offboarding, and the point is moot if the old session just keeps
+	// working until its normal TTL expiry.
+	a.revokeSessionsForUsername(username)
 	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
 }
 
@@ -186,5 +194,6 @@ func (a *App) adminUsersDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		a.serverError(w, err)
 		return
 	}
+	a.revokeSessionsForUsername(username)
 	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
 }

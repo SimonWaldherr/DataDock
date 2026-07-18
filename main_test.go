@@ -1534,6 +1534,46 @@ func TestUserRoleCanWriteButNotAdminRoutes(t *testing.T) {
 	}
 }
 
+// TestDisablingUserRevokesItsLiveSession guards against a real gap:
+// disabling a user only ever updated __datadock_users, never touching an
+// already-authenticated session for that account, so a live session kept
+// working until its normal 12h sessionAuthTTL expiry regardless of being
+// disabled.
+func TestDisablingUserRevokesItsLiveSession(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+	adminCookie := setupAdminSession(t, mux)
+
+	if err := app.createUser(context.Background(), "compromised", "irrelevant-hash", RoleUser); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	liveCookie := sessionCookieForRole(app, "compromised", RoleUser)
+
+	// The live session works before being disabled.
+	beforeReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	beforeReq.AddCookie(liveCookie)
+	beforeRec := httptest.NewRecorder()
+	mux.ServeHTTP(beforeRec, beforeReq)
+	if beforeRec.Code != http.StatusSeeOther && beforeRec.Code != http.StatusOK {
+		t.Fatalf("expected the live session to work before being disabled, got %d", beforeRec.Code)
+	}
+
+	disableReq := httptest.NewRequest(http.MethodPost, "/admin/users/disable", strings.NewReader(
+		url.Values{"username": {"compromised"}, "disabled": {"true"}}.Encode()))
+	disableReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	disableReq.AddCookie(adminCookie)
+	disableRec := httptest.NewRecorder()
+	mux.ServeHTTP(disableRec, disableReq)
+	if disableRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected disable redirect, got %d: %s", disableRec.Code, disableRec.Body.String())
+	}
+
+	if _, _, ok := app.currentSessionUser(liveCookie.Value); ok {
+		t.Fatal("expected the disabled user's live session to be revoked immediately, not just left to expire")
+	}
+}
+
 func TestAdminUsersPageCRUDAndGuards(t *testing.T) {
 	app := newTestApp(t)
 	mux := http.NewServeMux()

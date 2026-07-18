@@ -83,6 +83,35 @@ func (a *App) clearAdminAuthenticated(sessionID string) {
 	a.clearSessionAuthenticated(sessionID)
 }
 
+// revokeSessionsForUsername logs out every currently-authenticated session
+// for username, wherever it's logged in from. Disabling/deleting an account
+// or changing its password only touched __datadock_users before this;
+// currentSessionUser never re-checks the live Disabled flag or password
+// hash against an already-authenticated session's in-memory entry, so an
+// attacker with a live session on a just-disabled or just-offboarded
+// account kept full access until that session's normal TTL expired
+// (up to sessionAuthTTL) regardless of the account-level action.
+func (a *App) revokeSessionsForUsername(username string) {
+	a.revokeOtherSessionsForUsername(username, "")
+}
+
+// revokeOtherSessionsForUsername is revokeSessionsForUsername, but leaves
+// exceptSessionID untouched — used when a user changes their own password,
+// so the session making that very request doesn't get logged out along
+// with every other (e.g. compromised) session for the account.
+func (a *App) revokeOtherSessionsForUsername(username, exceptSessionID string) {
+	if username == "" {
+		return
+	}
+	a.adminAuthMu.Lock()
+	defer a.adminAuthMu.Unlock()
+	for sessionID, auth := range a.adminAuthedSessions {
+		if auth.Username == username && sessionID != exceptSessionID {
+			delete(a.adminAuthedSessions, sessionID)
+		}
+	}
+}
+
 func hashAdminPassword(plain string) (string, error) {
 	b, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
 	if err != nil {
@@ -543,6 +572,13 @@ func (a *App) adminChangePasswordHandler(w http.ResponseWriter, r *http.Request)
 	if err := a.saveRuntimeSettings(r.Context()); err != nil {
 		a.serverError(w, err)
 		return
+	}
+	// Revoke every OTHER already-authenticated session for this account (not
+	// the one making this request) — otherwise a session an admin is trying
+	// to lock out by changing the password keeps working until its normal
+	// sessionAuthTTL expiry.
+	if hasSessionUser {
+		a.revokeOtherSessionsForUsername(username, sessionIDFromContext(r.Context()))
 	}
 	data["Success"] = "Password changed."
 	a.render(w, r, "admin", data)
