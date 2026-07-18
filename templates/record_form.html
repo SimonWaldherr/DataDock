@@ -26,12 +26,13 @@
       {{range $col := $meta.Columns}}
         {{if not (eq $col.Name "id")}}
         <div class="mb-3">
-          <label class="form-label fw-semibold small mb-1">
+          <label class="form-label fw-semibold small mb-1" for="field-{{$col.Name}}">
             {{$col.Name}}
             <span class="text-muted fw-normal">{{$col.TypeName}}</span>
           </label>
           <input type="{{inputType $col.TypeName}}" class="form-control form-control-sm"
                  {{if eq (inputType $col.TypeName) "number"}}step="any"{{end}}
+                 id="field-{{$col.Name}}"
                  name="{{$col.Name}}"
                  value="{{index $values $col.Name}}"
                  placeholder="{{$col.TypeName}}">

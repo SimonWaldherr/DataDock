@@ -46,10 +46,6 @@ type ImportResult struct {
 	Errors       []string
 }
 
-type FuzzyImportOptions struct {
-	*ImportOptions
-}
-
 func ImportCSV(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *ImportOptions) (*ImportResult, error) {
 	opts = normalizeOptions(opts)
 	data, err := io.ReadAll(src)
@@ -121,14 +117,6 @@ func decodeDelimitedText(data []byte) (string, string, error) {
 	return string(data), "utf-8", nil
 }
 
-func FuzzyImportCSV(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *FuzzyImportOptions) (*ImportResult, error) {
-	var base *ImportOptions
-	if opts != nil {
-		base = opts.ImportOptions
-	}
-	return ImportCSV(ctx, db, tenant, tableName, src, base)
-}
-
 func ImportJSON(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *ImportOptions) (*ImportResult, error) {
 	data, err := io.ReadAll(src)
 	if err != nil {
@@ -139,14 +127,6 @@ func ImportJSON(ctx context.Context, db *tinysql.DB, tenant, tableName string, s
 		return nil, err
 	}
 	return importObjects(ctx, db, tenant, tableName, values, opts)
-}
-
-func FuzzyImportJSON(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *FuzzyImportOptions) (*ImportResult, error) {
-	var base *ImportOptions
-	if opts != nil {
-		base = opts.ImportOptions
-	}
-	return ImportJSON(ctx, db, tenant, tableName, src, base)
 }
 
 // ImportNDJSON reads newline-delimited JSON: one JSON object per record,
@@ -167,14 +147,6 @@ func ImportNDJSON(ctx context.Context, db *tinysql.DB, tenant, tableName string,
 		values = append(values, obj)
 	}
 	return importObjects(ctx, db, tenant, tableName, values, opts)
-}
-
-func FuzzyImportNDJSON(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *FuzzyImportOptions) (*ImportResult, error) {
-	var base *ImportOptions
-	if opts != nil {
-		base = opts.ImportOptions
-	}
-	return ImportNDJSON(ctx, db, tenant, tableName, src, base)
 }
 
 // importObjects converts decoded JSON/YAML objects into the same
@@ -229,14 +201,6 @@ func normalizeYAMLValue(v any) any {
 		}
 	}
 	return v
-}
-
-func FuzzyImportYAML(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *FuzzyImportOptions) (*ImportResult, error) {
-	var base *ImportOptions
-	if opts != nil {
-		base = opts.ImportOptions
-	}
-	return ImportYAML(ctx, db, tenant, tableName, src, base)
 }
 
 // xmlImportDoc mirrors the shape DataDock's own XML export produces
@@ -300,14 +264,6 @@ func ImportXML(ctx context.Context, db *tinysql.DB, tenant, tableName string, sr
 	res, err := importRecords(ctx, db, tenant, tableName, records, ',', opts)
 	opts.HeaderMode = headerMode
 	return res, err
-}
-
-func FuzzyImportXML(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *FuzzyImportOptions) (*ImportResult, error) {
-	var base *ImportOptions
-	if opts != nil {
-		base = opts.ImportOptions
-	}
-	return ImportXML(ctx, db, tenant, tableName, src, base)
 }
 
 func importRecords(ctx context.Context, db *tinysql.DB, tenant, tableName string, records [][]string, delimiter rune, opts *ImportOptions) (*ImportResult, error) {

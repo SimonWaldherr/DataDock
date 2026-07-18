@@ -230,21 +230,25 @@ func redactURL(raw string) string {
 	return u.String()
 }
 
+// secretPatterns are compiled once at package init rather than on every
+// redactInlineSecrets call, which otherwise recompiled all five regexes for
+// every logged DB query and outbound LLM/embedding HTTP call in verbose mode.
+var secretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(authorization\s*[:=]\s*(?:bearer\s+|basic\s+)?)[^\s,;]+`),
+	regexp.MustCompile(`(?i)(api[_-]?key\s*[:=]\s*)[^\s,;]+`),
+	regexp.MustCompile(`(?i)(password\s*[=:]\s*)[^\s,;]+`),
+	// "Pwd" is the ADO/ODBC connection-string alias for the same
+	// credential (e.g. SQL Server's "Server=...;Uid=sa;Pwd=secret;").
+	regexp.MustCompile(`(?i)(pwd\s*[=:]\s*)[^\s,;]+`),
+	regexp.MustCompile(`(?i)(token\s*[=:]\s*)[^\s,;]+`),
+	regexp.MustCompile(`(?i)(secret\s*[=:]\s*)[^\s,;]+`),
+}
+
 func redactInlineSecrets(s string) string {
 	if s == "" {
 		return ""
 	}
-	replacements := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)(authorization\s*[:=]\s*(?:bearer\s+|basic\s+)?)[^\s,;]+`),
-		regexp.MustCompile(`(?i)(api[_-]?key\s*[:=]\s*)[^\s,;]+`),
-		regexp.MustCompile(`(?i)(password\s*[=:]\s*)[^\s,;]+`),
-		// "Pwd" is the ADO/ODBC connection-string alias for the same
-		// credential (e.g. SQL Server's "Server=...;Uid=sa;Pwd=secret;").
-		regexp.MustCompile(`(?i)(pwd\s*[=:]\s*)[^\s,;]+`),
-		regexp.MustCompile(`(?i)(token\s*[=:]\s*)[^\s,;]+`),
-		regexp.MustCompile(`(?i)(secret\s*[=:]\s*)[^\s,;]+`),
-	}
-	for _, re := range replacements {
+	for _, re := range secretPatterns {
 		s = re.ReplaceAllString(s, `${1}[REDACTED]`)
 	}
 	return s
