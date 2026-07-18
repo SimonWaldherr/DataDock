@@ -1230,6 +1230,79 @@ func TestReadOnlyRoleBlocksWritesAndNonSelectSQL(t *testing.T) {
 	if selectRec.Code != http.StatusOK {
 		t.Fatalf("expected readonly role to run SELECT via /api/query, got %d; body: %s", selectRec.Code, selectRec.Body.String())
 	}
+
+	// The plain HTML form endpoint (/query) must enforce the identical
+	// read-only-role gate as the JSON API (/api/query) — it historically
+	// didn't, letting a read-only account run arbitrary writes just by
+	// using the form instead of the JS editor.
+	formInsertReq := httptest.NewRequest(http.MethodPost, "/query", strings.NewReader(
+		url.Values{"sql": {"INSERT INTO ro_test (id) VALUES (3)"}}.Encode()))
+	formInsertReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	formInsertReq.AddCookie(roCookie)
+	formInsertRec := httptest.NewRecorder()
+	mux.ServeHTTP(formInsertRec, formInsertReq)
+	if strings.Contains(formInsertRec.Body.String(), readOnlyRoleQueryBlockedMessage) == false {
+		t.Fatalf("expected POST /query to block a readonly-role write with the read-only message, body: %s", formInsertRec.Body.String())
+	}
+	if count := countRows(t, app, "ro_test"); count != 0 {
+		t.Fatalf("expected the blocked INSERT via POST /query to not persist any row, found %d", count)
+	}
+}
+
+// countRows returns the row count of table via a direct SELECT COUNT(*),
+// bypassing any HTTP-level role gating so tests can assert a write was
+// truly rejected rather than just checking the response body.
+func countRows(t *testing.T, app *App, table string) int {
+	t.Helper()
+	result := app.executeSQL(context.Background(), "SELECT COUNT(*) FROM "+table)
+	if result.Err != "" {
+		t.Fatalf("count rows in %s: %s", table, result.Err)
+	}
+	if len(result.Rows) != 1 || len(result.Rows[0]) != 1 {
+		t.Fatalf("unexpected COUNT(*) result shape for %s: %+v", table, result.Rows)
+	}
+	n, err := strconv.Atoi(result.Rows[0][0])
+	if err != nil {
+		t.Fatalf("unexpected COUNT(*) value for %s: %q (%v)", table, result.Rows[0][0], err)
+	}
+	return n
+}
+
+// TestReadOnlyRoleBlocksMatchSaveModes covers POST /match's save_config and
+// /match/tables' upload branch, both of which are deliberately NOT wrapped
+// in requireWritable at the route table level (only mode=save/save_config
+// and the upload branch itself need write protection, not a plain dropdown
+// resubmit or preview). Historically both replicated only the
+// maintenance-mode half of requireWritable's check, letting a RoleReadOnly
+// session persist a match configuration despite having no write access.
+func TestReadOnlyRoleBlocksMatchSaveModes(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	roCookie := sessionCookieForRole(app, "readonly-user", RoleReadOnly)
+
+	saveConfigReq := httptest.NewRequest(http.MethodPost, "/match", strings.NewReader(
+		url.Values{
+			"mode":        {"save_config"},
+			"config_name": {"ro-should-not-save"},
+		}.Encode()))
+	saveConfigReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	saveConfigReq.AddCookie(roCookie)
+	saveConfigRec := httptest.NewRecorder()
+	mux.ServeHTTP(saveConfigRec, saveConfigReq)
+	if saveConfigRec.Code != http.StatusForbidden {
+		t.Fatalf("expected readonly role to be blocked from mode=save_config with 403, got %d; body: %s", saveConfigRec.Code, saveConfigRec.Body.String())
+	}
+	configs, err := app.listMatchConfigs(context.Background())
+	if err != nil {
+		t.Fatalf("list match configs: %v", err)
+	}
+	for _, cfg := range configs {
+		if cfg.Name == "ro-should-not-save" {
+			t.Fatal("expected the blocked save_config to not persist a match configuration")
+		}
+	}
 }
 
 func TestUserRoleCanWriteButNotAdminRoutes(t *testing.T) {

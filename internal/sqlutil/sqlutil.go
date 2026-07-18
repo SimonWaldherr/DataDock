@@ -33,8 +33,14 @@ func classifyTokens(tokens []string) StatementClass {
 	if first == "WITH" {
 		first = cteMainVerb(tokens)
 	}
+	if first == "EXPLAIN" {
+		if wrapped, analyzing := explainWrappedStatement(tokens); analyzing {
+			return classifyTokens(wrapped)
+		}
+		return StatementReadQuery
+	}
 	switch first {
-	case "SELECT", "SHOW", "EXPLAIN", "DESCRIBE", "DESC", "PRAGMA":
+	case "SELECT", "SHOW", "DESCRIBE", "DESC", "PRAGMA":
 		return StatementReadQuery
 	case "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "TRUNCATE":
 		return StatementWriteDML
@@ -45,6 +51,42 @@ func classifyTokens(tokens []string) StatementClass {
 	default:
 		return StatementUnknown
 	}
+}
+
+// explainWrappedStatement looks past a leading EXPLAIN for an ANALYZE
+// option, in either the "EXPLAIN ANALYZE <stmt>" or the parenthesized
+// "EXPLAIN (ANALYZE, ...) <stmt>" form. PostgreSQL (and MySQL 8.0.18+)
+// actually execute the wrapped statement whenever ANALYZE is present —
+// that's the entire point, since it reports real timing and row counts —
+// so a caller must classify by the wrapped statement's verb, not treat
+// every EXPLAIN as read-only; EXPLAIN ANALYZE DELETE really deletes rows.
+// Returns false (with a nil slice) for a plain EXPLAIN, or for EXPLAIN with
+// nothing after it, so the caller falls back to the safe read-only default.
+func explainWrappedStatement(tokens []string) ([]string, bool) {
+	i := 1
+	analyzing := false
+	if i < len(tokens) && tokens[i] == "(" {
+		depth := 1
+		i++
+		for i < len(tokens) && depth > 0 {
+			switch tokens[i] {
+			case "(":
+				depth++
+			case ")":
+				depth--
+			case "ANALYZE":
+				analyzing = true
+			}
+			i++
+		}
+	} else if i < len(tokens) && tokens[i] == "ANALYZE" {
+		analyzing = true
+		i++
+	}
+	if !analyzing || i >= len(tokens) {
+		return nil, false
+	}
+	return tokens[i:], true
 }
 
 func cteMainVerb(tokens []string) string {
@@ -76,6 +118,7 @@ func cteMainVerb(tokens []string) string {
 
 func containsStatementSeparator(query string) bool {
 	inSingle := false
+	singleEscaped := false
 	inDouble := false
 	inLineComment := false
 	inBlockComment := false
@@ -99,6 +142,10 @@ func containsStatementSeparator(query string) bool {
 			continue
 		}
 		if inSingle {
+			if singleEscaped && c == '\\' {
+				i++
+				continue
+			}
 			if c == '\'' {
 				if next == '\'' {
 					i++
@@ -130,6 +177,7 @@ func containsStatementSeparator(query string) bool {
 		}
 		if c == '\'' {
 			inSingle = true
+			singleEscaped = isEPrefixedString(query, i)
 			continue
 		}
 		if c == '"' {
@@ -141,6 +189,33 @@ func containsStatementSeparator(query string) bool {
 		}
 	}
 	return false
+}
+
+// isEPrefixedString reports whether the single-quote at query[quoteIdx] is
+// immediately preceded by a standalone E/e — PostgreSQL's escape-string
+// prefix, the one common case where backslash is a recognized in-string
+// escape character even with standard_conforming_strings on (the default
+// since Postgres 9.1). MySQL/MariaDB always treat backslash as an escape in
+// ordinary strings too, but that can't be detected from the query text
+// alone; see the sqlutil package doc for that residual gap.
+//
+// Within an escape-aware string, a backslash immediately before a quote
+// must consume that quote as an escaped character rather than letting it
+// pair up with the following quote as a doubled-quote escape — otherwise
+// the scanner can close the string later than Postgres actually does and
+// hide a real statement separator behind what looks like still-quoted
+// text (e.g. `E'\''; DROP TABLE x; --'` reads as one harmless string
+// without this check, when Postgres itself treats the DROP as a second,
+// executable statement).
+func isEPrefixedString(query string, quoteIdx int) bool {
+	if quoteIdx == 0 {
+		return false
+	}
+	prev := query[quoteIdx-1]
+	if prev != 'E' && prev != 'e' {
+		return false
+	}
+	return quoteIdx < 2 || !isIdentByte(query[quoteIdx-2])
 }
 
 func sqlTokens(query string) []string {
@@ -171,8 +246,13 @@ func sqlTokens(query string) []string {
 		}
 		if c == '\'' || c == '"' {
 			quote := c
+			escaped := quote == '\'' && isEPrefixedString(query, i)
 			i++
 			for i < len(query) {
+				if escaped && query[i] == '\\' {
+					i += 2
+					continue
+				}
 				if query[i] == quote {
 					if i+1 < len(query) && query[i+1] == quote {
 						i += 2

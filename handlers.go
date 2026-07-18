@@ -1561,6 +1561,10 @@ func (a *App) runMatchHandler(w http.ResponseWriter, r *http.Request) {
 			a.writeMaintenanceBlocked(w, r)
 			return
 		}
+		if a.roleBlocksWrite(r.Context()) {
+			a.writeReadOnlyRoleBlocked(w, r)
+			return
+		}
 		cfg := MatchConfig{
 			Name:            configName,
 			SourceConnID:    req.SourceConnID,
@@ -1622,6 +1626,10 @@ func (a *App) runMatchHandler(w http.ResponseWriter, r *http.Request) {
 	case "save":
 		if a.currentReadOnlyMode() {
 			a.writeMaintenanceBlocked(w, r)
+			return
+		}
+		if a.roleBlocksWrite(r.Context()) {
+			a.writeReadOnlyRoleBlocked(w, r)
 			return
 		}
 		saveConn := a.conns.GetFor(sessionID, saveConnID)
@@ -1765,9 +1773,15 @@ func (a *App) matchTablesHandler(w http.ResponseWriter, r *http.Request) {
 	// Uploading a file always creates a table, so — unlike a plain
 	// dropdown resubmit, which only re-reads existing metadata — that
 	// specific case must respect maintenance mode.
-	if (sourceID == matchUploadSentinel || targetID == matchUploadSentinel) && a.currentReadOnlyMode() {
-		a.writeMaintenanceBlocked(w, r)
-		return
+	if sourceID == matchUploadSentinel || targetID == matchUploadSentinel {
+		if a.currentReadOnlyMode() {
+			a.writeMaintenanceBlocked(w, r)
+			return
+		}
+		if a.roleBlocksWrite(r.Context()) {
+			a.writeReadOnlyRoleBlocked(w, r)
+			return
+		}
 	}
 
 	resolvedSourceID, sourceTable, sourceErr := a.resolveMatchTableSide(r, sourceID, "source")
@@ -2788,13 +2802,63 @@ func (a *App) queryEditorHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // queryExecHandler handles form-POST execution of SQL (fallback without JS).
+// roleBlocksWrite reports whether the current session's role should block a
+// write a handler is about to perform inline — i.e. one of the routes that,
+// unlike most mutating routes, isn't wrapped in requireWritable at the route
+// table level (POST /match's save/save_config branches, and the upload
+// branch of POST /match/tables) and must therefore replicate
+// requireWritable's RoleReadOnly check itself. Historically these three
+// call sites only replicated the maintenance-mode half of that check, so a
+// RoleReadOnly session could still create tables and persist match results.
+func (a *App) roleBlocksWrite(ctx context.Context) bool {
+	_, role, ok := a.currentSessionUser(sessionIDFromContext(ctx))
+	return a.currentAuthMode() != AuthModeNone && ok && role == RoleReadOnly
+}
+
+// readOnlyRoleBlocksQuery reports whether sqlText should be rejected because
+// the session is authenticated with RoleReadOnly and the statement isn't
+// provably read-only. Shared by queryExecHandler and apiQueryHandler so the
+// plain HTML form and the JSON API editor enforce the identical gate — only
+// the JSON path checked this historically, letting a read-only account run
+// arbitrary writes by using the plain form instead.
+func (a *App) readOnlyRoleBlocksQuery(ctx context.Context, sqlText string) bool {
+	_, role, ok := a.currentSessionUser(sessionIDFromContext(ctx))
+	return a.currentAuthMode() != AuthModeNone && ok && role == RoleReadOnly && !sqlutil.IsResultProducing(sqlText)
+}
+
+const readOnlyRoleQueryBlockedMessage = "your account has read-only access; only SELECT/WITH/SHOW/EXPLAIN queries are allowed"
+
 func (a *App) queryExecHandler(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	query := strings.TrimSpace(r.Form.Get("sql"))
+	if a.readOnlyRoleBlocksQuery(r.Context(), query) {
+		a.render(w, r, "query", map[string]interface{}{
+			"SQL":    query,
+			"Result": QueryResult{Err: readOnlyRoleQueryBlockedMessage},
+		})
+		return
+	}
 	result := a.executeSQL(r.Context(), query)
+	if audit := a.auditLogger(); audit.Enabled() && result.StatementClass != sqlutil.StatementReadQuery {
+		status := http.StatusOK
+		if result.Err != "" {
+			status = http.StatusBadRequest
+		}
+		sessionID := sessionIDFromContext(r.Context())
+		username, _, _ := a.currentSessionUser(sessionID)
+		audit.Log(AuditEvent{
+			Session:   sessionID,
+			Username:  username,
+			Method:    r.Method,
+			Path:      r.URL.Path,
+			Operation: string(result.StatementClass),
+			Detail:    query,
+			Status:    status,
+		})
+	}
 	a.render(w, r, "query", map[string]interface{}{
 		"SQL":    query,
 		"Result": result,
@@ -2818,10 +2882,10 @@ func (a *App) apiQueryHandler(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 	sessionID := sessionIDFromContext(r.Context())
-	username, role, ok := a.currentSessionUser(sessionID)
+	username, _, _ := a.currentSessionUser(sessionID)
 	sqlText := strings.TrimSpace(body.SQL)
-	if a.currentAuthMode() != AuthModeNone && ok && role == RoleReadOnly && !sqlutil.IsResultProducing(sqlText) {
-		a.writeProblem(w, r, http.StatusForbidden, "Read-only role", "your account has read-only access; only SELECT/WITH/SHOW/EXPLAIN queries are allowed")
+	if a.readOnlyRoleBlocksQuery(r.Context(), sqlText) {
+		a.writeProblem(w, r, http.StatusForbidden, "Read-only role", readOnlyRoleQueryBlockedMessage)
 		return
 	}
 	result := a.executeSQLWindow(r.Context(), sqlText, offset, limit)
