@@ -224,11 +224,27 @@ func setupAdminSession(t *testing.T, mux *http.ServeMux) *http.Cookie {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("admin setup: expected 303, got %d: %s", rec.Code, rec.Body.String())
 	}
-	cookies := rec.Result().Cookies()
-	if len(cookies) == 0 {
-		t.Fatal("admin setup did not set a session cookie")
+	return lastSessionCookie(t, rec)
+}
+
+// lastSessionCookie returns the last datadock_session cookie in rec's
+// response, since a request that both establishes an anonymous session
+// (withSession) and then authenticates (rotateSessionOnAuth) sets the
+// cookie twice — the second (rotated) value is the one that's actually
+// authenticated, and is also what a real browser's cookie jar would end up
+// storing for that name.
+func lastSessionCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	var last *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			last = c
+		}
 	}
-	return cookies[0]
+	if last == nil {
+		t.Fatal("response did not set a session cookie")
+	}
+	return last
 }
 
 func TestIndexRedirectsToFirstTable(t *testing.T) {
@@ -1063,13 +1079,10 @@ func TestAdminRoutesRequireAdminSession(t *testing.T) {
 	if app.currentAdminPasswordHash() == "" || strings.Contains(app.currentAdminPasswordHash(), "secret123") {
 		t.Fatal("admin password should be stored as a hash")
 	}
-	cookies := setupRec.Result().Cookies()
-	if len(cookies) == 0 {
-		t.Fatal("expected setup response to set a session cookie")
-	}
+	sessionCookie := lastSessionCookie(t, setupRec)
 
 	req = httptest.NewRequest(http.MethodGet, "/admin", nil)
-	req.AddCookie(cookies[0])
+	req.AddCookie(sessionCookie)
 	rec = httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -1140,6 +1153,62 @@ func TestSanitizeAdminNextPath(t *testing.T) {
 		if got := sanitizeAdminNextPath(raw); got != want {
 			t.Fatalf("sanitizeAdminNextPath(%q) = %q, want %q", raw, got, want)
 		}
+	}
+}
+
+// TestLoginRotatesSessionIDPreventingFixation guards against session
+// fixation: an attacker who plants a chosen session cookie in a victim's
+// browser before the victim logs in must not inherit a fully authenticated
+// session once the victim does log in. It also checks that the pre-login
+// session's active-connection choice migrates to the new, rotated ID.
+func TestLoginRotatesSessionIDPreventingFixation(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	planted := "attacker-planted-session-0000001"
+	extConn, err := OpenManagedConnection(context.Background(), "ext-db", "ext", "sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open extra connection: %v", err)
+	}
+	t.Cleanup(func() { _ = extConn.DB.Close() })
+	if err := app.conns.Add(extConn); err != nil {
+		t.Fatalf("add extra connection: %v", err)
+	}
+	if err := app.conns.SetActiveFor(planted, extConn.ID); err != nil {
+		t.Fatalf("set active for planted session: %v", err)
+	}
+
+	// The victim opens a link with the attacker's planted session cookie
+	// already set, then completes first-run Admin setup (equally applicable
+	// to a normal /admin/login on an already-configured instance).
+	setupReq := httptest.NewRequest(http.MethodPost, "/admin/setup", strings.NewReader(
+		url.Values{"password": {"secret123"}, "password_confirm": {"secret123"}, "next": {"/admin"}}.Encode()))
+	setupReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	setupReq.AddCookie(&http.Cookie{Name: sessionCookieName, Value: planted})
+	setupRec := httptest.NewRecorder()
+	mux.ServeHTTP(setupRec, setupReq)
+	if setupRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected setup redirect, got %d: %s", setupRec.Code, setupRec.Body.String())
+	}
+
+	rotated := lastSessionCookie(t, setupRec)
+	if rotated.Value == planted {
+		t.Fatal("expected the session ID to be rotated on successful setup, but it was reused")
+	}
+
+	// The attacker's planted session ID must NOT have become authenticated.
+	if _, _, ok := app.currentSessionUser(planted); ok {
+		t.Fatal("expected the planted pre-login session ID to remain unauthenticated after rotation")
+	}
+	// The new, rotated session ID must be authenticated as the new admin.
+	username, role, ok := app.currentSessionUser(rotated.Value)
+	if !ok || role != RoleAdmin || username != "admin" {
+		t.Fatalf("expected the rotated session to be authenticated as admin, got username=%q role=%q ok=%v", username, role, ok)
+	}
+	// The pre-login active-connection choice must have migrated to the new ID.
+	if got := app.conns.ActiveFor(rotated.Value); got == nil || got.ID != extConn.ID {
+		t.Fatalf("expected the rotated session to keep the pre-login active connection %q, got %+v", extConn.ID, got)
 	}
 }
 

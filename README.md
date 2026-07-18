@@ -259,9 +259,12 @@ migrated into an Admin user automatically at startup.
 Later visits use `/admin/login` and a session cookie. Admin settings, shared
 connection persistence/default changes, job management, demo-data admin actions,
 LLM discovery/health, user management, and Admin APIs require an authenticated
-Admin session. User accounts can read and write data but cannot manage Admin
-settings; read-only accounts can browse data and run result-producing SQL, while
-write routes and non-SELECT SQL are blocked.
+Admin session. Outside the loopback-only no-login mode, every data-mutating
+route (record edits, table create/drop, import, migrate, adding a connection,
+saving a match) requires being logged in as some role first: User accounts can
+then read and write data but cannot manage Admin settings; read-only accounts
+can browse data and run result-producing SQL, while write routes and
+non-SELECT SQL are blocked regardless of login.
 
 The same settings are available for automation through:
 

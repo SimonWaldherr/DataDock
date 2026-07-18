@@ -19,14 +19,7 @@ func (a *App) withSession(next http.HandlerFunc) http.HandlerFunc {
 		sessionID := sessionIDFromRequest(r)
 		if sessionID == "" {
 			sessionID = newSessionID()
-			http.SetCookie(w, &http.Cookie{
-				Name:     sessionCookieName,
-				Value:    sessionID,
-				Path:     "/",
-				HttpOnly: true,
-				SameSite: http.SameSiteLaxMode,
-				Expires:  time.Now().Add(30 * 24 * time.Hour),
-			})
+			a.setSessionCookie(w, r, sessionID)
 		}
 
 		ctx := context.WithValue(r.Context(), sessionIDContextKey{}, sessionID)
@@ -35,6 +28,46 @@ func (a *App) withSession(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r.WithContext(ctx))
 	}
+}
+
+// setSessionCookie issues the session cookie, marking it Secure whenever
+// this request actually arrived over TLS (r.TLS != nil) or the operator has
+// explicitly asserted a TLS-terminating reverse proxy sits in front of
+// DataDock (-behind-tls-proxy) — never from a client-supplied header like
+// X-Forwarded-Proto, which a client could spoof to fake a secure connection.
+func (a *App) setSessionCookie(w http.ResponseWriter, r *http.Request, sessionID string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    sessionID,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   r.TLS != nil || a.behindTLSProxy,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  time.Now().Add(30 * 24 * time.Hour),
+	})
+}
+
+// rotateSessionOnAuth mints a fresh session ID and marks it authenticated,
+// instead of reusing whatever pre-authentication session ID the request
+// already carried. This closes a session-fixation hole: without rotation,
+// an attacker who plants a chosen session cookie in a victim's browser
+// before the victim logs in would inherit a fully authenticated session
+// the moment the victim logs in or completes first-run setup, since the
+// session ID itself never changed. Migrates the pre-login session's active-
+// connection selection and any connections it privately owned to the new
+// ID, so logging in doesn't silently drop either.
+func (a *App) rotateSessionOnAuth(w http.ResponseWriter, r *http.Request, username string, role Role) string {
+	oldSessionID := sessionIDFromContext(r.Context())
+	newID := newSessionID()
+	a.markSessionAuthenticated(newID, username, role)
+	if oldSessionID != "" {
+		a.clearSessionAuthenticated(oldSessionID)
+		if a.conns != nil {
+			a.conns.RebindSession(oldSessionID, newID)
+		}
+	}
+	a.setSessionCookie(w, r, newID)
+	return newID
 }
 
 // requireWritable blocks a mutating handler while the admin has enabled

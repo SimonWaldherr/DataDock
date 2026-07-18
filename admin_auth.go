@@ -393,7 +393,7 @@ func (a *App) adminSetupSubmitHandler(w http.ResponseWriter, r *http.Request) {
 		a.serverError(w, err)
 		return
 	}
-	a.markSessionAuthenticated(sessionIDFromContext(r.Context()), username, RoleAdmin)
+	a.rotateSessionOnAuth(w, r, username, RoleAdmin)
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
@@ -460,7 +460,7 @@ func (a *App) adminLoginSubmitHandler(w http.ResponseWriter, r *http.Request) {
 		a.renderAdminAuth(w, "login", next, "Incorrect password.")
 		return
 	}
-	a.markSessionAuthenticated(sessionIDFromContext(r.Context()), user.Username, user.Role)
+	a.rotateSessionOnAuth(w, r, user.Username, user.Role)
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 

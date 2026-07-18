@@ -55,6 +55,14 @@ type App struct {
 	listenAddr          string
 	allowInsecureRemote bool
 
+	// behindTLSProxy records an operator's explicit assertion that
+	// DataDock sits behind a TLS-terminating reverse proxy, so the session
+	// cookie can be marked Secure even though DataDock's own listener sees
+	// plain HTTP (r.TLS == nil) for every request. Not inferred from a
+	// client-supplied header like X-Forwarded-Proto, which a client could
+	// spoof to convince DataDock a connection is secure when it isn't.
+	behindTLSProxy bool
+
 	// authModeExplicit records whether -auth-mode/$DATADOCK_AUTH_MODE was
 	// set for this process, as opposed to defaulting silently. It's set
 	// once at startup (main.go) and gates whether the first-run setup page

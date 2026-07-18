@@ -56,6 +56,7 @@ func main() {
 	auditPath := flag.String("audit-log", envDefault("DATADOCK_AUDIT_LOG", ""), "Optional file path for a JSON-lines audit log of write operations (record edits, DDL, imports, migrations, admin changes, and write/DDL SQL)")
 	authModeFlag := flag.String("auth-mode", envDefault("DATADOCK_AUTH_MODE", ""), "How DataDock gates access to itself: \"local\" (default: a single Admin password) or \"none\" (no login at all, for single-user/local use only; defaults to binding 127.0.0.1 unless -addr says otherwise, see -allow-insecure-remote)")
 	allowInsecureRemote := flag.Bool("allow-insecure-remote", envBoolDefault("DATADOCK_ALLOW_INSECURE_REMOTE", false), "Allow -auth-mode=none to bind to a non-loopback address. Only set this on a network you already trust (e.g. a private VPN/Tailscale), since anyone who can reach that address gets full access with no login.")
+	behindTLSProxy := flag.Bool("behind-tls-proxy", envBoolDefault("DATADOCK_BEHIND_TLS_PROXY", false), "Set when a TLS-terminating reverse proxy sits in front of DataDock, so the session cookie is marked Secure even though DataDock's own listener only ever sees plain HTTP.")
 	flag.Parse()
 
 	if *findFreePortFlag {
@@ -196,6 +197,7 @@ func main() {
 	// is set, so it needs to see both up front (see settings.go).
 	app.listenAddr = listenAddr
 	app.allowInsecureRemote = *allowInsecureRemote
+	app.behindTLSProxy = *behindTLSProxy
 	app.authModeExplicit = flagWasSet("auth-mode") || strings.TrimSpace(os.Getenv("DATADOCK_AUTH_MODE")) != ""
 
 	if err := app.applyRuntimeSettings(settings); err != nil {

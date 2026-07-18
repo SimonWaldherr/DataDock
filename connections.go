@@ -224,6 +224,31 @@ func (m *ConnectionManager) Active() *DBConnection {
 	return m.conns[m.active]
 }
 
+// RebindSession migrates per-session state (the active-connection pointer,
+// and ownership of any private connections) from oldID to newID. Used when
+// rotating a session ID at the login/setup authentication boundary (see
+// rotateSessionOnAuth in session.go) so that doesn't silently drop a
+// pre-login active-connection choice or any connections privately added
+// before logging in.
+func (m *ConnectionManager) RebindSession(oldID, newID string) {
+	oldID = strings.TrimSpace(oldID)
+	newID = strings.TrimSpace(newID)
+	if oldID == "" || newID == "" || oldID == newID {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if activeID, ok := m.activeBySession[oldID]; ok {
+		m.activeBySession[newID] = activeID
+		delete(m.activeBySession, oldID)
+	}
+	for _, conn := range m.conns {
+		if conn.Owner == oldID {
+			conn.Owner = newID
+		}
+	}
+}
+
 func (m *ConnectionManager) ActiveFor(sessionID string) *DBConnection {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
