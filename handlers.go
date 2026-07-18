@@ -3634,6 +3634,12 @@ func importContent(ctx context.Context, db *tinysql.DB, tenant, table, format st
 		return dbimporter.ImportNDJSON(ctx, db, tenant, table, src, opts)
 	case "yaml", "yml":
 		return dbimporter.ImportYAML(ctx, db, tenant, table, src, opts)
+	case "toml":
+		return dbimporter.ImportTOML(ctx, db, tenant, table, src, opts)
+	case "ini", "cfg", "conf":
+		return dbimporter.ImportINI(ctx, db, tenant, table, src, opts)
+	case "fwf", "fixed", "fixedwidth", "fixed-width":
+		return dbimporter.ImportFixedWidth(ctx, db, tenant, table, src, opts)
 	case "xml":
 		return dbimporter.ImportXML(ctx, db, tenant, table, src, opts)
 	case "html", "htm":
@@ -3720,10 +3726,12 @@ func importFormatFromName(filename, selected string) string {
 	}
 	if i := strings.LastIndex(name, "."); i >= 0 {
 		switch name[i+1:] {
-		case "csv", "tsv", "json", "ndjson", "xlsx", "xml", "yaml", "yml", "geojson", "gpkg", "gpx", "kml", "osm", "pbf", "mbtiles", "pmtiles", "rg", "sqlite", "sqlite3", "db", "duckdb", "parquet", "arrow", "feather", "html", "htm", "msgpack", "mpack", "msg", "cbor", "bson", "ics", "ical", "vcf", "vcard":
+		case "csv", "tsv", "json", "ndjson", "xlsx", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "fwf", "geojson", "gpkg", "gpx", "kml", "osm", "pbf", "mbtiles", "pmtiles", "rg", "sqlite", "sqlite3", "db", "duckdb", "parquet", "arrow", "feather", "html", "htm", "msgpack", "mpack", "msg", "cbor", "bson", "ics", "ical", "vcf", "vcard":
 			return name[i+1:]
 		case "zip", "shp":
 			return "shp"
+		case "txt":
+			return "fwf"
 		}
 	}
 	return "csv"

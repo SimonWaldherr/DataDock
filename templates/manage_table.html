@@ -86,7 +86,7 @@
         </div>
         <div>
           <label class="form-label small">File</label>
-          <input class="form-control form-control-sm" type="file" name="file" accept=".csv,.tsv,.json,.ndjson,.xlsx,.xml,.yaml,.yml,.geojson,.gpkg,.gpx,.kml,.osm,.pbf,.mbtiles,.pmtiles,.rg,.zip,.shp,.sqlite,.sqlite3,.db,.duckdb,.parquet,.arrow,.feather,.html,.htm,.msgpack,.mpack,.msg,.cbor,.bson,.ics,.ical,.vcf,.vcard" required>
+          <input class="form-control form-control-sm" type="file" name="file" accept=".csv,.tsv,.json,.ndjson,.xlsx,.xml,.yaml,.yml,.toml,.ini,.cfg,.conf,.txt,.fwf,.geojson,.gpkg,.gpx,.kml,.osm,.pbf,.mbtiles,.pmtiles,.rg,.zip,.shp,.sqlite,.sqlite3,.db,.duckdb,.parquet,.arrow,.feather,.html,.htm,.msgpack,.mpack,.msg,.cbor,.bson,.ics,.ical,.vcf,.vcard" required>
         </div>
         <div class="row g-2">
           <div class="col-md-6">
@@ -100,6 +100,9 @@
               <option value="xlsx">XLSX first sheet</option>
               <option value="xml">XML</option>
               <option value="yaml">YAML</option>
+              <option value="toml">TOML</option>
+              <option value="ini">INI</option>
+              <option value="fwf">Fixed-width text</option>
               <option value="html">HTML tables</option>
               <option value="sqlite">SQLite database</option>
               <option value="duckdb">DuckDB manifest</option>

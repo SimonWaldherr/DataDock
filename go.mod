@@ -3,6 +3,7 @@ module github.com/SimonWaldherr/datadock
 go 1.25.12
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/SimonWaldherr/tinySQL v0.20.0
 	github.com/andybalholm/brotli v1.2.2
 	github.com/go-sql-driver/mysql v1.10.0

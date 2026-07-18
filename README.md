@@ -19,7 +19,7 @@ database manager with administrator-managed or per-user credentials.
 | **Datasheet View** | View, sort, and page through table rows |
 | **Record CRUD** | Add, edit, and delete records from any table with an `id INT` column |
 | **Table Design** | Create new tables with a visual column designer (INT, FLOAT, TEXT, BOOL) |
-| **Broad File Import** | Import HTML tables, SQLite databases, MessagePack/CBOR/BSON, iCalendar, vCard, and file manifests for Parquet/Arrow/Feather/DuckDB |
+| **Broad File Import** | Import HTML tables, SQLite databases, TOML, INI, fixed-width text, MessagePack/CBOR/BSON, iCalendar, vCard, and file manifests for Parquet/Arrow/Feather/DuckDB |
 | **Map Data Import** | Import GeoJSON, GeoPackage, GPX, KML, OSM XML/PBF, Shapefile ZIPs, MBTiles/PMTiles layers, and JSON/NDJSON routing graphs into queryable tables with GeoJSON geometry columns |
 | **Tile Layers** | Open imported MBTiles or PMTiles as local TileJSON-backed raster or vector layers; MBTiles TMS rows are normalized to XYZ at the API boundary |
 | **Routing Analysis** | Calculate directed or undirected shortest paths and reachable areas from imported RG graph nodes and edges, returning GeoJSON for maps or downstream use |
@@ -72,9 +72,9 @@ connection.
 
 Supported import families:
 
-- **Tabular and structured:** CSV, TSV, JSON, NDJSON, YAML, XML, multi-sheet
-  XLSX, HTML tables, SQLite tables/views, MessagePack, CBOR, BSON, iCalendar,
-  and vCard.
+- **Tabular and structured:** CSV, TSV, JSON, NDJSON, YAML, TOML, INI,
+  fixed-width text, XML, multi-sheet XLSX, HTML tables, SQLite tables/views,
+  MessagePack, CBOR, BSON, iCalendar, and vCard.
 - **Columnar manifests:** Parquet, Arrow, Feather, and DuckDB files are recorded
   as file-level manifest rows. Full row-group/page decoding is intentionally not
   bundled yet.
@@ -345,6 +345,9 @@ datadock uses stable web and data interchange standards for external integration
 - Excel-safe CSV is an explicit export mode that rewrites ambiguous text and ISO date/time values for Excel import while leaving standard CSV unchanged.
 - XLSX exports use Office Open XML spreadsheet packages with typed numeric, boolean, date, time, and datetime cells.
 - XLSX imports merge multiple worksheets into one table with a `sheet` column; single-sheet imports keep the traditional first-sheet shape.
+- TOML imports create one row per `[[array-of-tables]]` entry (e.g. Cargo.lock-style `[[package]]` blocks); a flat table with no array-of-tables imports as a single row, matching how a lone JSON/YAML object imports.
+- INI imports create one row per `[section]`, with a `section` column plus one column per key seen anywhere in the file; key/value pairs before any section header import under a `(default)` section.
+- Fixed-width text imports infer column boundaries from whitespace alignment across every line (no delimiter, no explicit column-width configuration) — the same heuristic tools like pandas' `read_fwf(colspecs="infer")` use.
 - HTML, SQLite, MessagePack, CBOR, BSON, iCalendar, and vCard imports normalize common non-geospatial files into queryable tables.
 - Parquet, Arrow, Feather, and DuckDB imports currently create file-level manifest rows rather than fully decoding row groups/pages.
 - GeoJSON exports use RFC 7946 FeatureCollection output where geometry or lat/lon columns are present.

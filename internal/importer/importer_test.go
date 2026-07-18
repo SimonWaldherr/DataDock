@@ -437,6 +437,115 @@ func TestImportColumnarManifest(t *testing.T) {
 	}
 }
 
+func TestImportTOMLArrayOfTablesImportsOneRowPerEntry(t *testing.T) {
+	db := tinysql.NewDB()
+	data := `
+title = "inventory"
+
+[[item]]
+name = "Widget"
+qty = 10
+price = 2.5
+
+[[item]]
+name = "Gadget"
+qty = 3
+price = 19.99
+`
+	res, err := ImportTOML(context.Background(), db, "default", "toml_import", strings.NewReader(data), &ImportOptions{
+		CreateTable:   true,
+		TypeInference: true,
+	})
+	if err != nil {
+		t.Fatalf("ImportTOML: %v", err)
+	}
+	if res.RowsInserted != 2 {
+		t.Fatalf("RowsInserted = %d, want 2", res.RowsInserted)
+	}
+	rows := rowStrings(selectRows(t, db, "SELECT name, qty, price FROM toml_import ORDER BY name"))
+	if len(rows) != 2 || rows[0][0] != "Gadget" || rows[1][0] != "Widget" {
+		t.Fatalf("unexpected rows: %#v", rows)
+	}
+}
+
+func TestImportTOMLFlatTableImportsAsSingleRow(t *testing.T) {
+	db := tinysql.NewDB()
+	data := "name = \"server-1\"\nport = 8080\nenabled = true\n"
+	res, err := ImportTOML(context.Background(), db, "default", "toml_flat_import", strings.NewReader(data), &ImportOptions{
+		CreateTable:   true,
+		TypeInference: true,
+	})
+	if err != nil {
+		t.Fatalf("ImportTOML: %v", err)
+	}
+	if res.RowsInserted != 1 {
+		t.Fatalf("RowsInserted = %d, want 1", res.RowsInserted)
+	}
+	rows := rowStrings(selectRows(t, db, "SELECT name, port FROM toml_flat_import"))
+	if len(rows) != 1 || rows[0][0] != "server-1" || rows[0][1] != "8080" {
+		t.Fatalf("unexpected row: %#v", rows)
+	}
+}
+
+func TestImportINIImportsOneRowPerSection(t *testing.T) {
+	db := tinysql.NewDB()
+	data := `
+; leading comment
+global_key = ignored-by-nothing
+
+[database]
+host = localhost
+port = 5432
+name = "app_db"
+
+[cache]
+host = localhost
+port = 6379
+`
+	res, err := ImportINI(context.Background(), db, "default", "ini_import", strings.NewReader(data), &ImportOptions{
+		CreateTable:   true,
+		TypeInference: true,
+	})
+	if err != nil {
+		t.Fatalf("ImportINI: %v", err)
+	}
+	if res.RowsInserted != 3 {
+		t.Fatalf("RowsInserted = %d, want 3", res.RowsInserted)
+	}
+	rows := rowStrings(selectRows(t, db, "SELECT section, host, port FROM ini_import ORDER BY section"))
+	if len(rows) != 3 {
+		t.Fatalf("unexpected rows: %#v", rows)
+	}
+	if rows[0][0] != "(default)" || rows[1][0] != "cache" || rows[2][0] != "database" {
+		t.Fatalf("unexpected section order/values: %#v", rows)
+	}
+	if rows[2][1] != "localhost" || rows[2][2] != "5432" {
+		t.Fatalf("unexpected database section values: %#v", rows[2])
+	}
+}
+
+func TestImportFixedWidthInfersColumnsFromAlignment(t *testing.T) {
+	db := tinysql.NewDB()
+	data := "" +
+		"id   name       score\n" +
+		"1    Ada        98.5 \n" +
+		"2    Grace      99.0 \n"
+	res, err := ImportFixedWidth(context.Background(), db, "default", "fwf_import", strings.NewReader(data), &ImportOptions{
+		CreateTable:   true,
+		TypeInference: true,
+	})
+	if err != nil {
+		t.Fatalf("ImportFixedWidth: %v", err)
+	}
+	if res.RowsInserted != 2 {
+		t.Fatalf("RowsInserted = %d, want 2", res.RowsInserted)
+	}
+	rows := rowStrings(selectRows(t, db, "SELECT id, name, score FROM fwf_import ORDER BY id"))
+	if len(rows) != 2 || rows[0][1] != "Ada" || rows[1][1] != "Grace" {
+		t.Fatalf("unexpected rows: %#v", rows)
+	}
+}
+
 func containsColumn(columns []string, want string) bool {
 	for _, col := range columns {
 		if col == want {
