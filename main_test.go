@@ -914,6 +914,55 @@ func TestAdminSessionCanSeeDataDockSystemTables(t *testing.T) {
 	}
 }
 
+// TestSystemTableHiddenFromSidebarButQueryableWasABug documents and locks in
+// the fix for a real gap: hiding __datadock_-prefixed tables from the
+// sidebar/catalog was purely cosmetic and did nothing to stop an ad-hoc
+// SELECT against them via /api/query or /api/export, exposing LLM/embedding
+// API keys, connection DSNs, and password hashes to any non-admin session.
+func TestSystemTableHiddenFromSidebarButQueryableWasABug(t *testing.T) {
+	app := newTestApp(t)
+	if err := app.applyRuntimeSettings(RuntimeSettings{Dialect: "tinysql", LLMAPIKey: "super-secret-key"}); err != nil {
+		t.Fatalf("apply settings: %v", err)
+	}
+	if err := app.saveRuntimeSettings(context.Background()); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	queryBody := func(sql string) *http.Request {
+		body, _ := json.Marshal(map[string]string{"sql": sql})
+		req := httptest.NewRequest(http.MethodPost, "/api/query", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		return req
+	}
+
+	// A non-admin session must not be able to read the settings table
+	// (which holds the LLM API key) via an ad-hoc SELECT.
+	blockedRec := httptest.NewRecorder()
+	mux.ServeHTTP(blockedRec, queryBody("SELECT setting_value FROM __datadock_settings"))
+	if strings.Contains(blockedRec.Body.String(), "super-secret-key") {
+		t.Fatalf("non-admin session could read a DataDock system table's secret via ad-hoc SQL: %s", blockedRec.Body.String())
+	}
+
+	// An ordinary query unrelated to system tables must still work.
+	okRec := httptest.NewRecorder()
+	mux.ServeHTTP(okRec, queryBody("SELECT 1 AS n"))
+	if strings.Contains(okRec.Body.String(), `"error"`) {
+		t.Fatalf("expected an ordinary query to still succeed for a non-admin session, got: %s", okRec.Body.String())
+	}
+
+	// An authenticated Admin session must still be able to read it.
+	adminCookie := setupAdminSession(t, mux)
+	adminReq := queryBody("SELECT setting_value FROM __datadock_settings WHERE setting_key = 'llm_api_key'")
+	adminReq.AddCookie(adminCookie)
+	adminRec := httptest.NewRecorder()
+	mux.ServeHTTP(adminRec, adminReq)
+	if !strings.Contains(adminRec.Body.String(), "super-secret-key") {
+		t.Fatalf("expected an authenticated Admin session to still read the system table, got: %s", adminRec.Body.String())
+	}
+}
+
 func TestAdminSettingsFormPreservesAPIKey(t *testing.T) {
 	app := newTestApp(t)
 	if err := app.applyRuntimeSettings(RuntimeSettings{

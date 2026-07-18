@@ -2970,6 +2970,10 @@ func (a *App) apiExportHandler(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, r, http.StatusBadRequest, "Unsupported SQL", "export requires SELECT, WITH, SHOW, EXPLAIN, DESCRIBE, or PRAGMA")
 		return
 	}
+	if a.blockedForSystemTableAccess(r.Context(), query) {
+		a.writeProblem(w, r, http.StatusForbidden, "Forbidden", systemTableAccessDeniedMessage)
+		return
+	}
 
 	cols, rows, err := a.queryRows(r.Context(), query)
 	if err != nil {

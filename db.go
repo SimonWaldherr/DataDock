@@ -677,6 +677,12 @@ func (a *App) executeSQL(ctx context.Context, query string) QueryResult { //noli
 		return result
 	}
 
+	if a.blockedForSystemTableAccess(ctx, query) {
+		result.Err = systemTableAccessDeniedMessage
+		result.Elapsed = time.Since(start)
+		return result
+	}
+
 	if queryReturnsRowsInEditor(result.StatementClass) {
 		cols, rows, err := a.queryRows(ctx, query)
 		if err != nil {
@@ -714,6 +720,12 @@ func (a *App) executeSQLWindow(ctx context.Context, query string, offset, limit 
 
 	if !isResultQuerySQL(query) && a.currentReadOnlyMode() {
 		result.Err = resultQueryRequiredMessage("maintenance mode is active")
+		result.Elapsed = time.Since(start)
+		return result
+	}
+
+	if a.blockedForSystemTableAccess(ctx, query) {
+		result.Err = systemTableAccessDeniedMessage
 		result.Elapsed = time.Since(start)
 		return result
 	}
@@ -990,6 +1002,31 @@ func normalizeCatalogObjectKind(s string) (string, bool) {
 
 func isDataDockSystemObject(name string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(name)), "__datadock_")
+}
+
+const systemTableAccessDeniedMessage = "this query references a DataDock system table, which is only readable by an authenticated Admin session"
+
+// referencesDataDockSystemTable is a conservative, text-level check for
+// whether sqlText mentions a __datadock_-prefixed internal table anywhere
+// (SELECT list, FROM/JOIN, subquery, or otherwise) — parsing every dialect's
+// full SQL grammar just to enumerate referenced table names isn't worth it
+// here, since DataDock's own internal code never runs this check against
+// its own hardcoded queries: a false positive only over-blocks an ad-hoc
+// query that happens to mention the literal substring, never under-blocks
+// an actual reference to one of these tables.
+func referencesDataDockSystemTable(sqlText string) bool {
+	return strings.Contains(strings.ToLower(sqlText), "__datadock_")
+}
+
+// blockedForSystemTableAccess reports whether an ad-hoc query should be
+// rejected because it references a __datadock_-prefixed internal table and
+// the caller isn't an authenticated Admin. Those tables hold secrets (LLM/
+// embedding API keys, connection DSNs, password hashes) that the
+// catalog/sidebar already hides from non-admin browsing — but hiding a
+// table from the sidebar was never actually enforced at query-execution
+// time, so any session could still just SELECT from it directly.
+func (a *App) blockedForSystemTableAccess(ctx context.Context, sqlText string) bool {
+	return referencesDataDockSystemTable(sqlText) && !a.isAdminAuthenticated(sessionIDFromContext(ctx))
 }
 
 func isResultQuerySQL(query string) bool {
