@@ -109,68 +109,72 @@ func (a *App) createMigratedTable(ctx context.Context, target *DBConnection, tab
 	return err
 }
 
+// migrationTypeClass is a source column type collapsed into the handful of
+// buckets migrationColumnType actually distinguishes between, independent
+// of the target dialect.
+type migrationTypeClass int
+
+const (
+	migrationTypeText migrationTypeClass = iota
+	migrationTypeInt
+	migrationTypeFloat
+	migrationTypeBool
+)
+
+func classifyMigrationType(t string) migrationTypeClass {
+	switch {
+	case strings.Contains(t, "INT"):
+		return migrationTypeInt
+	case strings.Contains(t, "REAL"), strings.Contains(t, "FLOA"), strings.Contains(t, "DOUB"), strings.Contains(t, "DEC"), strings.Contains(t, "NUM"):
+		return migrationTypeFloat
+	case strings.Contains(t, "BOOL"), t == "BIT":
+		return migrationTypeBool
+	default:
+		return migrationTypeText
+	}
+}
+
+// migrationTypeLiterals maps each migrationTypeClass to its literal type
+// name per target dialect. Every dialect classifies a source type
+// identically (classifyMigrationType); only the literal returned per class
+// actually varies, so this replaces four near-identical per-dialect
+// classify-and-switch functions with one lookup table.
+var migrationTypeLiterals = map[string]map[migrationTypeClass]string{
+	"PostgreSQL": {
+		migrationTypeInt:   "BIGINT",
+		migrationTypeFloat: "DOUBLE PRECISION",
+		migrationTypeBool:  "BOOLEAN",
+		migrationTypeText:  "TEXT",
+	},
+	"MariaDB/MySQL": {
+		migrationTypeInt:   "BIGINT",
+		migrationTypeFloat: "DOUBLE",
+		migrationTypeBool:  "BOOLEAN",
+		migrationTypeText:  "TEXT",
+	},
+	"Microsoft SQL Server": {
+		migrationTypeInt:   "BIGINT",
+		migrationTypeFloat: "FLOAT",
+		migrationTypeBool:  "BIT",
+		migrationTypeText:  "NVARCHAR(MAX)",
+	},
+}
+
+// sqliteLikeMigrationTypeLiterals is the fallback for tinySQL, SQLite, and
+// any other dialect without a more specific entry above.
+var sqliteLikeMigrationTypeLiterals = map[migrationTypeClass]string{
+	migrationTypeInt:   "INT",
+	migrationTypeFloat: "FLOAT",
+	migrationTypeBool:  "BOOL",
+	migrationTypeText:  "TEXT",
+}
+
 func migrationColumnType(target *DBConnection, sourceType string) string {
 	t := strings.ToUpper(strings.TrimSpace(sourceType))
-	switch target.Dialect.Name {
-	case "PostgreSQL":
-		return postgresMigrationType(t)
-	case "MariaDB/MySQL":
-		return mysqlMigrationType(t)
-	case "Microsoft SQL Server":
-		return mssqlMigrationType(t)
-	default:
-		return sqliteLikeMigrationType(t)
+	class := classifyMigrationType(t)
+	literals, ok := migrationTypeLiterals[target.Dialect.Name]
+	if !ok {
+		literals = sqliteLikeMigrationTypeLiterals
 	}
-}
-
-func sqliteLikeMigrationType(t string) string {
-	switch {
-	case strings.Contains(t, "INT"):
-		return "INT"
-	case strings.Contains(t, "REAL"), strings.Contains(t, "FLOA"), strings.Contains(t, "DOUB"), strings.Contains(t, "DEC"), strings.Contains(t, "NUM"):
-		return "FLOAT"
-	case strings.Contains(t, "BOOL"), t == "BIT":
-		return "BOOL"
-	default:
-		return "TEXT"
-	}
-}
-
-func postgresMigrationType(t string) string {
-	switch {
-	case strings.Contains(t, "INT"):
-		return "BIGINT"
-	case strings.Contains(t, "REAL"), strings.Contains(t, "FLOA"), strings.Contains(t, "DOUB"), strings.Contains(t, "DEC"), strings.Contains(t, "NUM"):
-		return "DOUBLE PRECISION"
-	case strings.Contains(t, "BOOL"), t == "BIT":
-		return "BOOLEAN"
-	default:
-		return "TEXT"
-	}
-}
-
-func mysqlMigrationType(t string) string {
-	switch {
-	case strings.Contains(t, "INT"):
-		return "BIGINT"
-	case strings.Contains(t, "REAL"), strings.Contains(t, "FLOA"), strings.Contains(t, "DOUB"), strings.Contains(t, "DEC"), strings.Contains(t, "NUM"):
-		return "DOUBLE"
-	case strings.Contains(t, "BOOL"), t == "BIT":
-		return "BOOLEAN"
-	default:
-		return "TEXT"
-	}
-}
-
-func mssqlMigrationType(t string) string {
-	switch {
-	case strings.Contains(t, "INT"):
-		return "BIGINT"
-	case strings.Contains(t, "REAL"), strings.Contains(t, "FLOA"), strings.Contains(t, "DOUB"), strings.Contains(t, "DEC"), strings.Contains(t, "NUM"):
-		return "FLOAT"
-	case strings.Contains(t, "BOOL"), t == "BIT":
-		return "BIT"
-	default:
-		return "NVARCHAR(MAX)"
-	}
+	return literals[class]
 }

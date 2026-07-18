@@ -39,6 +39,28 @@ func TestMigrateTableSQLiteToTinySQL(t *testing.T) {
 	}
 }
 
+func TestMigrationColumnType(t *testing.T) {
+	tests := []struct {
+		dialect    string
+		sourceType string
+		want       string
+	}{
+		{"tinysql", "INT", "INT"}, {"tinysql", "FLOAT", "FLOAT"}, {"tinysql", "BOOL", "BOOL"}, {"tinysql", "TEXT", "TEXT"},
+		{"sqlite", "INTEGER", "INT"}, {"sqlite", "REAL", "FLOAT"}, {"sqlite", "BIT", "BOOL"}, {"sqlite", "VARCHAR", "TEXT"},
+		{"postgres", "INT", "BIGINT"}, {"postgres", "NUMERIC", "DOUBLE PRECISION"}, {"postgres", "BOOLEAN", "BOOLEAN"}, {"postgres", "TEXT", "TEXT"},
+		{"mysql", "INT", "BIGINT"}, {"mysql", "DECIMAL", "DOUBLE"}, {"mysql", "BOOL", "BOOLEAN"}, {"mysql", "VARCHAR", "TEXT"},
+		{"mssql", "INT", "BIGINT"}, {"mssql", "DOUBLE", "FLOAT"}, {"mssql", "BIT", "BIT"}, {"mssql", "NVARCHAR", "NVARCHAR(MAX)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dialect+"/"+tt.sourceType, func(t *testing.T) {
+			target := &DBConnection{Dialect: DialectProfileForName(tt.dialect)}
+			if got := migrationColumnType(target, tt.sourceType); got != tt.want {
+				t.Fatalf("migrationColumnType(%s, %q) = %q, want %q", tt.dialect, tt.sourceType, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMigrationPlaceholderStyles(t *testing.T) {
 	postgres := &DBConnection{Dialect: DialectProfileForName("postgres")}
 	mssql := &DBConnection{Dialect: DialectProfileForName("mssql")}
