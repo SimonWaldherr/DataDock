@@ -181,12 +181,7 @@ func (a *App) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 // the visitor may not be authorized to see anything a.render() would try to
 // build (e.g. system-table listings).
 func (a *App) writeForbiddenPage(w http.ResponseWriter, r *http.Request, detail string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusForbidden)
-	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><title>Forbidden</title>` +
-		`<body style="font-family:system-ui,sans-serif;padding:3rem 1.5rem;max-width:640px;margin:0 auto;color:#111827">` +
-		`<h1 style="font-size:1.3rem">Forbidden</h1><p>` + detail + `</p>` +
-		`<p><a href="/">Go back</a></p></body>`))
+	writeErrorPage(w, http.StatusForbidden, "Forbidden", detail, `<a href="/">Go back</a>`)
 }
 
 func isAPIRequest(r *http.Request) bool {

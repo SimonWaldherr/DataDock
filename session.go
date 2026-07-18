@@ -81,12 +81,8 @@ func (a *App) writeMaintenanceBlocked(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, r, http.StatusServiceUnavailable, "Maintenance mode", detail)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusServiceUnavailable)
-	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><title>Maintenance mode</title>` +
-		`<body style="font-family:system-ui,sans-serif;padding:3rem 1.5rem;max-width:640px;margin:0 auto;color:#111827">` +
-		`<h1 style="font-size:1.3rem">Maintenance mode</h1><p>` + detail + `</p>` +
-		`<p><a href="/admin">Go to Admin settings</a> &middot; <a href="javascript:history.back()">Go back</a></p></body>`))
+	writeErrorPage(w, http.StatusServiceUnavailable, "Maintenance mode", detail,
+		`<a href="/admin">Go to Admin settings</a> &middot; <a href="javascript:history.back()">Go back</a>`)
 }
 
 func (a *App) writeReadOnlyRoleBlocked(w http.ResponseWriter, r *http.Request) {
@@ -95,12 +91,22 @@ func (a *App) writeReadOnlyRoleBlocked(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, r, http.StatusForbidden, "Read-only role", detail)
 		return
 	}
+	writeErrorPage(w, http.StatusForbidden, "Read-only account", detail, `<a href="javascript:history.back()">Go back</a>`)
+}
+
+// writeErrorPage renders DataDock's minimal, dependency-free HTML shell for
+// a blocked/forbidden request (shared by writeMaintenanceBlocked,
+// writeReadOnlyRoleBlocked, and writeForbiddenPage): the visitor being
+// blocked may not be authorized to see anything a.render() would try to
+// build (e.g. system-table listings), so this intentionally has no other
+// dependencies. links is raw HTML for the page's own anchor(s).
+func writeErrorPage(w http.ResponseWriter, status int, title, detail, links string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusForbidden)
-	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><title>Read-only account</title>` +
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><title>` + title + `</title>` +
 		`<body style="font-family:system-ui,sans-serif;padding:3rem 1.5rem;max-width:640px;margin:0 auto;color:#111827">` +
-		`<h1 style="font-size:1.3rem">Read-only account</h1><p>` + detail + `</p>` +
-		`<p><a href="javascript:history.back()">Go back</a></p></body>`))
+		`<h1 style="font-size:1.3rem">` + title + `</h1><p>` + detail + `</p>` +
+		`<p>` + links + `</p></body>`))
 }
 
 func sessionIDFromRequest(r *http.Request) string {
