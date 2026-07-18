@@ -40,6 +40,17 @@ func newMatchTablesRequest(t *testing.T, fields map[string]string, files map[str
 	return req
 }
 
+// withAuthenticatedTestSession injects an authenticated session directly
+// into req's context, for tests that call a handler function directly
+// (bypassing withSession/registerRoutes) but still need
+// sessionIDFromContext/currentSessionUser to see a logged-in session, e.g.
+// for routes gated by requireLogin/loginRequiredForWrite.
+func withAuthenticatedTestSession(app *App, req *http.Request, username string, role Role) *http.Request {
+	sessionID := newSessionID()
+	app.markSessionAuthenticated(sessionID, username, role)
+	return req.WithContext(context.WithValue(req.Context(), sessionIDContextKey{}, sessionID))
+}
+
 // TestCanonicalColumnPreservesMeaningfulWhitespace guards against a real
 // production bug: a SQL Server export column literally named "Name "
 // (trailing space) was being rejected as "not found" because
@@ -202,6 +213,7 @@ func TestMatchTablesHandlerUploadsSourceKeepsTargetSelection(t *testing.T) {
 		map[string]string{"source_id": matchUploadSentinel, "target_id": "default", "target_table": "erp2_kunden"},
 		map[string]string{"source_file": "id,name\n1,Alpha\n2,Beta\n"},
 	)
+	req = withAuthenticatedTestSession(app, req, "tester", RoleUser)
 	rec := httptest.NewRecorder()
 	app.matchTablesHandler(rec, req)
 
@@ -229,6 +241,7 @@ func TestMatchTablesHandlerMissingFileErrorsCleanly(t *testing.T) {
 		map[string]string{"source_id": matchUploadSentinel, "target_id": "default"},
 		nil,
 	)
+	req = withAuthenticatedTestSession(app, req, "tester", RoleUser)
 	rec := httptest.NewRecorder()
 	app.matchTablesHandler(rec, req)
 

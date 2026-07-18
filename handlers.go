@@ -84,15 +84,17 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 
 	// Record CRUD.
 	handle("GET /t/{table}/new", a.newRecordFormHandler)
-	handle("POST /t/{table}/new", a.requireWritable(a.createRecordHandler))
+	handle("POST /t/{table}/new", a.requireWritable(a.requireLogin(a.createRecordHandler)))
 	handle("GET /t/{table}/{id}/edit", a.editRecordFormHandler)
-	handle("POST /t/{table}/{id}/edit", a.requireWritable(a.updateRecordHandler))
-	handle("POST /t/{table}/{id}/delete", a.requireWritable(a.deleteRecordHandler))
+	handle("POST /t/{table}/{id}/edit", a.requireWritable(a.requireLogin(a.updateRecordHandler)))
+	handle("POST /t/{table}/{id}/delete", a.requireWritable(a.requireLogin(a.deleteRecordHandler)))
 
-	// Connections are session-scoped by default; admin login is only needed
-	// to persist/share credentials or change the server-wide default.
+	// Adding a connection is session-scoped (not shared with other users)
+	// but still requires being logged in as some role, like every other
+	// mutating route; admin login specifically is only needed to persist/
+	// share credentials or change the server-wide default.
 	handle("GET /connections", a.connectionsHandler)
-	handle("POST /connections", a.requireWritable(a.addConnectionHandler))
+	handle("POST /connections", a.requireWritable(a.requireLogin(a.addConnectionHandler)))
 	handle("POST /connections/active", a.setActiveConnectionHandler)
 
 	// Admin area: gated by an admin password. With none set yet, every
@@ -113,7 +115,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	// Not requireAdmin: a private connection's owner may reindex it too —
 	// see reindexConnectionLogicHandler's own doc comment for the
 	// shared-vs-private authorization split it enforces internally.
-	handle("POST /connections/reindex-logic", a.requireWritable(a.reindexConnectionLogicHandler))
+	handle("POST /connections/reindex-logic", a.requireWritable(a.requireLogin(a.reindexConnectionLogicHandler)))
 	handle("POST /admin/logic-search/reindex-all", a.requireAdmin(a.requireWritable(a.adminReindexAllSharedLogicHandler)))
 	handle("GET /admin/setup", a.adminSetupHandler)
 	handle("POST /admin/setup/mode", a.adminSetupModeHandler)
@@ -131,7 +133,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("GET /jobs", a.requireAdmin(a.jobsHandler))
 	handle("GET /pipelines", a.requireAdmin(a.pipelinesHandler))
 	handle("GET /migrate", a.migrationHandler)
-	handle("POST /migrate", a.requireWritable(a.runMigrationHandler))
+	handle("POST /migrate", a.requireWritable(a.requireLogin(a.runMigrationHandler)))
 	handle("GET /match", a.matchHandler)
 	// Not wrapped in requireWritable: previewing candidates and exporting
 	// them as CSV are read-only and must stay available in maintenance
@@ -142,19 +144,19 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	// dropdown resubmit is read-only. Only the upload branch (creates a
 	// table) is gated, inline, inside matchTablesHandler.
 	handle("POST /match/tables", a.matchTablesHandler)
-	handle("POST /match/configs/delete", a.requireWritable(a.deleteMatchConfigHandler))
-	handle("POST /match/schedules", a.requireWritable(a.saveMatchScheduleHandler))
+	handle("POST /match/configs/delete", a.requireWritable(a.requireLogin(a.deleteMatchConfigHandler)))
+	handle("POST /match/schedules", a.requireWritable(a.requireLogin(a.saveMatchScheduleHandler)))
 	handle("GET /create-table", a.createTableFormHandler)
-	handle("POST /create-table", a.requireWritable(a.createTableHandler))
+	handle("POST /create-table", a.requireWritable(a.requireLogin(a.createTableHandler)))
 	handle("GET /import", a.importFormHandler)
-	handle("POST /import", a.requireWritable(a.importFileHandler))
+	handle("POST /import", a.requireWritable(a.requireLogin(a.importFileHandler)))
 	handle("POST /demo-data", a.requireAdmin(a.requireWritable(a.demoDataHandler)))
 	handle("POST /demo-data/remove", a.requireAdmin(a.requireWritable(a.demoDataRemoveHandler)))
 	handle("GET /export", a.exportFormHandler)
 	handle("GET /history", a.historyHandler)
 	handle("GET /guide", a.guideHandler)
 	handle("GET /about", a.aboutHandler)
-	handle("POST /drop-table/{table}", a.requireWritable(a.dropTableHandler))
+	handle("POST /drop-table/{table}", a.requireWritable(a.requireLogin(a.dropTableHandler)))
 
 	// SQL query editor.
 	handle("GET /query", a.queryEditorHandler)
@@ -182,7 +184,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /api/pipelines/delete", a.requireAdmin(a.requireWritable(a.apiDeletePipelineHandler)))
 	handle("GET /api/pipelines/export", a.requireAdmin(a.apiExportPipelineBundleHandler))
 	handle("POST /api/pipelines/import", a.requireAdmin(a.requireWritable(a.apiImportPipelineBundleHandler)))
-	handle("POST /api/import", a.requireWritable(a.apiImportHandler))
+	handle("POST /api/import", a.requireWritable(a.requireLogin(a.apiImportHandler)))
 	handle("GET /api/map/tiles/{table}/tilejson", a.apiMapTileJSONHandler)
 	handle("GET /api/map/tiles/{table}/{z}/{x}/{y}", a.apiMapTileHandler)
 	handle("POST /api/routing/{table}/route", a.apiRouteHandler)
@@ -1379,6 +1381,10 @@ func (a *App) runMatchHandler(w http.ResponseWriter, r *http.Request) {
 			a.writeMaintenanceBlocked(w, r)
 			return
 		}
+		if a.loginRequiredForWrite(r.Context()) {
+			http.Redirect(w, r, "/admin/login?next="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
+			return
+		}
 		if a.roleBlocksWrite(r.Context()) {
 			a.writeReadOnlyRoleBlocked(w, r)
 			return
@@ -1444,6 +1450,10 @@ func (a *App) runMatchHandler(w http.ResponseWriter, r *http.Request) {
 	case "save":
 		if a.currentReadOnlyMode() {
 			a.writeMaintenanceBlocked(w, r)
+			return
+		}
+		if a.loginRequiredForWrite(r.Context()) {
+			http.Redirect(w, r, "/admin/login?next="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
 			return
 		}
 		if a.roleBlocksWrite(r.Context()) {
@@ -1597,6 +1607,10 @@ func (a *App) matchTablesHandler(w http.ResponseWriter, r *http.Request) {
 	if sourceID == matchUploadSentinel || targetID == matchUploadSentinel {
 		if a.currentReadOnlyMode() {
 			a.writeMaintenanceBlocked(w, r)
+			return
+		}
+		if a.loginRequiredForWrite(r.Context()) {
+			http.Redirect(w, r, "/admin/login?next="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
 			return
 		}
 		if a.roleBlocksWrite(r.Context()) {

@@ -1242,6 +1242,87 @@ func sessionCookieForRole(app *App, username string, role Role) *http.Cookie {
 	return &http.Cookie{Name: sessionCookieName, Value: sessionID}
 }
 
+// TestAnonymousWriteRequiresLoginInAuthModeLocal locks in the fix for a real
+// gap: requireWritable alone only ever blocked maintenance mode and an
+// already-logged-in RoleReadOnly account — it was never an authentication
+// check, so in AuthModeLocal (the default for anything reachable beyond
+// localhost) a completely anonymous visitor could still create tables,
+// import files, add connections, and edit/delete records with zero
+// credentials. requireLogin (composed as
+// requireWritable(requireLogin(handler))) now requires some authenticated
+// session first.
+func TestAnonymousWriteRequiresLoginInAuthModeLocal(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	postCreateTable := func() *httptest.ResponseRecorder {
+		form := url.Values{"table_name": {"anon_test"}, "col_name": {"note"}, "col_type": {"TEXT"}}
+		req := httptest.NewRequest(http.MethodPost, "/create-table", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// No admin account configured yet: an anonymous write bounces to setup.
+	rec := postCreateTable()
+	if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "/admin/setup") {
+		t.Fatalf("expected anonymous write to redirect to /admin/setup before any account exists, got %d location=%q", rec.Code, rec.Header().Get("Location"))
+	}
+
+	adminCookie := setupAdminSession(t, mux)
+
+	// Now that an account exists, an anonymous (no cookie) write bounces to
+	// login instead, and must not have created the table.
+	rec = postCreateTable()
+	if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "/admin/login") {
+		t.Fatalf("expected anonymous write to redirect to /admin/login once an account exists, got %d location=%q", rec.Code, rec.Header().Get("Location"))
+	}
+	if _, err := app.sqlDB.Exec("SELECT 1 FROM anon_test"); err == nil {
+		t.Fatal("expected the anonymous create-table attempt to not actually create the table")
+	}
+
+	// A logged-in session (any role) succeeds.
+	form := url.Values{"table_name": {"anon_test"}, "col_name": {"note"}, "col_type": {"TEXT"}}
+	req := httptest.NewRequest(http.MethodPost, "/create-table", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(adminCookie)
+	loggedInRec := httptest.NewRecorder()
+	mux.ServeHTTP(loggedInRec, req)
+	if loggedInRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected a logged-in session to be able to create the table, got %d: %s", loggedInRec.Code, loggedInRec.Body.String())
+	}
+	if _, err := app.sqlDB.Exec("SELECT 1 FROM anon_test"); err != nil {
+		t.Fatalf("expected the table to exist after a logged-in create, got: %v", err)
+	}
+}
+
+// TestAnonymousWriteAllowedInAuthModeNone confirms AuthModeNone is
+// unaffected by the requireLogin fix: it's explicitly the loopback-only,
+// single-user mode where whoever can reach the process already has full
+// access to the machine, so no login concept should apply there at all.
+func TestAnonymousWriteAllowedInAuthModeNone(t *testing.T) {
+	app := newTestApp(t)
+	if err := app.applyRuntimeSettings(RuntimeSettings{Dialect: "tinysql", AuthMode: "none"}); err != nil {
+		t.Fatalf("apply settings: %v", err)
+	}
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+
+	form := url.Values{"table_name": {"anon_none_test"}, "col_name": {"note"}, "col_type": {"TEXT"}}
+	req := httptest.NewRequest(http.MethodPost, "/create-table", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected an anonymous write to succeed in AuthModeNone, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := app.sqlDB.Exec("SELECT 1 FROM anon_none_test"); err != nil {
+		t.Fatalf("expected the table to exist after an anonymous create in AuthModeNone, got: %v", err)
+	}
+}
+
 func TestReadOnlyRoleBlocksWritesAndNonSelectSQL(t *testing.T) {
 	app := newTestApp(t)
 	if _, err := app.sqlDB.Exec("CREATE TABLE ro_test (id INT)"); err != nil {

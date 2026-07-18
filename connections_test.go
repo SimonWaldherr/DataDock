@@ -147,6 +147,11 @@ func TestActiveConnectionIsSessionScoped(t *testing.T) {
 // must not close/replace the first session's live connection.
 func TestAddedConnectionIsPrivateToSession(t *testing.T) {
 	app := newTestApp(t)
+	// requireLogin (in front of requireWritable on POST /connections) also
+	// checks authConfigured, independent of whether a specific session is
+	// logged in; mark an admin account as configured so sessionCookieForRole
+	// sessions below aren't redirected to /admin/setup instead.
+	app.adminPasswordHash = "test-hash-not-a-real-bcrypt-value"
 	mux := http.NewServeMux()
 	app.registerRoutes(mux)
 
@@ -172,8 +177,8 @@ func TestAddedConnectionIsPrivateToSession(t *testing.T) {
 		return cookies[0]
 	}
 
-	sessionA := addConnection(nil)
-	sessionB := addConnection(nil)
+	sessionA := sessionCookieForRole(app, "user-a", RoleUser)
+	sessionB := sessionCookieForRole(app, "user-b", RoleUser)
 	if sessionA.Value == sessionB.Value {
 		t.Fatalf("expected two distinct sessions")
 	}
@@ -263,15 +268,16 @@ func TestSetDefaultConnectionRequiresAdminAndSharedConnection(t *testing.T) {
 	app.registerRoutes(mux)
 
 	// A non-admin session adds its own private connection.
+	userCookie := sessionCookieForRole(app, "someone", RoleUser)
 	addRec := httptest.NewRecorder()
 	addReq := httptest.NewRequest(http.MethodPost, "/connections", strings.NewReader(
 		url.Values{"id": {"mydb"}, "name": {"mydb"}, "kind": {"sqlite"}, "dsn": {":memory:"}}.Encode()))
 	addReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addReq.AddCookie(userCookie)
 	mux.ServeHTTP(addRec, addReq)
 	if addRec.Code != http.StatusSeeOther {
 		t.Fatalf("expected add-connection redirect, got %d: %s", addRec.Code, addRec.Body.String())
 	}
-	userCookie := addRec.Result().Cookies()[0]
 
 	// The old unprivileged form field must no longer have any effect: a
 	// plain "Use" request with set_default=1 should not change the global
@@ -286,16 +292,17 @@ func TestSetDefaultConnectionRequiresAdminAndSharedConnection(t *testing.T) {
 		t.Fatalf("expected default to remain %q after unprivileged request, got %q", defaultConnectionID, got)
 	}
 
-	// A request to the admin-only route without an admin session must be
-	// rejected, and must not change the default either.
+	// A request to the admin-only route from a logged-in-but-non-admin
+	// session must be rejected (403, since it's authenticated just with
+	// insufficient privilege), and must not change the default either.
 	adminRouteNoAuthRec := httptest.NewRecorder()
 	adminRouteNoAuthReq := httptest.NewRequest(http.MethodPost, "/admin/connections/default", strings.NewReader(
 		url.Values{"id": {"mydb"}}.Encode()))
 	adminRouteNoAuthReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	adminRouteNoAuthReq.AddCookie(userCookie)
 	mux.ServeHTTP(adminRouteNoAuthRec, adminRouteNoAuthReq)
-	if loc := adminRouteNoAuthRec.Header().Get("Location"); !strings.Contains(loc, "/admin/login") {
-		t.Fatalf("expected non-admin session to be redirected to admin login, got %q (code %d)", loc, adminRouteNoAuthRec.Code)
+	if adminRouteNoAuthRec.Code != http.StatusForbidden {
+		t.Fatalf("expected non-admin session to be forbidden from the admin-only route, got %d: %s", adminRouteNoAuthRec.Code, adminRouteNoAuthRec.Body.String())
 	}
 	if got := app.conns.DefaultID(); got != defaultConnectionID {
 		t.Fatalf("expected default to remain %q after non-admin admin-route request, got %q", defaultConnectionID, got)

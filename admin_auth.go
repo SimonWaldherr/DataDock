@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -167,6 +168,33 @@ func (a *App) requireRole(allowed ...Role) func(http.HandlerFunc) http.HandlerFu
 			next(w, r)
 		}
 	}
+}
+
+// requireLogin is requireRole with every role allowed: it exists purely to
+// require *some* authenticated session (any role) rather than gating on a
+// specific one. Composed with requireWritable — e.g.
+// a.requireLogin(a.requireWritable(handler)) — on every mutating route that
+// isn't already requireAdmin-gated: requireWritable by itself only blocks
+// maintenance mode and RoleReadOnly, it was never an authentication check,
+// so in AuthModeLocal (the default for anything reachable beyond
+// localhost) an anonymous visitor could still reach every one of those
+// routes with zero credentials. AuthModeNone is unaffected, matching its
+// existing "whoever can reach the process already has full access to the
+// machine" model.
+func (a *App) requireLogin(next http.HandlerFunc) http.HandlerFunc {
+	return a.requireRole(RoleAdmin, RoleUser, RoleReadOnly)(next)
+}
+
+// loginRequiredForWrite is requireLogin's inline-branch equivalent, for the
+// handful of routes that gate a write inline instead of at the route table
+// (POST /match's save/save_config branches, and /match/tables' upload
+// branch) rather than via a handler-wrapping middleware.
+func (a *App) loginRequiredForWrite(ctx context.Context) bool {
+	if a.currentAuthMode() == AuthModeNone {
+		return false
+	}
+	_, _, ok := a.currentSessionUser(sessionIDFromContext(ctx))
+	return !ok
 }
 
 // requireAdmin is the common case of requireRole: only RoleAdmin may pass.

@@ -323,6 +323,11 @@ func TestReindexConnectionLogicHandlerAuthorization(t *testing.T) {
 
 	const alice = "alice-session-000001"
 	const bob = "bob-session-0000001"
+	// /connections/reindex-logic now requires being logged in as some role
+	// (any authenticated session), on top of the owner-vs-shared check this
+	// test exercises below.
+	app.markSessionAuthenticated(alice, "alice", RoleUser)
+	app.markSessionAuthenticated(bob, "bob", RoleUser)
 
 	privateConn, err := OpenManagedConnectionVerbose(context.Background(), "alice-private-db", "test", "sqlite", ":memory:", nil)
 	if err != nil {
