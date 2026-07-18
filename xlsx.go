@@ -11,6 +11,7 @@ import (
 	"encoding/csv"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -284,9 +285,19 @@ func xlsxToCSV(data []byte) ([]byte, error) {
 	return xlsxRowsToCSV(append([][]string{header}, allRows...), nil)
 }
 
+// maxXLSXEntryBytes bounds a single worksheet/shared-strings zip entry's
+// decompressed size. DEFLATE can expand roughly 1000:1, so without this a
+// small, maximally-compressible entry inside an otherwise ordinary-sized
+// .xlsx file can decode to many gigabytes of XML before a single row is
+// read.
+const maxXLSXEntryBytes = 128 << 20 // 128 MiB
+
 func readXLSXSheetRows(sheet *zip.File, shared []string) ([][]string, error) {
 	if sheet == nil {
 		return nil, fmt.Errorf("worksheet not found")
+	}
+	if sheet.UncompressedSize64 > maxXLSXEntryBytes {
+		return nil, fmt.Errorf("worksheet %q exceeds the %d byte decompressed-size limit", sheet.Name, int64(maxXLSXEntryBytes))
 	}
 	rc, err := sheet.Open()
 	if err != nil {
@@ -294,7 +305,7 @@ func readXLSXSheetRows(sheet *zip.File, shared []string) ([][]string, error) {
 	}
 	defer rc.Close()
 	var ws xlsxWorksheet
-	if err := xml.NewDecoder(rc).Decode(&ws); err != nil {
+	if err := xml.NewDecoder(io.LimitReader(rc, maxXLSXEntryBytes+1)).Decode(&ws); err != nil {
 		return nil, err
 	}
 	var rows [][]string
@@ -353,13 +364,16 @@ func readXLSXSharedStrings(f *zip.File) ([]string, error) {
 	if f == nil {
 		return nil, nil
 	}
+	if f.UncompressedSize64 > maxXLSXEntryBytes {
+		return nil, fmt.Errorf("sharedStrings.xml exceeds the %d byte decompressed-size limit", int64(maxXLSXEntryBytes))
+	}
 	rc, err := f.Open()
 	if err != nil {
 		return nil, err
 	}
 	defer rc.Close()
 	var ss xlsxSharedStrings
-	if err := xml.NewDecoder(rc).Decode(&ss); err != nil {
+	if err := xml.NewDecoder(io.LimitReader(rc, maxXLSXEntryBytes+1)).Decode(&ss); err != nil {
 		return nil, err
 	}
 	out := make([]string, 0, len(ss.Items))

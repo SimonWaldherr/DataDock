@@ -320,6 +320,14 @@ func pmtilesVarint(data []byte, pos *int) (uint64, error) {
 	}
 }
 
+// maxPMTilesDecompressedBytes bounds any single PMTiles directory or tile
+// payload's decompressed size. Without it, a small compressed payload can
+// expand to gigabytes in memory before anything else in the read path
+// checks its size — the compressed archive itself is already bounded by
+// the upload/import size limit, but that says nothing about how much a
+// single entry inside it can expand to.
+const maxPMTilesDecompressedBytes = 64 << 20 // 64 MiB
+
 func pmtilesDecompress(data []byte, compression byte) ([]byte, error) {
 	switch compression {
 	case 1: // none
@@ -329,25 +337,39 @@ func pmtilesDecompress(data []byte, compression byte) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		decompressed, err := io.ReadAll(reader)
+		decompressed, err := readAllLimited(reader, maxPMTilesDecompressedBytes)
 		closeErr := reader.Close()
 		if err != nil {
 			return nil, err
 		}
 		return decompressed, closeErr
 	case 3: // brotli
-		return io.ReadAll(brotli.NewReader(bytes.NewReader(data)))
+		return readAllLimited(brotli.NewReader(bytes.NewReader(data)), maxPMTilesDecompressedBytes)
 	case 4: // zstd
 		reader, err := zstd.NewReader(bytes.NewReader(data))
 		if err != nil {
 			return nil, err
 		}
-		decompressed, err := io.ReadAll(reader)
+		decompressed, err := readAllLimited(reader, maxPMTilesDecompressedBytes)
 		reader.Close()
 		return decompressed, err
 	default:
 		return nil, fmt.Errorf("unsupported PMTiles compression %d", compression)
 	}
+}
+
+// readAllLimited reads r fully, erroring if it exceeds limit bytes instead
+// of silently truncating — the caller needs to know the data was rejected,
+// not process a truncated prefix of it as if it were complete.
+func readAllLimited(r io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("decompressed data exceeds the %d byte limit", limit)
+	}
+	return data, nil
 }
 
 func pmtilesCompressionName(compression byte) string {

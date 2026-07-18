@@ -646,8 +646,14 @@ func pbfBlobData(blobBody []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer zr.Close()
-	return io.ReadAll(zr)
+	// The OSM PBF spec's own convention bounds an uncompressed blob to
+	// ~32MB; without enforcing that here, a small crafted blob inside an
+	// otherwise-ordinary-looking .osm.pbf file can expand to gigabytes
+	// before any node/way is parsed.
+	return readAllLimited(zr, maxOSMPBFBlobBytes)
 }
+
+const maxOSMPBFBlobBytes = 32 << 20 // 32 MiB, matching the OSM PBF spec's own blob-size convention
 
 func readPBFPrimitiveBlock(data []byte, doc *osmDoc) error {
 	fields := parseProtoFields(data)
@@ -786,6 +792,17 @@ func pbfCoord(raw, granularity, offset int64) float64 {
 	return float64(offset+granularity*raw) / 1e9
 }
 
+const (
+	// maxShapefileRecords bounds the number of features read from a single
+	// shapefile, and maxShapefileRecordBytes bounds their cumulative
+	// in-memory size — go-shp decompresses its own zip entries with no
+	// size limit of its own, so a maximally-compressible attribute or
+	// geometry stream could otherwise expand well past what the upload
+	// size cap implies before ImportShapefileZip ever returns.
+	maxShapefileRecords     = 2_000_000
+	maxShapefileRecordBytes = 512 << 20 // 512 MiB
+)
+
 func ImportShapefileZip(ctx context.Context, db *tinysql.DB, tenant, tableName string, src io.Reader, opts *ImportOptions) (*ImportResult, error) {
 	data, err := io.ReadAll(src)
 	if err != nil {
@@ -827,7 +844,11 @@ func ImportShapefileZip(ctx context.Context, db *tinysql.DB, tenant, tableName s
 	}
 	header := append([]string{"geometry", "geometry_type", "shape_id", "shape_type"}, attrNames...)
 	records := [][]string{header}
+	var recordBytes int
 	for reader.Next() {
+		if len(records) > maxShapefileRecords {
+			return nil, fmt.Errorf("shapefile contains more than %d records, exceeding the import limit", maxShapefileRecords)
+		}
 		idx, shape := reader.Shape()
 		geom := geoJSONFromShape(shape)
 		geometryText := ""
@@ -841,6 +862,16 @@ func ImportShapefileZip(ctx context.Context, db *tinysql.DB, tenant, tableName s
 		row := []string{geometryText, geometryType, strconv.Itoa(idx), shapeTypeName(shape)}
 		for i := range attrNames {
 			row = append(row, strings.TrimRight(reader.Attribute(i), "\x00 "))
+		}
+		for _, cell := range row {
+			recordBytes += len(cell)
+		}
+		// A maximally-compressible attribute or geometry stream can still
+		// expand well past what the 256MB zip upload cap implies once
+		// decompressed and accumulated in records; bound the cumulative
+		// size actually held in memory too, not just the row count.
+		if recordBytes > maxShapefileRecordBytes {
+			return nil, fmt.Errorf("shapefile records exceed the %d byte import limit", maxShapefileRecordBytes)
 		}
 		records = append(records, row)
 	}

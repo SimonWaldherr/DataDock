@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -213,6 +212,12 @@ func (a *App) sampleMapTilePayload(ctx context.Context, layer mapTileLayer) ([]b
 	return decompressMapTilePayload(payload, layer.TileCompression)
 }
 
+// maxDecompressedTileBytes bounds a single tile's decompressed size. This
+// path runs on every tile request the map viewer makes, not just at import
+// time, so a small stored payload that decompresses to gigabytes would be
+// a repeatable per-request resource exhaustion, not a one-time import cost.
+const maxDecompressedTileBytes = 64 << 20 // 64 MiB
+
 func decompressMapTilePayload(payload []byte, compression string) ([]byte, error) {
 	switch strings.ToLower(strings.TrimSpace(compression)) {
 	case "", "none":
@@ -222,20 +227,20 @@ func decompressMapTilePayload(payload []byte, compression string) ([]byte, error
 		if err != nil {
 			return nil, err
 		}
-		decoded, err := io.ReadAll(reader)
+		decoded, err := readLimitedImport(reader, maxDecompressedTileBytes)
 		closeErr := reader.Close()
 		if err != nil {
 			return nil, err
 		}
 		return decoded, closeErr
 	case "br":
-		return io.ReadAll(brotli.NewReader(bytes.NewReader(payload)))
+		return readLimitedImport(brotli.NewReader(bytes.NewReader(payload)), maxDecompressedTileBytes)
 	case "zstd":
 		reader, err := zstd.NewReader(bytes.NewReader(payload))
 		if err != nil {
 			return nil, err
 		}
-		decoded, err := io.ReadAll(reader)
+		decoded, err := readLimitedImport(reader, maxDecompressedTileBytes)
 		reader.Close()
 		return decoded, err
 	default:
