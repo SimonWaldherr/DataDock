@@ -1761,6 +1761,9 @@ const matchUploadSentinel = "__upload__"
 // import tab) and resolves to (default connection, that table), exactly as
 // if the user had picked it from the dropdown to begin with.
 func (a *App) matchTablesHandler(w http.ResponseWriter, r *http.Request) {
+	// See importFileHandler's identical comment: ParseMultipartForm's
+	// maxMemory argument alone does not cap the request body size.
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<20+1)
 	if err := r.ParseMultipartForm(16 << 20); err != nil {
 		data := a.matchPageData(r, r.Form.Get("source_id"), r.Form.Get("target_id"), "", "")
 		data["Error"] = "Could not read upload: " + err.Error()
@@ -2218,6 +2221,14 @@ func (a *App) importFileHandler(w http.ResponseWriter, r *http.Request) {
 		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "File import currently targets the local tinySQL DB only."})
 		return
 	}
+	// ParseMultipartForm's own maxMemory argument only bounds how much file
+	// data it holds in memory before spilling to a temp file — it does not
+	// cap the request body itself, so without MaxBytesReader a client can
+	// still make the server spool an arbitrarily large body to disk before
+	// any size check below ever runs. maxMapImportUploadBytes is the
+	// largest limit any format accepted here can have; importUploadedFile
+	// still enforces the tighter per-format limit afterward.
+	r.Body = http.MaxBytesReader(w, r.Body, maxMapImportUploadBytes+1)
 	if err := r.ParseMultipartForm(maxImportUploadBytes); err != nil {
 		a.render(w, r, "manage_table", map[string]interface{}{"ActiveTab": "import", "Error": "Could not read upload: " + err.Error()})
 		return
