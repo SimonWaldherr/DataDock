@@ -12,7 +12,7 @@ SHELL       := bash
 # ignores it. Multi-line shell logic must be continued explicitly or moved into
 # scripts/make-menu.sh.
 
-.PHONY: all build build-check run run-memory test vet staticcheck vulncheck check ci fmt format fmt-check format-check menu tui help findport clean
+.PHONY: all build build-check run run-memory test vet staticcheck vulncheck check ci fmt format fmt-check format-check menu tui help findport clean dist docker
 
 GO     ?= go
 NPM    ?= npm
@@ -47,7 +47,9 @@ help:
 	@echo "  make menu         interactive launcher (default when running plain 'make')"
 	@echo "  make run          start the server   [DB=..] [TENANT=..] [PORT=..|ADDR=host:port]"
 	@echo "  make run-memory   start the server with an in-memory database"
-	@echo "  make build        build ./$(APP)"
+	@echo "  make build        build ./$(APP) (version-stamped)"
+	@echo "  make dist         cross-compile release binaries into dist/"
+	@echo "  make docker       build the container image ($(APP):$(VERSION))"
 	@echo "  make build-check  compile every Go package without writing a binary"
 	@echo "  make test         run the Go test suite"
 	@echo "  make vet          run go vet"
@@ -128,7 +130,31 @@ fmt-check format-check:
 
 clean:
 	@rm -f $(BIN)
-	echo "==> removed $(BIN)"
+	@rm -rf $(DIST_DIR)
+	echo "==> removed $(BIN) and $(DIST_DIR)"
+
+# Cross-compile release binaries into dist/. Pure Go (CGO disabled) so no C
+# toolchain is needed for any target. goreleaser does this in CI (see
+# .goreleaser.yaml); this target is for local/manual dist builds.
+DIST_DIR     ?= dist
+DIST_TARGETS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
+
+dist:
+	@echo "==> cross-building $(APP) $(VERSION) -> $(DIST_DIR)/"
+	@rm -rf $(DIST_DIR)
+	@for target in $(DIST_TARGETS); do \
+		os=$${target%/*}; arch=$${target#*/}; ext=""; \
+		if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
+		out="$(DIST_DIR)/$(APP)_$${os}_$${arch}$$ext"; \
+		echo "  $$out"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags "$(GO_LDFLAGS)" -o "$$out" . || exit 1; \
+	done
+	@echo "==> done ($(DIST_DIR)/)"
+
+# Build the container image, tagged with VERSION and latest.
+docker:
+	@echo "==> docker build $(APP):$(VERSION)"
+	docker build --build-arg VERSION=$(VERSION) -t $(APP):$(VERSION) -t $(APP):latest .
 
 findport:
 	@$(GO) run . -find-free-port
