@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"os"
@@ -53,6 +55,22 @@ func (a *AuditLogger) Enabled() bool {
 	return a != nil && a.out != nil
 }
 
+// auditSessionRef turns a raw session ID (which IS the live cookie value) into
+// a stable, non-reversible short reference. Logging the raw token would make
+// the audit file a store of hijackable live credentials: anyone who could read
+// the log (or a shipping pipeline it feeds) could replay a valid session until
+// its TTL expired. A SHA-256 prefix preserves cross-line correlation without
+// being usable as a cookie. A blank session stays blank so the field is
+// omitted for anonymous events.
+func auditSessionRef(sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(sessionID))
+	return "sha256:" + hex.EncodeToString(sum[:])[:16]
+}
+
 func (a *AuditLogger) Close() error {
 	if a == nil || a.f == nil {
 		return nil
@@ -68,6 +86,7 @@ func (a *AuditLogger) Log(event AuditEvent) {
 		return
 	}
 	event.Time = time.Now().UTC().Format(time.RFC3339Nano)
+	event.Session = auditSessionRef(event.Session)
 	event.Path = redactURL(event.Path)
 	event.Detail = redactInlineSecrets(event.Detail)
 	b, err := json.Marshal(event)

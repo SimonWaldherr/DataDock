@@ -36,8 +36,9 @@ type App struct {
 	conns             *ConnectionManager
 	connectTimeout    time.Duration
 	queryTimeout      time.Duration
-	readOnlyMode      bool
-	pageSize          int
+	readOnlyMode         bool
+	requireLoginForReads bool
+	pageSize             int
 	matchMaxRows      int
 	defaultTheme      string
 	defaultDensity    string

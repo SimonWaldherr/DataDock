@@ -49,10 +49,11 @@ type RuntimeSettings struct {
 	EmbeddingBaseURL  string
 	EmbeddingAPIKey   string
 	EmbeddingModel    string
-	VectorIndex       string
-	VectorWarm        bool
-	ReadOnlyMode      bool
-	PageSize          int
+	VectorIndex          string
+	VectorWarm           bool
+	ReadOnlyMode         bool
+	RequireLoginForReads bool
+	PageSize             int
 	MatchMaxRows      int
 	DefaultTheme      string
 	DefaultDensity    string
@@ -79,6 +80,7 @@ type RuntimeSettingsView struct {
 	VectorIndex            string `json:"vector_index"`
 	VectorWarm             bool   `json:"vector_warm"`
 	ReadOnlyMode           bool   `json:"read_only_mode"`
+	RequireLoginForReads   bool   `json:"require_login_for_reads"`
 	PageSize               int    `json:"page_size"`
 	MatchMaxRows           int    `json:"match_max_rows"`
 	DefaultTheme           string `json:"default_theme"`
@@ -222,6 +224,7 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 	a.vectorIndex = vectorIndex
 	a.vectorWarm = s.VectorWarm
 	a.readOnlyMode = s.ReadOnlyMode
+	a.requireLoginForReads = s.RequireLoginForReads
 	a.pageSize = s.PageSize
 	a.matchMaxRows = s.MatchMaxRows
 	a.defaultTheme = s.DefaultTheme
@@ -250,8 +253,9 @@ func (a *App) saveRuntimeSettings(ctx context.Context) error {
 		"embedding_model":     s.EmbeddingModel,
 		"vector_index":        s.VectorIndex,
 		"vector_warm":         strconv.FormatBool(s.VectorWarm),
-		"read_only_mode":      strconv.FormatBool(s.ReadOnlyMode),
-		"page_size":           strconv.Itoa(s.PageSize),
+		"read_only_mode":           strconv.FormatBool(s.ReadOnlyMode),
+		"require_login_for_reads":  strconv.FormatBool(s.RequireLoginForReads),
+		"page_size":                strconv.Itoa(s.PageSize),
 		"match_max_rows":      strconv.Itoa(s.MatchMaxRows),
 		"default_theme":       s.DefaultTheme,
 		"default_density":     s.DefaultDensity,
@@ -424,10 +428,11 @@ func (a *App) currentRuntimeSettings() RuntimeSettings {
 		EmbeddingBaseURL:  a.embeddingConfig.BaseURL,
 		EmbeddingAPIKey:   a.embeddingConfig.APIKey,
 		EmbeddingModel:    a.embeddingConfig.Model,
-		VectorIndex:       a.vectorIndex,
-		VectorWarm:        a.vectorWarm,
-		ReadOnlyMode:      a.readOnlyMode,
-		PageSize:          a.pageSize,
+		VectorIndex:          a.vectorIndex,
+		VectorWarm:           a.vectorWarm,
+		ReadOnlyMode:         a.readOnlyMode,
+		RequireLoginForReads: a.requireLoginForReads,
+		PageSize:             a.pageSize,
 		MatchMaxRows:      a.matchMaxRows,
 		DefaultTheme:      a.defaultTheme,
 		DefaultDensity:    a.defaultDensity,
@@ -458,6 +463,7 @@ func (a *App) runtimeSettingsView() RuntimeSettingsView {
 		VectorIndex:            a.vectorIndex,
 		VectorWarm:             a.vectorWarm,
 		ReadOnlyMode:           a.readOnlyMode,
+		RequireLoginForReads:   a.requireLoginForReads,
 		PageSize:               a.pageSize,
 		MatchMaxRows:           a.matchMaxRows,
 		DefaultTheme:           a.defaultTheme,
@@ -488,6 +494,17 @@ func (a *App) currentReadOnlyMode() bool {
 	a.settingsMu.RLock()
 	defer a.settingsMu.RUnlock()
 	return a.readOnlyMode
+}
+
+// currentRequireLoginForReads reports the admin toggle that, when on, requires
+// an authenticated session to read data (browse tables, run SELECT, export,
+// inspect the schema/catalog) in addition to the always-on write gate. Off by
+// default, preserving the historical "reads are open in AuthModeLocal, only
+// writes require login" behavior. It has no effect in AuthModeNone.
+func (a *App) currentRequireLoginForReads() bool {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	return a.requireLoginForReads
 }
 
 func (a *App) currentPageSize() int {
@@ -627,6 +644,7 @@ func runtimeSettingsFromStoredValues(values map[string]string) (RuntimeSettings,
 		}
 	}
 	readOnlyMode, _ := strconv.ParseBool(values["read_only_mode"])
+	requireLoginForReads, _ := strconv.ParseBool(values["require_login_for_reads"])
 	defaultTheme := strings.TrimSpace(values["default_theme"])
 	if defaultTheme == "" {
 		defaultTheme = defaultUITheme
@@ -652,10 +670,11 @@ func runtimeSettingsFromStoredValues(values map[string]string) (RuntimeSettings,
 		EmbeddingBaseURL:  values["embedding_base_url"],
 		EmbeddingAPIKey:   values["embedding_api_key"],
 		EmbeddingModel:    values["embedding_model"],
-		VectorIndex:       values["vector_index"],
-		VectorWarm:        strings.EqualFold(values["vector_warm"], "true"),
-		ReadOnlyMode:      readOnlyMode,
-		PageSize:          pageSize,
+		VectorIndex:          values["vector_index"],
+		VectorWarm:           strings.EqualFold(values["vector_warm"], "true"),
+		ReadOnlyMode:         readOnlyMode,
+		RequireLoginForReads: requireLoginForReads,
+		PageSize:             pageSize,
 		MatchMaxRows:      matchMaxRows,
 		DefaultTheme:      defaultTheme,
 		DefaultDensity:    defaultDensity,
