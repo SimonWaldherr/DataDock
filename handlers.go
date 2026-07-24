@@ -3189,6 +3189,7 @@ func (a *App) adminStatus(ctx context.Context) map[string]any {
 	usersConfigured, _ := a.usersConfigured(ctx)
 	status := map[string]any{
 		"ok":                    health.OK,
+		"version":               resolveVersion(),
 		"tenant":                a.tenant,
 		"storage_mode":          health.ModeName,
 		"path":                  health.Path,

@@ -34,6 +34,42 @@ const (
 	autoPortRangeHigh = 8100
 )
 
+// version is stamped at build/release time via -ldflags "-X main.version=...".
+// A plain `go build`/`go run` leaves it as "dev"; resolveVersion then falls
+// back to the module version or the embedded VCS revision so even an unstamped
+// build reports something identifiable (needed for release verification and
+// bug reports — see /version and the admin status endpoint).
+var version = "dev"
+
+func resolveVersion() string {
+	if v := strings.TrimSpace(version); v != "" && v != "dev" {
+		return v
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v := strings.TrimSpace(info.Main.Version); v != "" && v != "(devel)" {
+			return v
+		}
+		var rev, dirty string
+		for _, s := range info.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				rev = s.Value
+			case "vcs.modified":
+				if s.Value == "true" {
+					dirty = "-dirty"
+				}
+			}
+		}
+		if rev != "" {
+			if len(rev) > 12 {
+				rev = rev[:12]
+			}
+			return "dev+" + rev + dirty
+		}
+	}
+	return "dev"
+}
+
 func main() {
 	addr := flag.String("addr", "", "HTTP listen address (host:port); when set, takes precedence over -port and any stored port setting")
 	port := flag.Int("port", 0, fmt.Sprintf("HTTP listen port; 0 = use the stored setting or auto-detect a free port between %d and %d", autoPortRangeLow, autoPortRangeHigh))
@@ -271,6 +307,10 @@ func main() {
 	// for process supervisors (systemd, Docker, Kubernetes) must stay cheap
 	// and must not depend on anything that could itself be degraded.
 	mux.HandleFunc("GET /healthz", healthzHandler)
+	// Unauthenticated build-identity endpoint, kept alongside /healthz and out
+	// of registerRoutes for the same reasons: monitoring needs to detect
+	// version drift across instances and bug reports need the running build.
+	mux.HandleFunc("GET /version", versionHandler)
 	app.registerRoutes(mux)
 	mux.Handle("GET /static/", cacheableStaticHandler(http.FileServer(http.FS(webFS))))
 
@@ -280,7 +320,7 @@ func main() {
 	// panic becomes a clean 500 the access log can still see, instead of
 	// net/http's default behavior of just aborting the connection.
 	handler := loggingMiddleware(recoverMiddleware(securityHeaders(app.csrfProtectedHandler(mux))))
-	log.Printf("DataDock listening on %s  (db: %s, tenant: %s, dialect: %s, auth-mode: %s)", listenAddr, dbLabel(*dbFile), *tenant, app.currentDialect().Name, effectiveAuthMode)
+	log.Printf("DataDock %s listening on %s  (db: %s, tenant: %s, dialect: %s, auth-mode: %s)", resolveVersion(), listenAddr, dbLabel(*dbFile), *tenant, app.currentDialect().Name, effectiveAuthMode)
 	srv := &http.Server{
 		Addr:    listenAddr,
 		Handler: handler,
@@ -344,6 +384,12 @@ func healthzHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+func versionHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"version":` + strconv.Quote(resolveVersion()) + `}`))
 }
 
 // statusRecorder wraps a ResponseWriter to capture the status code that was

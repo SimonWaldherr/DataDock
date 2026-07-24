@@ -25,6 +25,12 @@ ADDR   ?=
 GOEXE = $(shell $(GO) env GOEXE)
 BIN   = $(APP)$(GOEXE)
 
+# VERSION is stamped into the binary via -ldflags so `datadock` and /version
+# report an identifiable build. Defaults to `git describe` (nearest tag +
+# commit + dirty flag); override with `make build VERSION=1.2.3`.
+VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GO_LDFLAGS ?= -X main.version=$(VERSION)
+
 RUN_ARGS := -db $(DB) -tenant $(TENANT)
 ifneq ($(strip $(ADDR)),)
 RUN_ARGS += -addr $(ADDR)
@@ -58,8 +64,8 @@ help:
 	@echo "port saved in DataDock's settings or the auto-detected free port."
 
 build:
-	@echo "==> building $(BIN)"
-	$(GO) build -o $(BIN) .
+	@echo "==> building $(BIN) ($(VERSION))"
+	$(GO) build -ldflags "$(GO_LDFLAGS)" -o $(BIN) .
 
 build-check:
 	@echo "==> checking package builds"
