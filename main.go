@@ -74,6 +74,7 @@ func main() {
 	addr := flag.String("addr", "", "HTTP listen address (host:port); when set, takes precedence over -port and any stored port setting")
 	port := flag.Int("port", 0, fmt.Sprintf("HTTP listen port; 0 = use the stored setting or auto-detect a free port between %d and %d", autoPortRangeLow, autoPortRangeHigh))
 	findFreePortFlag := flag.Bool("find-free-port", false, fmt.Sprintf("print a free TCP port between %d and %d and exit (tooling helper)", autoPortRangeLow, autoPortRangeHigh))
+	healthcheckFlag := flag.Bool("healthcheck", false, "probe this server's /healthz on the -addr/-port loopback address and exit 0 (healthy) or 1; lets a container HEALTHCHECK work without shipping wget/curl")
 	dbFile := flag.String("db", "datadock.db", "Database file path (empty or :memory: for in-memory)")
 	storageMode := flag.String("storage-mode", envDefault("DATADOCK_STORAGE_MODE", "memory"), "tinySQL storage mode: memory, disk, json, hybrid, index, or paged_index (encryption is supported only by disk/json/hybrid/index)")
 	storageReadOnly := flag.Bool("storage-read-only", envBoolDefault("DATADOCK_STORAGE_READ_ONLY", false), "Open the configured tinySQL storage artifact read-only for serving")
@@ -102,6 +103,10 @@ func main() {
 		}
 		fmt.Println(p)
 		return
+	}
+
+	if *healthcheckFlag {
+		os.Exit(runHealthcheck(*addr, *port))
 	}
 
 	verbose := NewVerboseLogger(*verboseMode)
@@ -390,6 +395,39 @@ func versionHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"version":` + strconv.Quote(resolveVersion()) + `}`))
+}
+
+// runHealthcheck GETs /healthz on the loopback address derived from the same
+// -addr/-port flags the server binds, returning a process exit code (0 healthy,
+// 1 unhealthy). It exists so a container HEALTHCHECK / compose healthcheck can
+// probe the server by invoking the binary itself — no shell, wget, or curl
+// needed, which is what makes a scratch/distroless image possible.
+func runHealthcheck(addr string, port int) int {
+	p := ""
+	if a := strings.TrimSpace(addr); a != "" {
+		if _, hostPort, err := net.SplitHostPort(a); err == nil && hostPort != "" {
+			p = hostPort
+		}
+	}
+	if p == "" && port > 0 {
+		p = strconv.Itoa(port)
+	}
+	if p == "" {
+		p = "8080"
+	}
+	url := "http://127.0.0.1:" + p + "/healthz"
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "healthcheck: %s returned status %d\n", url, resp.StatusCode)
+		return 1
+	}
+	return 0
 }
 
 // statusRecorder wraps a ResponseWriter to capture the status code that was

@@ -1,0 +1,36 @@
+# Caddy reverse proxy for DataDock with automatic HTTPS.
+#
+#   caddy run --config deploy/Caddyfile
+#
+# Caddy provisions and renews a real TLS certificate for the domain and
+# forwards to DataDock on loopback. Run DataDock with -behind-tls-proxy so the
+# session cookie is marked Secure.
+datadock.example.com {
+	encode zstd gzip
+
+	# Uploads (imports) are bounded to 16 MiB by DataDock itself; allow a
+	# little headroom at the proxy.
+	request_body {
+		max_size 20MB
+	}
+
+	reverse_proxy 127.0.0.1:8080 {
+		health_uri /healthz
+		health_interval 30s
+	}
+}
+
+# --- nginx equivalent (for reference) --------------------------------------
+# server {
+#     listen 443 ssl http2;
+#     server_name datadock.example.com;
+#     ssl_certificate     /etc/letsencrypt/live/datadock.example.com/fullchain.pem;
+#     ssl_certificate_key /etc/letsencrypt/live/datadock.example.com/privkey.pem;
+#     client_max_body_size 20m;
+#     location / {
+#         proxy_pass http://127.0.0.1:8080;
+#         proxy_set_header Host              $host;
+#         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#     }
+# }

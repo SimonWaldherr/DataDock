@@ -207,6 +207,34 @@ make test
 Open your browser at the address printed by the server, commonly
 **http://localhost:8080** when using `-addr :8080`.
 
+## Deployment
+
+DataDock ships as a single self-contained binary (templates and static assets
+are embedded) with a pure-Go, CGO-free dependency set, so it cross-compiles and
+containerizes trivially. Its own listener speaks plain HTTP — terminate TLS at a
+reverse proxy for anything beyond `localhost` and run DataDock with
+`-behind-tls-proxy`.
+
+```bash
+# Container (distroless/static, non-root, built-in healthcheck):
+docker build -t datadock:latest .
+docker run -d -p 127.0.0.1:8080:8080 -v datadock-data:/data datadock:latest
+
+# Or with Compose:
+docker compose -f deploy/docker-compose.yml up -d --build
+```
+
+Ready-to-adapt recipes live in [`deploy/`](deploy/): a multi-stage
+[`Dockerfile`](Dockerfile), [`docker-compose.yml`](deploy/docker-compose.yml), a
+hardened [`datadock.service`](deploy/datadock.service) systemd unit, and a
+[`Caddyfile`](deploy/Caddyfile) (with an nginx equivalent) for automatic HTTPS.
+See [`deploy/README.md`](deploy/README.md) for the full walkthrough, including
+encrypting stored secrets at rest.
+
+Operational endpoints: `GET /healthz` (liveness), `GET /version` (build
+identity), and `datadock -healthcheck` (exits non-zero when `/healthz` is
+unreachable — used by the container `HEALTHCHECK` with no shell required).
+
 ## Command-line flags
 
 | Flag | Default | Description |
