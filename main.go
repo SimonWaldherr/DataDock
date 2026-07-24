@@ -82,6 +82,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("open database: %v", err)
 	}
+	trimmedDBPath := strings.TrimSpace(*dbFile)
+	inMemoryOnly := trimmedDBPath == "" || strings.EqualFold(trimmedDBPath, ":memory:")
+	if inMemoryOnly {
+		// No -db file: data, users, and settings live only in RAM and are
+		// gone on exit. Easy to miss because the server otherwise behaves
+		// identically to a persistent one, so say it plainly at startup.
+		log.Printf("WARNING: running in-memory only (-db %q); all data, users, and settings are LOST when the process exits. Pass -db <file> to persist, or take an Admin snapshot before shutting down.", *dbFile)
+	}
 	if len(encryptionKey) == 0 {
 		if mode, err := tinysql.ParseStorageMode(*storageMode); err == nil {
 			switch mode {
@@ -92,6 +100,16 @@ func main() {
 				// plaintext, indistinguishable in the logs from an
 				// encrypted setup unless this is called out explicitly.
 				log.Printf("WARNING: storage mode %q writes to disk without DATADOCK_ENCRYPTION_KEY set; settings and stored connection credentials are stored in plaintext", *storageMode)
+			case tinysql.ModeMemory:
+				// The DEFAULT mode. With a -db path, memory mode still writes a
+				// plaintext GOB snapshot to that file on shutdown, carrying
+				// settings, managed-connection DSNs, and LLM/embedding API keys
+				// in the clear — the same exposure as disk mode, but the case
+				// the disk-mode warning above never covered. Silent for the
+				// truly in-memory case (nothing is written).
+				if !inMemoryOnly {
+					log.Printf("WARNING: DataDock saves %q as a plaintext snapshot on shutdown; stored connection credentials and LLM/embedding API keys are written in the clear (no DATADOCK_ENCRYPTION_KEY set). Restrict OS access to this file, or use -storage-mode=disk with DATADOCK_ENCRYPTION_KEY to encrypt at rest.", trimmedDBPath)
+				}
 			}
 		}
 	}

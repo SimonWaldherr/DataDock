@@ -46,20 +46,20 @@ type RuntimeSettings struct {
 	// same OpenAI-compatible provider commonly serves both. EmbeddingModel
 	// has no such fallback — a chat model is never a valid embedding model —
 	// so logic search stays "not configured" until one is set explicitly.
-	EmbeddingBaseURL  string
-	EmbeddingAPIKey   string
-	EmbeddingModel    string
+	EmbeddingBaseURL     string
+	EmbeddingAPIKey      string
+	EmbeddingModel       string
 	VectorIndex          string
 	VectorWarm           bool
 	ReadOnlyMode         bool
 	RequireLoginForReads bool
 	PageSize             int
-	MatchMaxRows      int
-	DefaultTheme      string
-	DefaultDensity    string
-	Port              int
-	AdminPasswordHash string
-	AuthMode          string
+	MatchMaxRows         int
+	DefaultTheme         string
+	DefaultDensity       string
+	Port                 int
+	AdminPasswordHash    string
+	AuthMode             string
 }
 
 type RuntimeSettingsView struct {
@@ -241,27 +241,27 @@ func (a *App) saveRuntimeSettings(ctx context.Context) error {
 	}
 	s := a.currentRuntimeSettings()
 	values := map[string]string{
-		"dialect":             s.Dialect,
-		"connect_timeout":     s.ConnectTimeout.String(),
-		"query_timeout":       s.QueryTimeout.String(),
-		"llm_base_url":        s.LLMBaseURL,
-		"llm_api_key":         s.LLMAPIKey,
-		"llm_model":           s.LLMModel,
-		"llm_timeout":         s.LLMTimeout.String(),
-		"embedding_base_url":  s.EmbeddingBaseURL,
-		"embedding_api_key":   s.EmbeddingAPIKey,
-		"embedding_model":     s.EmbeddingModel,
-		"vector_index":        s.VectorIndex,
-		"vector_warm":         strconv.FormatBool(s.VectorWarm),
-		"read_only_mode":           strconv.FormatBool(s.ReadOnlyMode),
-		"require_login_for_reads":  strconv.FormatBool(s.RequireLoginForReads),
-		"page_size":                strconv.Itoa(s.PageSize),
-		"match_max_rows":      strconv.Itoa(s.MatchMaxRows),
-		"default_theme":       s.DefaultTheme,
-		"default_density":     s.DefaultDensity,
-		"port":                strconv.Itoa(s.Port),
-		"admin_password_hash": s.AdminPasswordHash,
-		"auth_mode":           s.AuthMode,
+		"dialect":                 s.Dialect,
+		"connect_timeout":         s.ConnectTimeout.String(),
+		"query_timeout":           s.QueryTimeout.String(),
+		"llm_base_url":            s.LLMBaseURL,
+		"llm_api_key":             s.LLMAPIKey,
+		"llm_model":               s.LLMModel,
+		"llm_timeout":             s.LLMTimeout.String(),
+		"embedding_base_url":      s.EmbeddingBaseURL,
+		"embedding_api_key":       s.EmbeddingAPIKey,
+		"embedding_model":         s.EmbeddingModel,
+		"vector_index":            s.VectorIndex,
+		"vector_warm":             strconv.FormatBool(s.VectorWarm),
+		"read_only_mode":          strconv.FormatBool(s.ReadOnlyMode),
+		"require_login_for_reads": strconv.FormatBool(s.RequireLoginForReads),
+		"page_size":               strconv.Itoa(s.PageSize),
+		"match_max_rows":          strconv.Itoa(s.MatchMaxRows),
+		"default_theme":           s.DefaultTheme,
+		"default_density":         s.DefaultDensity,
+		"port":                    strconv.Itoa(s.Port),
+		"admin_password_hash":     s.AdminPasswordHash,
+		"auth_mode":               s.AuthMode,
 	}
 	for key, value := range values {
 		if err := a.saveSetting(ctx, key, value); err != nil {
@@ -418,27 +418,27 @@ func (a *App) currentRuntimeSettings() RuntimeSettings {
 	a.settingsMu.RLock()
 	defer a.settingsMu.RUnlock()
 	return RuntimeSettings{
-		Dialect:           a.dialect.Name,
-		ConnectTimeout:    a.connectTimeout,
-		QueryTimeout:      a.queryTimeout,
-		LLMBaseURL:        a.llmConfig.BaseURL,
-		LLMAPIKey:         a.llmConfig.APIKey,
-		LLMModel:          a.llmConfig.Model,
-		LLMTimeout:        a.llmConfig.Timeout,
-		EmbeddingBaseURL:  a.embeddingConfig.BaseURL,
-		EmbeddingAPIKey:   a.embeddingConfig.APIKey,
-		EmbeddingModel:    a.embeddingConfig.Model,
+		Dialect:              a.dialect.Name,
+		ConnectTimeout:       a.connectTimeout,
+		QueryTimeout:         a.queryTimeout,
+		LLMBaseURL:           a.llmConfig.BaseURL,
+		LLMAPIKey:            a.llmConfig.APIKey,
+		LLMModel:             a.llmConfig.Model,
+		LLMTimeout:           a.llmConfig.Timeout,
+		EmbeddingBaseURL:     a.embeddingConfig.BaseURL,
+		EmbeddingAPIKey:      a.embeddingConfig.APIKey,
+		EmbeddingModel:       a.embeddingConfig.Model,
 		VectorIndex:          a.vectorIndex,
 		VectorWarm:           a.vectorWarm,
 		ReadOnlyMode:         a.readOnlyMode,
 		RequireLoginForReads: a.requireLoginForReads,
 		PageSize:             a.pageSize,
-		MatchMaxRows:      a.matchMaxRows,
-		DefaultTheme:      a.defaultTheme,
-		DefaultDensity:    a.defaultDensity,
-		Port:              a.port,
-		AdminPasswordHash: a.adminPasswordHash,
-		AuthMode:          string(a.authMode),
+		MatchMaxRows:         a.matchMaxRows,
+		DefaultTheme:         a.defaultTheme,
+		DefaultDensity:       a.defaultDensity,
+		Port:                 a.port,
+		AdminPasswordHash:    a.adminPasswordHash,
+		AuthMode:             string(a.authMode),
 	}
 }
 
@@ -660,27 +660,27 @@ func runtimeSettingsFromStoredValues(values map[string]string) (RuntimeSettings,
 		}
 	}
 	return RuntimeSettings{
-		Dialect:           values["dialect"],
-		ConnectTimeout:    connectTimeout,
-		QueryTimeout:      queryTimeout,
-		LLMBaseURL:        values["llm_base_url"],
-		LLMAPIKey:         values["llm_api_key"],
-		LLMModel:          values["llm_model"],
-		LLMTimeout:        llmTimeout,
-		EmbeddingBaseURL:  values["embedding_base_url"],
-		EmbeddingAPIKey:   values["embedding_api_key"],
-		EmbeddingModel:    values["embedding_model"],
+		Dialect:              values["dialect"],
+		ConnectTimeout:       connectTimeout,
+		QueryTimeout:         queryTimeout,
+		LLMBaseURL:           values["llm_base_url"],
+		LLMAPIKey:            values["llm_api_key"],
+		LLMModel:             values["llm_model"],
+		LLMTimeout:           llmTimeout,
+		EmbeddingBaseURL:     values["embedding_base_url"],
+		EmbeddingAPIKey:      values["embedding_api_key"],
+		EmbeddingModel:       values["embedding_model"],
 		VectorIndex:          values["vector_index"],
 		VectorWarm:           strings.EqualFold(values["vector_warm"], "true"),
 		ReadOnlyMode:         readOnlyMode,
 		RequireLoginForReads: requireLoginForReads,
 		PageSize:             pageSize,
-		MatchMaxRows:      matchMaxRows,
-		DefaultTheme:      defaultTheme,
-		DefaultDensity:    defaultDensity,
-		Port:              port,
-		AdminPasswordHash: values["admin_password_hash"],
-		AuthMode:          values["auth_mode"],
+		MatchMaxRows:         matchMaxRows,
+		DefaultTheme:         defaultTheme,
+		DefaultDensity:       defaultDensity,
+		Port:                 port,
+		AdminPasswordHash:    values["admin_password_hash"],
+		AuthMode:             values["auth_mode"],
 	}, nil
 }
 

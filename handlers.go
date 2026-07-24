@@ -3060,11 +3060,11 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusOK, a.runtimeSettingsView())
 	case http.MethodPost:
 		var body struct {
-			Dialect        string `json:"dialect"`
-			ConnectTimeout string `json:"connect_timeout"`
-			QueryTimeout   string `json:"query_timeout"`
-			LLMBaseURL     string `json:"llm_base_url"`
-			LLMAPIKey      string `json:"llm_api_key"`
+			Dialect              string `json:"dialect"`
+			ConnectTimeout       string `json:"connect_timeout"`
+			QueryTimeout         string `json:"query_timeout"`
+			LLMBaseURL           string `json:"llm_base_url"`
+			LLMAPIKey            string `json:"llm_api_key"`
 			LLMModel             string `json:"llm_model"`
 			LLMTimeout           string `json:"llm_timeout"`
 			ReadOnlyMode         bool   `json:"read_only_mode"`
@@ -3086,19 +3086,19 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			matchMaxRows = strconv.Itoa(body.MatchMaxRows)
 		}
 		settings, err := runtimeSettingsFromInput(runtimeSettingsInput{
-			Dialect:        body.Dialect,
-			ConnectTimeout: body.ConnectTimeout,
-			QueryTimeout:   body.QueryTimeout,
-			LLMBaseURL:     body.LLMBaseURL,
-			LLMAPIKey:      body.LLMAPIKey,
-			LLMModel:       body.LLMModel,
-			LLMTimeout:     body.LLMTimeout,
+			Dialect:              body.Dialect,
+			ConnectTimeout:       body.ConnectTimeout,
+			QueryTimeout:         body.QueryTimeout,
+			LLMBaseURL:           body.LLMBaseURL,
+			LLMAPIKey:            body.LLMAPIKey,
+			LLMModel:             body.LLMModel,
+			LLMTimeout:           body.LLMTimeout,
 			ReadOnlyMode:         body.ReadOnlyMode,
 			RequireLoginForReads: boolDefault(body.RequireLoginForReads, a.currentRequireLoginForReads()),
-			PageSize:       pageSize,
-			MatchMaxRows:   matchMaxRows,
-			DefaultTheme:   body.DefaultTheme,
-			DefaultDensity: body.DefaultDensity,
+			PageSize:             pageSize,
+			MatchMaxRows:         matchMaxRows,
+			DefaultTheme:         body.DefaultTheme,
+			DefaultDensity:       body.DefaultDensity,
 		})
 		if err == nil && strings.TrimSpace(body.LLMAPIKey) == "" {
 			// An empty key means "leave it alone", not "clear it" — matches
@@ -3807,16 +3807,16 @@ func boolDefault(v *bool, fallback bool) bool {
 // either the Admin HTML form or the JSON admin settings API, so both paths
 // share one parsing/validation implementation.
 type runtimeSettingsInput struct {
-	Dialect          string
-	ConnectTimeout   string
-	QueryTimeout     string
-	LLMBaseURL       string
-	LLMAPIKey        string
-	LLMModel         string
-	LLMTimeout       string
-	EmbeddingBaseURL string
-	EmbeddingAPIKey  string
-	EmbeddingModel   string
+	Dialect              string
+	ConnectTimeout       string
+	QueryTimeout         string
+	LLMBaseURL           string
+	LLMAPIKey            string
+	LLMModel             string
+	LLMTimeout           string
+	EmbeddingBaseURL     string
+	EmbeddingAPIKey      string
+	EmbeddingModel       string
 	VectorIndex          string
 	VectorWarm           bool
 	ReadOnlyMode         bool
@@ -3829,24 +3829,24 @@ type runtimeSettingsInput struct {
 
 func runtimeSettingsFromForm(r *http.Request) (RuntimeSettings, error) {
 	return runtimeSettingsFromInput(runtimeSettingsInput{
-		Dialect:          r.Form.Get("dialect"),
-		ConnectTimeout:   r.Form.Get("connect_timeout"),
-		QueryTimeout:     r.Form.Get("query_timeout"),
-		LLMBaseURL:       r.Form.Get("llm_base_url"),
-		LLMAPIKey:        r.Form.Get("llm_api_key"),
-		LLMModel:         r.Form.Get("llm_model"),
-		LLMTimeout:       r.Form.Get("llm_timeout"),
-		EmbeddingBaseURL: r.Form.Get("embedding_base_url"),
-		EmbeddingAPIKey:  r.Form.Get("embedding_api_key"),
-		EmbeddingModel:   r.Form.Get("embedding_model"),
+		Dialect:              r.Form.Get("dialect"),
+		ConnectTimeout:       r.Form.Get("connect_timeout"),
+		QueryTimeout:         r.Form.Get("query_timeout"),
+		LLMBaseURL:           r.Form.Get("llm_base_url"),
+		LLMAPIKey:            r.Form.Get("llm_api_key"),
+		LLMModel:             r.Form.Get("llm_model"),
+		LLMTimeout:           r.Form.Get("llm_timeout"),
+		EmbeddingBaseURL:     r.Form.Get("embedding_base_url"),
+		EmbeddingAPIKey:      r.Form.Get("embedding_api_key"),
+		EmbeddingModel:       r.Form.Get("embedding_model"),
 		VectorIndex:          r.Form.Get("vector_index"),
 		VectorWarm:           r.Form.Get("vector_warm") != "",
 		ReadOnlyMode:         r.Form.Get("read_only_mode") != "",
 		RequireLoginForReads: r.Form.Get("require_login_for_reads") != "",
 		PageSize:             r.Form.Get("page_size"),
-		MatchMaxRows:     r.Form.Get("match_max_rows"),
-		DefaultTheme:     r.Form.Get("default_theme"),
-		DefaultDensity:   r.Form.Get("default_density"),
+		MatchMaxRows:         r.Form.Get("match_max_rows"),
+		DefaultTheme:         r.Form.Get("default_theme"),
+		DefaultDensity:       r.Form.Get("default_density"),
 	})
 }
 
@@ -3880,24 +3880,24 @@ func runtimeSettingsFromInput(in runtimeSettingsInput) (RuntimeSettings, error) 
 		matchMaxRows = n
 	}
 	return RuntimeSettings{
-		Dialect:          in.Dialect,
-		ConnectTimeout:   connect,
-		QueryTimeout:     query,
-		LLMBaseURL:       in.LLMBaseURL,
-		LLMAPIKey:        in.LLMAPIKey,
-		LLMModel:         in.LLMModel,
-		LLMTimeout:       llm,
-		EmbeddingBaseURL: in.EmbeddingBaseURL,
-		EmbeddingAPIKey:  in.EmbeddingAPIKey,
-		EmbeddingModel:   in.EmbeddingModel,
+		Dialect:              in.Dialect,
+		ConnectTimeout:       connect,
+		QueryTimeout:         query,
+		LLMBaseURL:           in.LLMBaseURL,
+		LLMAPIKey:            in.LLMAPIKey,
+		LLMModel:             in.LLMModel,
+		LLMTimeout:           llm,
+		EmbeddingBaseURL:     in.EmbeddingBaseURL,
+		EmbeddingAPIKey:      in.EmbeddingAPIKey,
+		EmbeddingModel:       in.EmbeddingModel,
 		VectorIndex:          in.VectorIndex,
 		VectorWarm:           in.VectorWarm,
 		ReadOnlyMode:         in.ReadOnlyMode,
 		RequireLoginForReads: in.RequireLoginForReads,
 		PageSize:             pageSize,
-		MatchMaxRows:     matchMaxRows,
-		DefaultTheme:     in.DefaultTheme,
-		DefaultDensity:   in.DefaultDensity,
+		MatchMaxRows:         matchMaxRows,
+		DefaultTheme:         in.DefaultTheme,
+		DefaultDensity:       in.DefaultDensity,
 	}, nil
 }
 

@@ -162,6 +162,12 @@
         <div class="form-text">Per side, per Matching run. Raise for large master-data tables.</div>
       </div>
 
+      <div class="col-12 admin-section-title mt-2">Security &amp; Access</div>
+      <div class="col-12">
+        <label class="form-check small mb-1"><input class="form-check-input" type="checkbox" name="require_login_for_reads" {{if .Settings.RequireLoginForReads}}checked{{end}}> Require login to read data</label>
+        <div class="form-text">When off (default), anyone who can reach DataDock may browse tables, run <code>SELECT</code>, and export; only writes need an account. When on, every data, schema, and catalog view requires a signed-in account of any role. No effect in single-user no-login mode.</div>
+      </div>
+
       <div class="col-12 admin-section-title mt-2">Appearance</div>
       <div class="col-md-3">
         <label class="form-label small text-muted">Default Theme</label>
