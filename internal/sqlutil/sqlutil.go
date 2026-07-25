@@ -272,7 +272,7 @@ func containsStatementSeparator(query string) bool {
 // pair up with the following quote as a doubled-quote escape — otherwise
 // the scanner can close the string later than Postgres actually does and
 // hide a real statement separator behind what looks like still-quoted
-// text (e.g. `E'\''; DROP TABLE x; --'` reads as one harmless string
+// text (e.g. `E'\”; DROP TABLE x; --'` reads as one harmless string
 // without this check, when Postgres itself treats the DROP as a second,
 // executable statement).
 func isEPrefixedString(query string, quoteIdx int) bool {
