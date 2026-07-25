@@ -34,10 +34,47 @@ const (
 	autoPortRangeHigh = 8100
 )
 
+// version is stamped at build/release time via -ldflags "-X main.version=...".
+// A plain `go build`/`go run` leaves it as "dev"; resolveVersion then falls
+// back to the module version or the embedded VCS revision so even an unstamped
+// build reports something identifiable (needed for release verification and
+// bug reports — see /version and the admin status endpoint).
+var version = "dev"
+
+func resolveVersion() string {
+	if v := strings.TrimSpace(version); v != "" && v != "dev" {
+		return v
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v := strings.TrimSpace(info.Main.Version); v != "" && v != "(devel)" {
+			return v
+		}
+		var rev, dirty string
+		for _, s := range info.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				rev = s.Value
+			case "vcs.modified":
+				if s.Value == "true" {
+					dirty = "-dirty"
+				}
+			}
+		}
+		if rev != "" {
+			if len(rev) > 12 {
+				rev = rev[:12]
+			}
+			return "dev+" + rev + dirty
+		}
+	}
+	return "dev"
+}
+
 func main() {
 	addr := flag.String("addr", "", "HTTP listen address (host:port); when set, takes precedence over -port and any stored port setting")
 	port := flag.Int("port", 0, fmt.Sprintf("HTTP listen port; 0 = use the stored setting or auto-detect a free port between %d and %d", autoPortRangeLow, autoPortRangeHigh))
 	findFreePortFlag := flag.Bool("find-free-port", false, fmt.Sprintf("print a free TCP port between %d and %d and exit (tooling helper)", autoPortRangeLow, autoPortRangeHigh))
+	healthcheckFlag := flag.Bool("healthcheck", false, "probe this server's /healthz on the -addr/-port loopback address and exit 0 (healthy) or 1; lets a container HEALTHCHECK work without shipping wget/curl")
 	dbFile := flag.String("db", "datadock.db", "Database file path (empty or :memory: for in-memory)")
 	storageMode := flag.String("storage-mode", envDefault("DATADOCK_STORAGE_MODE", "memory"), "tinySQL storage mode: memory, disk, json, hybrid, index, or paged_index (encryption is supported only by disk/json/hybrid/index)")
 	storageReadOnly := flag.Bool("storage-read-only", envBoolDefault("DATADOCK_STORAGE_READ_ONLY", false), "Open the configured tinySQL storage artifact read-only for serving")
@@ -68,6 +105,10 @@ func main() {
 		return
 	}
 
+	if *healthcheckFlag {
+		os.Exit(runHealthcheck(*addr, *port))
+	}
+
 	verbose := NewVerboseLogger(*verboseMode)
 	if verbose.Enabled() {
 		verbose.Log(VerboseEvent{System: "datadock", Operation: "verbose_enabled", Target: "stdout", Preview: "redacted communication logging enabled"})
@@ -82,6 +123,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("open database: %v", err)
 	}
+	trimmedDBPath := strings.TrimSpace(*dbFile)
+	inMemoryOnly := trimmedDBPath == "" || strings.EqualFold(trimmedDBPath, ":memory:")
+	if inMemoryOnly {
+		// No -db file: data, users, and settings live only in RAM and are
+		// gone on exit. Easy to miss because the server otherwise behaves
+		// identically to a persistent one, so say it plainly at startup.
+		log.Printf("WARNING: running in-memory only (-db %q); all data, users, and settings are LOST when the process exits. Pass -db <file> to persist, or take an Admin snapshot before shutting down.", *dbFile)
+	}
 	if len(encryptionKey) == 0 {
 		if mode, err := tinysql.ParseStorageMode(*storageMode); err == nil {
 			switch mode {
@@ -92,6 +141,16 @@ func main() {
 				// plaintext, indistinguishable in the logs from an
 				// encrypted setup unless this is called out explicitly.
 				log.Printf("WARNING: storage mode %q writes to disk without DATADOCK_ENCRYPTION_KEY set; settings and stored connection credentials are stored in plaintext", *storageMode)
+			case tinysql.ModeMemory:
+				// The DEFAULT mode. With a -db path, memory mode still writes a
+				// plaintext GOB snapshot to that file on shutdown, carrying
+				// settings, managed-connection DSNs, and LLM/embedding API keys
+				// in the clear — the same exposure as disk mode, but the case
+				// the disk-mode warning above never covered. Silent for the
+				// truly in-memory case (nothing is written).
+				if !inMemoryOnly {
+					log.Printf("WARNING: DataDock saves %q as a plaintext snapshot on shutdown; stored connection credentials and LLM/embedding API keys are written in the clear (no DATADOCK_ENCRYPTION_KEY set). Restrict OS access to this file, or use -storage-mode=disk with DATADOCK_ENCRYPTION_KEY to encrypt at rest.", trimmedDBPath)
+				}
 			}
 		}
 	}
@@ -253,6 +312,10 @@ func main() {
 	// for process supervisors (systemd, Docker, Kubernetes) must stay cheap
 	// and must not depend on anything that could itself be degraded.
 	mux.HandleFunc("GET /healthz", healthzHandler)
+	// Unauthenticated build-identity endpoint, kept alongside /healthz and out
+	// of registerRoutes for the same reasons: monitoring needs to detect
+	// version drift across instances and bug reports need the running build.
+	mux.HandleFunc("GET /version", versionHandler)
 	app.registerRoutes(mux)
 	mux.Handle("GET /static/", cacheableStaticHandler(http.FileServer(http.FS(webFS))))
 
@@ -262,7 +325,7 @@ func main() {
 	// panic becomes a clean 500 the access log can still see, instead of
 	// net/http's default behavior of just aborting the connection.
 	handler := loggingMiddleware(recoverMiddleware(securityHeaders(app.csrfProtectedHandler(mux))))
-	log.Printf("DataDock listening on %s  (db: %s, tenant: %s, dialect: %s, auth-mode: %s)", listenAddr, dbLabel(*dbFile), *tenant, app.currentDialect().Name, effectiveAuthMode)
+	log.Printf("DataDock %s listening on %s  (db: %s, tenant: %s, dialect: %s, auth-mode: %s)", resolveVersion(), listenAddr, dbLabel(*dbFile), *tenant, app.currentDialect().Name, effectiveAuthMode)
 	srv := &http.Server{
 		Addr:    listenAddr,
 		Handler: handler,
@@ -326,6 +389,45 @@ func healthzHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+func versionHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"version":` + strconv.Quote(resolveVersion()) + `}`))
+}
+
+// runHealthcheck GETs /healthz on the loopback address derived from the same
+// -addr/-port flags the server binds, returning a process exit code (0 healthy,
+// 1 unhealthy). It exists so a container HEALTHCHECK / compose healthcheck can
+// probe the server by invoking the binary itself — no shell, wget, or curl
+// needed, which is what makes a scratch/distroless image possible.
+func runHealthcheck(addr string, port int) int {
+	p := ""
+	if a := strings.TrimSpace(addr); a != "" {
+		if _, hostPort, err := net.SplitHostPort(a); err == nil && hostPort != "" {
+			p = hostPort
+		}
+	}
+	if p == "" && port > 0 {
+		p = strconv.Itoa(port)
+	}
+	if p == "" {
+		p = "8080"
+	}
+	url := "http://127.0.0.1:" + p + "/healthz"
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "healthcheck: %s returned status %d\n", url, resp.StatusCode)
+		return 1
+	}
+	return 0
 }
 
 // statusRecorder wraps a ResponseWriter to capture the status code that was

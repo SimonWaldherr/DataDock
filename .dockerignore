@@ -1,0 +1,22 @@
+# Keep the build context small and free of local/runtime artifacts. Go source,
+# templates/, and static/ (both go:embed'd) are intentionally NOT excluded.
+.git
+.github
+.gitignore
+Dockerfile
+.dockerignore
+deploy
+docs
+*.md
+LICENSE
+
+# Local data / build artifacts / editor cruft
+*.db
+*.gob
+*.bak
+datadock
+datadock.exe
+*.log
+node_modules
+external
+scratchpad

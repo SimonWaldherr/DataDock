@@ -214,6 +214,25 @@ func (a *App) requireLogin(next http.HandlerFunc) http.HandlerFunc {
 	return a.requireRole(RoleAdmin, RoleUser, RoleReadOnly)(next)
 }
 
+// requireReadAuth optionally gates a data-read route behind a login, driven by
+// the runtime require_login_for_reads admin toggle. When the toggle is off (the
+// default) it is a no-op and reads stay open, preserving DataDock's historical
+// "reads open, only writes require login" model in AuthModeLocal. When on it
+// behaves exactly like requireLogin — which itself passes through in
+// AuthModeNone and handles the not-configured / not-logged-in redirects — so
+// any authenticated role may read but an anonymous visitor cannot. Both
+// branches are precomputed so there is no per-request allocation.
+func (a *App) requireReadAuth(next http.HandlerFunc) http.HandlerFunc {
+	gated := a.requireLogin(next)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if a.currentRequireLoginForReads() {
+			gated(w, r)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // loginRequiredForWrite is requireLogin's inline-branch equivalent, for the
 // handful of routes that gate a write inline instead of at the route table
 // (POST /match's save/save_config branches, and /match/tables' upload

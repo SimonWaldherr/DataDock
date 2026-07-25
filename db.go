@@ -20,32 +20,33 @@ import (
 
 // App holds the shared application state.
 type App struct {
-	nativeDB          *tinysql.DB
-	sqlDB             *sql.DB
-	tenant            string
-	tpl               *template.Template
-	settingsMu        sync.RWMutex
-	llm               LLMClient
-	llmConfig         LLMConfig
-	embeddingClient   EmbeddingClient
-	embeddingConfig   EmbeddingConfig
-	vectorIndex       string
-	vectorWarm        bool
-	auditLog          bool
-	dialect           DialectProfile
-	conns             *ConnectionManager
-	connectTimeout    time.Duration
-	queryTimeout      time.Duration
-	readOnlyMode      bool
-	pageSize          int
-	matchMaxRows      int
-	defaultTheme      string
-	defaultDensity    string
-	port              int
-	adminPasswordHash string
-	verbose           *VerboseLogger
-	audit             *AuditLogger
-	authMode          AuthMode
+	nativeDB             *tinysql.DB
+	sqlDB                *sql.DB
+	tenant               string
+	tpl                  *template.Template
+	settingsMu           sync.RWMutex
+	llm                  LLMClient
+	llmConfig            LLMConfig
+	embeddingClient      EmbeddingClient
+	embeddingConfig      EmbeddingConfig
+	vectorIndex          string
+	vectorWarm           bool
+	auditLog             bool
+	dialect              DialectProfile
+	conns                *ConnectionManager
+	connectTimeout       time.Duration
+	queryTimeout         time.Duration
+	readOnlyMode         bool
+	requireLoginForReads bool
+	pageSize             int
+	matchMaxRows         int
+	defaultTheme         string
+	defaultDensity       string
+	port                 int
+	adminPasswordHash    string
+	verbose              *VerboseLogger
+	audit                *AuditLogger
+	authMode             AuthMode
 
 	// listenAddr and allowInsecureRemote are set once at startup (see
 	// main.go) and read-only afterward: they record where the HTTP server

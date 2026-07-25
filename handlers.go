@@ -65,23 +65,31 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle := func(pattern string, handler http.HandlerFunc) {
 		mux.HandleFunc(pattern, a.withSession(handler))
 	}
+	// readGuarded is handle plus requireReadAuth: the route additionally
+	// requires a login when the require_login_for_reads admin toggle is on
+	// (no-op when off). Applied to every route that exposes data, schema, or
+	// catalog content so an operator can lock the whole read surface behind
+	// authentication with one switch.
+	readGuarded := func(pattern string, handler http.HandlerFunc) {
+		handle(pattern, a.requireReadAuth(handler))
+	}
 
 	mux.HandleFunc("GET /static/style.css", styleCSSHandler)
 
-	handle("GET /", a.indexHandler)
+	readGuarded("GET /", a.indexHandler)
 
 	// Table datasheet view.
-	handle("GET /t/{table}", a.tableViewHandler)
-	handle("GET /t/{table}/map", a.mapLayerViewHandler)
-	handle("GET /t/{table}/route", a.routingViewHandler)
-	handle("GET /t/{table}/quality", a.spatialQualityViewHandler)
-	handle("GET /t/{table}/export", a.exportTableHandler)
-	handle("GET /api/tables/{table}/script", a.apiTableScriptHandler)
+	readGuarded("GET /t/{table}", a.tableViewHandler)
+	readGuarded("GET /t/{table}/map", a.mapLayerViewHandler)
+	readGuarded("GET /t/{table}/route", a.routingViewHandler)
+	readGuarded("GET /t/{table}/quality", a.spatialQualityViewHandler)
+	readGuarded("GET /t/{table}/export", a.exportTableHandler)
+	readGuarded("GET /api/tables/{table}/script", a.apiTableScriptHandler)
 
 	// Read-only stored procedure/function definition view (catalog tree
 	// "Procedures"/"Functions" folders link here instead of /t/{table},
 	// since a routine has no rows to browse).
-	handle("GET /r/{routine}", a.routineViewHandler)
+	readGuarded("GET /r/{routine}", a.routineViewHandler)
 
 	// Record CRUD.
 	handle("GET /t/{table}/new", a.newRecordFormHandler)
@@ -153,26 +161,29 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /import", a.requireWritable(a.requireLogin(a.importFileHandler)))
 	handle("POST /demo-data", a.requireAdmin(a.requireWritable(a.demoDataHandler)))
 	handle("POST /demo-data/remove", a.requireAdmin(a.requireWritable(a.demoDataRemoveHandler)))
-	handle("GET /export", a.exportFormHandler)
-	handle("GET /history", a.historyHandler)
+	readGuarded("GET /export", a.exportFormHandler)
+	readGuarded("GET /history", a.historyHandler)
 	handle("GET /guide", a.guideHandler)
 	handle("GET /about", a.aboutHandler)
 	handle("POST /drop-table/{table}", a.requireWritable(a.requireLogin(a.dropTableHandler)))
 
-	// SQL query editor.
-	handle("GET /query", a.queryEditorHandler)
-	handle("POST /query", a.queryExecHandler)
+	// SQL query editor. The write path (INSERT/UPDATE/DELETE/DDL) is gated
+	// inside the handlers by writeSQLBlocked; readGuarded adds the optional
+	// login-for-reads layer on top without blocking anonymous SELECTs when the
+	// toggle is off.
+	readGuarded("GET /query", a.queryEditorHandler)
+	readGuarded("POST /query", a.queryExecHandler)
 
 	// JSON API used by the query editor for async execution.
-	handle("POST /api/query", a.apiQueryHandler)
-	handle("POST /api/export", a.apiExportHandler)
-	handle("GET /api/schema", a.apiSchemaHandler)
-	handle("GET /api/tinysql/agent-context", a.apiTinySQLAgentContextHandler)
+	readGuarded("POST /api/query", a.apiQueryHandler)
+	readGuarded("POST /api/export", a.apiExportHandler)
+	readGuarded("GET /api/schema", a.apiSchemaHandler)
+	readGuarded("GET /api/tinysql/agent-context", a.apiTinySQLAgentContextHandler)
 	handle("GET /api/tinysql/vector-cache", a.requireAdmin(a.apiTinySQLVectorCacheHandler))
 	handle("GET /api/admin/snapshot", a.requireAdmin(a.apiSnapshotExportHandler))
-	handle("GET /api/catalog", a.apiCatalogHandler)
-	handle("GET /api/catalog/expand", a.apiCatalogExpandHandler)
-	handle("POST /api/logic-search", a.apiLogicSearchHandler)
+	readGuarded("GET /api/catalog", a.apiCatalogHandler)
+	readGuarded("GET /api/catalog/expand", a.apiCatalogExpandHandler)
+	readGuarded("POST /api/logic-search", a.apiLogicSearchHandler)
 	handle("GET /api/admin/status", a.requireAdmin(a.apiAdminStatusHandler))
 	handle("GET /api/admin/settings", a.requireAdmin(a.apiAdminSettingsHandler))
 	handle("POST /api/admin/settings", a.requireAdmin(a.apiAdminSettingsHandler))
@@ -186,17 +197,17 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("GET /api/pipelines/export", a.requireAdmin(a.apiExportPipelineBundleHandler))
 	handle("POST /api/pipelines/import", a.requireAdmin(a.requireWritable(a.apiImportPipelineBundleHandler)))
 	handle("POST /api/import", a.requireWritable(a.requireLogin(a.apiImportHandler)))
-	handle("GET /api/map/tiles/{table}/tilejson", a.apiMapTileJSONHandler)
-	handle("GET /api/map/tiles/{table}/{z}/{x}/{y}", a.apiMapTileHandler)
-	handle("POST /api/routing/{table}/route", a.apiRouteHandler)
-	handle("POST /api/routing/{table}/reachable", a.apiReachableHandler)
-	handle("GET /api/spatial-reports/{table}", a.apiSpatialReportHandler)
-	handle("POST /api/llm", a.apiLLMHandler)
-	handle("POST /api/llm/preview", a.apiLLMPreviewHandler)
+	readGuarded("GET /api/map/tiles/{table}/tilejson", a.apiMapTileJSONHandler)
+	readGuarded("GET /api/map/tiles/{table}/{z}/{x}/{y}", a.apiMapTileHandler)
+	readGuarded("POST /api/routing/{table}/route", a.apiRouteHandler)
+	readGuarded("POST /api/routing/{table}/reachable", a.apiReachableHandler)
+	readGuarded("GET /api/spatial-reports/{table}", a.apiSpatialReportHandler)
+	readGuarded("POST /api/llm", a.apiLLMHandler)
+	readGuarded("POST /api/llm/preview", a.apiLLMPreviewHandler)
 	handle("GET /api/llm/discover", a.requireAdmin(a.apiLLMDiscoverHandler))
 	handle("POST /api/llm/autoconfig", a.requireAdmin(a.apiLLMAutoConfigHandler))
-	handle("GET /api/llm/health", a.apiLLMHealthHandler)
-	handle("POST /api/llm/run", a.apiLLMRunHandler)
+	handle("GET /api/llm/health", a.requireAdmin(a.apiLLMHealthHandler))
+	readGuarded("POST /api/llm/run", a.apiLLMRunHandler)
 }
 
 func styleCSSHandler(w http.ResponseWriter, r *http.Request) {
@@ -219,7 +230,21 @@ func styleCSSHandler(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data map[string]interface{}) {
 	adminAuthenticated := a.isAdminAuthenticated(sessionIDFromContext(r.Context()))
+	// When require_login_for_reads is on, an anonymous session must not see the
+	// table/catalog listing either — otherwise table and connection names would
+	// still leak through the sidebar on the pages that stay public without a
+	// login (/guide, /about). The data routes themselves are already gated by
+	// readGuarded; this closes the sidebar side-channel.
+	hideCatalog := a.currentRequireLoginForReads() && a.currentAuthMode() != AuthModeNone
+	if hideCatalog {
+		if _, _, ok := a.currentSessionUser(sessionIDFromContext(r.Context())); ok {
+			hideCatalog = false
+		}
+	}
 	objects := a.tableObjectsWithSystem(r.Context(), adminAuthenticated)
+	if hideCatalog {
+		objects = nil
+	}
 	data["Tables"] = tableObjectNames(objects)
 	data["TableObjects"] = objects
 	data["DefaultTheme"] = a.currentDefaultTheme()
@@ -238,7 +263,13 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data m
 	data["LogicIndexStatus"], data["LogicIndexRunning"] = a.logicIndexStatuses()
 	data["Users"], _ = a.listUsers(r.Context())
 	data["CurrentUsername"], _, _ = a.currentSessionUser(sessionIDFromContext(r.Context()))
-	if a.conns != nil {
+	if hideCatalog {
+		// Anonymous session with reads locked down: expose no connection
+		// listing or active connection, matching the emptied table list above.
+		data["Connections"] = nil
+		data["ActiveConnection"] = nil
+		data["CatalogAsync"] = false
+	} else if a.conns != nil {
 		sessionID := sessionIDFromContext(r.Context())
 		data["Connections"] = a.conns.ListFor(sessionID)
 		active := a.activeConn(r.Context())
@@ -2687,18 +2718,41 @@ func (a *App) roleBlocksWrite(ctx context.Context) bool {
 	return a.currentAuthMode() != AuthModeNone && ok && role == RoleReadOnly
 }
 
-// readOnlyRoleBlocksQuery reports whether sqlText should be rejected because
-// the session is authenticated with RoleReadOnly and the statement isn't
-// provably read-only. Shared by queryExecHandler and apiQueryHandler so the
-// plain HTML form and the JSON API editor enforce the identical gate — only
-// the JSON path checked this historically, letting a read-only account run
-// arbitrary writes by using the plain form instead.
-func (a *App) readOnlyRoleBlocksQuery(ctx context.Context, sqlText string) bool {
+// sessionCanWriteSQL reports whether the current session may run
+// non-result-producing (write/DDL) SQL through the editor. In AuthModeNone
+// (the loopback-only solo mode) everyone can, matching its "whoever can reach
+// the process already owns the machine" model. Otherwise the session must be
+// authenticated with a write-capable role — Admin or User; anonymous and
+// RoleReadOnly sessions cannot.
+func (a *App) sessionCanWriteSQL(ctx context.Context) bool {
+	if a.currentAuthMode() == AuthModeNone {
+		return true
+	}
 	_, role, ok := a.currentSessionUser(sessionIDFromContext(ctx))
-	return a.currentAuthMode() != AuthModeNone && ok && role == RoleReadOnly && !sqlutil.IsResultProducing(sqlText)
+	return ok && (role == RoleAdmin || role == RoleUser)
 }
 
-const readOnlyRoleQueryBlockedMessage = "your account has read-only access; only SELECT/WITH/SHOW/EXPLAIN queries are allowed"
+// writeSQLBlocked fails closed: a statement that isn't provably result-producing
+// is rejected unless the session may write (sessionCanWriteSQL). It is shared by
+// queryExecHandler and apiQueryHandler so the plain HTML form and the JSON API
+// editor enforce the identical gate.
+//
+// Its predecessor (readOnlyRoleBlocksQuery) only tripped for an *authenticated*
+// RoleReadOnly session — it required `ok && role == RoleReadOnly`, so an
+// unauthenticated visitor (ok == false) sailed straight through. Because the
+// SQL editor routes are deliberately not requireLogin-wrapped (reads stay open
+// in AuthModeLocal), that let a network attacker with zero credentials run
+// arbitrary INSERT/UPDATE/DELETE/DROP/DDL against the embedded DB and every
+// connected database. Gating on "may write" instead of "is a read-only account"
+// closes that anonymous-write hole while leaving read-only SELECTs open.
+func (a *App) writeSQLBlocked(ctx context.Context, sqlText string) bool {
+	if sqlutil.IsResultProducing(sqlText) {
+		return false
+	}
+	return !a.sessionCanWriteSQL(ctx)
+}
+
+const readOnlyRoleQueryBlockedMessage = "running writes (INSERT/UPDATE/DELETE/DDL) requires being signed in with an account that has write access; only SELECT/WITH/SHOW/EXPLAIN/DESCRIBE/PRAGMA statements are allowed otherwise"
 
 func (a *App) queryExecHandler(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
@@ -2706,7 +2760,7 @@ func (a *App) queryExecHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := strings.TrimSpace(r.Form.Get("sql"))
-	if a.readOnlyRoleBlocksQuery(r.Context(), query) {
+	if a.writeSQLBlocked(r.Context(), query) {
 		a.render(w, r, "query", map[string]interface{}{
 			"SQL":    query,
 			"Result": QueryResult{Err: readOnlyRoleQueryBlockedMessage},
@@ -2755,8 +2809,8 @@ func (a *App) apiQueryHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := sessionIDFromContext(r.Context())
 	username, _, _ := a.currentSessionUser(sessionID)
 	sqlText := strings.TrimSpace(body.SQL)
-	if a.readOnlyRoleBlocksQuery(r.Context(), sqlText) {
-		a.writeProblem(w, r, http.StatusForbidden, "Read-only role", readOnlyRoleQueryBlockedMessage)
+	if a.writeSQLBlocked(r.Context(), sqlText) {
+		a.writeProblem(w, r, http.StatusForbidden, "Write not allowed", readOnlyRoleQueryBlockedMessage)
 		return
 	}
 	result := a.executeSQLWindow(r.Context(), sqlText, offset, limit)
@@ -3006,18 +3060,19 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusOK, a.runtimeSettingsView())
 	case http.MethodPost:
 		var body struct {
-			Dialect        string `json:"dialect"`
-			ConnectTimeout string `json:"connect_timeout"`
-			QueryTimeout   string `json:"query_timeout"`
-			LLMBaseURL     string `json:"llm_base_url"`
-			LLMAPIKey      string `json:"llm_api_key"`
-			LLMModel       string `json:"llm_model"`
-			LLMTimeout     string `json:"llm_timeout"`
-			ReadOnlyMode   bool   `json:"read_only_mode"`
-			PageSize       int    `json:"page_size"`
-			MatchMaxRows   int    `json:"match_max_rows"`
-			DefaultTheme   string `json:"default_theme"`
-			DefaultDensity string `json:"default_density"`
+			Dialect              string `json:"dialect"`
+			ConnectTimeout       string `json:"connect_timeout"`
+			QueryTimeout         string `json:"query_timeout"`
+			LLMBaseURL           string `json:"llm_base_url"`
+			LLMAPIKey            string `json:"llm_api_key"`
+			LLMModel             string `json:"llm_model"`
+			LLMTimeout           string `json:"llm_timeout"`
+			ReadOnlyMode         bool   `json:"read_only_mode"`
+			RequireLoginForReads *bool  `json:"require_login_for_reads"`
+			PageSize             int    `json:"page_size"`
+			MatchMaxRows         int    `json:"match_max_rows"`
+			DefaultTheme         string `json:"default_theme"`
+			DefaultDensity       string `json:"default_density"`
 		}
 		if !a.decodeJSONBody(w, r, &body, "Request body must be valid JSON.") {
 			return
@@ -3031,18 +3086,19 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			matchMaxRows = strconv.Itoa(body.MatchMaxRows)
 		}
 		settings, err := runtimeSettingsFromInput(runtimeSettingsInput{
-			Dialect:        body.Dialect,
-			ConnectTimeout: body.ConnectTimeout,
-			QueryTimeout:   body.QueryTimeout,
-			LLMBaseURL:     body.LLMBaseURL,
-			LLMAPIKey:      body.LLMAPIKey,
-			LLMModel:       body.LLMModel,
-			LLMTimeout:     body.LLMTimeout,
-			ReadOnlyMode:   body.ReadOnlyMode,
-			PageSize:       pageSize,
-			MatchMaxRows:   matchMaxRows,
-			DefaultTheme:   body.DefaultTheme,
-			DefaultDensity: body.DefaultDensity,
+			Dialect:              body.Dialect,
+			ConnectTimeout:       body.ConnectTimeout,
+			QueryTimeout:         body.QueryTimeout,
+			LLMBaseURL:           body.LLMBaseURL,
+			LLMAPIKey:            body.LLMAPIKey,
+			LLMModel:             body.LLMModel,
+			LLMTimeout:           body.LLMTimeout,
+			ReadOnlyMode:         body.ReadOnlyMode,
+			RequireLoginForReads: boolDefault(body.RequireLoginForReads, a.currentRequireLoginForReads()),
+			PageSize:             pageSize,
+			MatchMaxRows:         matchMaxRows,
+			DefaultTheme:         body.DefaultTheme,
+			DefaultDensity:       body.DefaultDensity,
 		})
 		if err == nil && strings.TrimSpace(body.LLMAPIKey) == "" {
 			// An empty key means "leave it alone", not "clear it" — matches
@@ -3133,6 +3189,7 @@ func (a *App) adminStatus(ctx context.Context) map[string]any {
 	usersConfigured, _ := a.usersConfigured(ctx)
 	status := map[string]any{
 		"ok":                    health.OK,
+		"version":               resolveVersion(),
 		"tenant":                a.tenant,
 		"storage_mode":          health.ModeName,
 		"path":                  health.Path,
@@ -3751,44 +3808,46 @@ func boolDefault(v *bool, fallback bool) bool {
 // either the Admin HTML form or the JSON admin settings API, so both paths
 // share one parsing/validation implementation.
 type runtimeSettingsInput struct {
-	Dialect          string
-	ConnectTimeout   string
-	QueryTimeout     string
-	LLMBaseURL       string
-	LLMAPIKey        string
-	LLMModel         string
-	LLMTimeout       string
-	EmbeddingBaseURL string
-	EmbeddingAPIKey  string
-	EmbeddingModel   string
-	VectorIndex      string
-	VectorWarm       bool
-	ReadOnlyMode     bool
-	PageSize         string
-	MatchMaxRows     string
-	DefaultTheme     string
-	DefaultDensity   string
+	Dialect              string
+	ConnectTimeout       string
+	QueryTimeout         string
+	LLMBaseURL           string
+	LLMAPIKey            string
+	LLMModel             string
+	LLMTimeout           string
+	EmbeddingBaseURL     string
+	EmbeddingAPIKey      string
+	EmbeddingModel       string
+	VectorIndex          string
+	VectorWarm           bool
+	ReadOnlyMode         bool
+	RequireLoginForReads bool
+	PageSize             string
+	MatchMaxRows         string
+	DefaultTheme         string
+	DefaultDensity       string
 }
 
 func runtimeSettingsFromForm(r *http.Request) (RuntimeSettings, error) {
 	return runtimeSettingsFromInput(runtimeSettingsInput{
-		Dialect:          r.Form.Get("dialect"),
-		ConnectTimeout:   r.Form.Get("connect_timeout"),
-		QueryTimeout:     r.Form.Get("query_timeout"),
-		LLMBaseURL:       r.Form.Get("llm_base_url"),
-		LLMAPIKey:        r.Form.Get("llm_api_key"),
-		LLMModel:         r.Form.Get("llm_model"),
-		LLMTimeout:       r.Form.Get("llm_timeout"),
-		EmbeddingBaseURL: r.Form.Get("embedding_base_url"),
-		EmbeddingAPIKey:  r.Form.Get("embedding_api_key"),
-		EmbeddingModel:   r.Form.Get("embedding_model"),
-		VectorIndex:      r.Form.Get("vector_index"),
-		VectorWarm:       r.Form.Get("vector_warm") != "",
-		ReadOnlyMode:     r.Form.Get("read_only_mode") != "",
-		PageSize:         r.Form.Get("page_size"),
-		MatchMaxRows:     r.Form.Get("match_max_rows"),
-		DefaultTheme:     r.Form.Get("default_theme"),
-		DefaultDensity:   r.Form.Get("default_density"),
+		Dialect:              r.Form.Get("dialect"),
+		ConnectTimeout:       r.Form.Get("connect_timeout"),
+		QueryTimeout:         r.Form.Get("query_timeout"),
+		LLMBaseURL:           r.Form.Get("llm_base_url"),
+		LLMAPIKey:            r.Form.Get("llm_api_key"),
+		LLMModel:             r.Form.Get("llm_model"),
+		LLMTimeout:           r.Form.Get("llm_timeout"),
+		EmbeddingBaseURL:     r.Form.Get("embedding_base_url"),
+		EmbeddingAPIKey:      r.Form.Get("embedding_api_key"),
+		EmbeddingModel:       r.Form.Get("embedding_model"),
+		VectorIndex:          r.Form.Get("vector_index"),
+		VectorWarm:           r.Form.Get("vector_warm") != "",
+		ReadOnlyMode:         r.Form.Get("read_only_mode") != "",
+		RequireLoginForReads: r.Form.Get("require_login_for_reads") != "",
+		PageSize:             r.Form.Get("page_size"),
+		MatchMaxRows:         r.Form.Get("match_max_rows"),
+		DefaultTheme:         r.Form.Get("default_theme"),
+		DefaultDensity:       r.Form.Get("default_density"),
 	})
 }
 
@@ -3822,23 +3881,24 @@ func runtimeSettingsFromInput(in runtimeSettingsInput) (RuntimeSettings, error) 
 		matchMaxRows = n
 	}
 	return RuntimeSettings{
-		Dialect:          in.Dialect,
-		ConnectTimeout:   connect,
-		QueryTimeout:     query,
-		LLMBaseURL:       in.LLMBaseURL,
-		LLMAPIKey:        in.LLMAPIKey,
-		LLMModel:         in.LLMModel,
-		LLMTimeout:       llm,
-		EmbeddingBaseURL: in.EmbeddingBaseURL,
-		EmbeddingAPIKey:  in.EmbeddingAPIKey,
-		EmbeddingModel:   in.EmbeddingModel,
-		VectorIndex:      in.VectorIndex,
-		VectorWarm:       in.VectorWarm,
-		ReadOnlyMode:     in.ReadOnlyMode,
-		PageSize:         pageSize,
-		MatchMaxRows:     matchMaxRows,
-		DefaultTheme:     in.DefaultTheme,
-		DefaultDensity:   in.DefaultDensity,
+		Dialect:              in.Dialect,
+		ConnectTimeout:       connect,
+		QueryTimeout:         query,
+		LLMBaseURL:           in.LLMBaseURL,
+		LLMAPIKey:            in.LLMAPIKey,
+		LLMModel:             in.LLMModel,
+		LLMTimeout:           llm,
+		EmbeddingBaseURL:     in.EmbeddingBaseURL,
+		EmbeddingAPIKey:      in.EmbeddingAPIKey,
+		EmbeddingModel:       in.EmbeddingModel,
+		VectorIndex:          in.VectorIndex,
+		VectorWarm:           in.VectorWarm,
+		ReadOnlyMode:         in.ReadOnlyMode,
+		RequireLoginForReads: in.RequireLoginForReads,
+		PageSize:             pageSize,
+		MatchMaxRows:         matchMaxRows,
+		DefaultTheme:         in.DefaultTheme,
+		DefaultDensity:       in.DefaultDensity,
 	}, nil
 }
 

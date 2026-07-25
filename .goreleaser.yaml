@@ -1,0 +1,63 @@
+# goreleaser configuration (schema v2). Cuts cross-platform release archives
+# with checksums on a tag push; see .github/workflows/release.yml.
+#
+#   goreleaser check           # validate this file
+#   goreleaser release --clean # run on a tag (CI does this)
+version: 2
+
+project_name: datadock
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: datadock
+    main: .
+    binary: datadock
+    # Pure-Go dependency set: static, CGO-free builds for every target.
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: datadock
+    # tar.gz everywhere except Windows, which gets a zip.
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE*
+      - deploy/**/*
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  draft: false
+  prerelease: auto
