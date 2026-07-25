@@ -563,7 +563,8 @@
     }
 
     .use-case:nth-child(2n) { border-right: 0; }
-    .use-case:nth-last-child(-n + 2) { border-bottom: 0; }
+    .use-case:nth-last-child(2):nth-child(odd),
+    .use-case:last-child { border-bottom: 0; }
     .use-case:nth-child(3) { background: #ffe2c7; }
 
     .use-case h3 {
@@ -865,6 +866,7 @@
         <a href="#why">Why it fits</a>
         <a href="#workflow">Workflow</a>
         <a href="#sources">Sources</a>
+        <a href="#use-cases">Use cases</a>
         <a href="#compare">Compare</a>
         <a class="github-link" href="https://github.com/SimonWaldherr/DataDock">GitHub</a>
       </div>
@@ -1067,6 +1069,11 @@
             <p>Run a local or local-server DataDock instance for browsing, SQL, table migration, export, and shared access without requiring every user to install SSMS or a full desktop client.</p>
           </article>
           <article class="use-case">
+            <span class="eyebrow">File intake</span>
+            <h3>Give every export a SQL landing zone.</h3>
+            <p>Turn delimited files, spreadsheets, structured records, compact binary formats, calendars, contacts, database files, and map sources into local tables before you join, inspect, or hand them off.</p>
+          </article>
+          <article class="use-case">
             <span class="eyebrow">Analysis</span>
             <h3>Clean data deserves a good cockpit too.</h3>
             <p>Explore a well-modeled warehouse extract, profile columns, chart a query, open a map, and export an answer without pretending the data must first be "messy."</p>
@@ -1080,6 +1087,26 @@
             <span class="eyebrow">Reconciliation</span>
             <h3>Turn probable matches into durable links.</h3>
             <p>Compare exports or live tables across systems, review the likely matches, and retain approved pairs as crosswalks other queries can trust.</p>
+          </article>
+          <article class="use-case">
+            <span class="eyebrow">Delivery</span>
+            <h3>Move a result without another conversion step.</h3>
+            <p>Export a table or result as spreadsheet, database, web, or geographic formats, or stream a one-time table migration between registered relational connections.</p>
+          </article>
+          <article class="use-case">
+            <span class="eyebrow">Operations</span>
+            <h3>Make local work repeatable on purpose.</h3>
+            <p>Use scheduled tinySQL jobs, immutable read-only pipelines, watched local imports, and definition bundles when an answer must be repeatable and inspectable.</p>
+          </article>
+          <article class="use-case">
+            <span class="eyebrow">Assisted SQL</span>
+            <h3>Ask for a draft, keep the decision.</h3>
+            <p>Use optional AI for reviewable SQL drafts, independent reviews, result explanations, quality signals, chart specs, and next questions. Nothing runs by default.</p>
+          </article>
+          <article class="use-case">
+            <span class="eyebrow">Governed sharing</span>
+            <h3>Keep shared access explicit.</h3>
+            <p>Roles, maintenance mode, audit logging, encryption options, and Admin-protected snapshots support an intentional local-server deployment.</p>
           </article>
         </div>
       </div>
@@ -1194,6 +1221,7 @@
     <span class="footer-links">
       <a href="https://github.com/SimonWaldherr/DataDock">GitHub</a>
       <a href="https://github.com/SimonWaldherr/DataDock#features">Features</a>
+      <a href="https://github.com/SimonWaldherr/DataDock/blob/main/docs/USE_CASES.md">Use cases</a>
       <a href="https://github.com/SimonWaldherr/DataDock/blob/main/LICENSE">License</a>
     </span>
   </footer>

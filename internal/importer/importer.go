@@ -296,17 +296,17 @@ func importRecords(ctx context.Context, db *tinysql.DB, tenant, tableName string
 	for i, kind := range columnKinds {
 		res.ColumnTypes[i] = tinysqlType(kind)
 	}
-	if opts.Truncate {
-		if _, err := exec(ctx, db, tenant, "DELETE FROM "+quoteIdent(tableName)); err != nil {
-			return nil, err
-		}
-	}
 	if opts.CreateTable {
 		defs := make([]string, len(columns))
 		for i, col := range columns {
 			defs[i] = quoteIdent(col) + " " + sqlType(columnKinds[i])
 		}
 		if _, err := exec(ctx, db, tenant, "CREATE TABLE "+quoteIdent(tableName)+" ("+strings.Join(defs, ", ")+")"); err != nil && !strings.Contains(strings.ToLower(err.Error()), "already exists") {
+			return nil, err
+		}
+	}
+	if opts.Truncate {
+		if _, err := exec(ctx, db, tenant, "DELETE FROM "+quoteIdent(tableName)); err != nil {
 			return nil, err
 		}
 	}

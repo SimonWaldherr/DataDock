@@ -19,6 +19,13 @@ type watchedFileState struct {
 	modTime time.Time
 }
 
+type watchedImportFailure struct {
+	state watchedFileState
+	err   string
+}
+
+const maxAutoImportBytes int64 = 64 << 20
+
 func startAutoImportWatcher(ctx context.Context, app *App, dir string, interval time.Duration) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
@@ -30,10 +37,11 @@ func startAutoImportWatcher(ctx context.Context, app *App, dir string, interval 
 	go func() {
 		log.Printf("auto-import watcher started: dir=%s interval=%s", dir, interval)
 		seen := make(map[string]watchedFileState)
+		failures := make(map[string]watchedImportFailure)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
-			scanAutoImportDir(ctx, app, dir, seen)
+			scanAutoImportDir(ctx, app, dir, seen, failures)
 			select {
 			case <-ctx.Done():
 				log.Printf("auto-import watcher stopped: dir=%s", dir)
@@ -44,7 +52,7 @@ func startAutoImportWatcher(ctx context.Context, app *App, dir string, interval 
 	}()
 }
 
-func scanAutoImportDir(ctx context.Context, app *App, dir string, seen map[string]watchedFileState) {
+func scanAutoImportDir(ctx context.Context, app *App, dir string, seen map[string]watchedFileState, failures map[string]watchedImportFailure) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		log.Printf("auto-import watcher: read %s: %v", dir, err)
@@ -67,20 +75,40 @@ func scanAutoImportDir(ctx context.Context, app *App, dir string, seen map[strin
 		if prev, ok := seen[path]; ok && prev == state {
 			continue
 		}
-		seen[path] = state
 		if err := autoImportFile(ctx, app, path); err != nil {
-			log.Printf("auto-import watcher: import %s: %v", path, err)
+			failure := watchedImportFailure{state: state, err: err.Error()}
+			if previous, ok := failures[path]; !ok || previous != failure {
+				log.Printf("auto-import watcher: import %s: %v", path, err)
+			}
+			failures[path] = failure
+			continue
 		}
+		seen[path] = state
+		delete(failures, path)
 	}
 }
 
 func isAutoImportFile(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".csv", ".tsv", ".json", ".ndjson", ".xml", ".yaml", ".yml", ".xlsx", ".geojson", ".gpkg", ".gpx", ".kml", ".osm", ".pbf", ".mbtiles", ".pmtiles", ".rg", ".zip", ".shp", ".sqlite", ".sqlite3", ".db", ".duckdb", ".parquet", ".arrow", ".feather", ".html", ".htm", ".msgpack", ".mpack", ".msg", ".cbor", ".bson", ".ics", ".ical", ".vcf", ".vcard":
+	case ".csv", ".tsv", ".json", ".ndjson", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".fwf", ".txt", ".xlsx", ".geojson", ".gpkg", ".gpx", ".kml", ".osm", ".pbf", ".mbtiles", ".pmtiles", ".rg", ".zip", ".shp", ".sqlite", ".sqlite3", ".db", ".duckdb", ".parquet", ".arrow", ".feather", ".html", ".htm", ".msgpack", ".mpack", ".msg", ".cbor", ".bson", ".ics", ".ical", ".vcf", ".vcard":
 		return true
 	default:
 		return false
 	}
+}
+
+func readAutoImportContent(src io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, fmt.Errorf("auto-import size limit must be positive")
+	}
+	content, err := io.ReadAll(io.LimitReader(src, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(content)) > maxBytes {
+		return nil, fmt.Errorf("auto-import file exceeds the %d MiB limit", maxBytes>>20)
+	}
+	return content, nil
 }
 
 func autoImportFile(ctx context.Context, app *App, path string) error {
@@ -89,7 +117,7 @@ func autoImportFile(ctx context.Context, app *App, path string) error {
 		return err
 	}
 	defer file.Close()
-	content, err := io.ReadAll(io.LimitReader(file, 64<<20))
+	content, err := readAutoImportContent(file, maxAutoImportBytes)
 	if err != nil {
 		return err
 	}
