@@ -501,6 +501,12 @@ func TestMaintenanceModeBlocksWrites(t *testing.T) {
 		t.Fatalf("enable maintenance mode: %v", err)
 	}
 
+	// A write-capable session so the /api/query write below is refused by
+	// maintenance mode (200 + error payload), not short-circuited by the
+	// anonymous-write guard (403). This test is about maintenance mode, not
+	// authentication.
+	writerCookie := sessionCookieForRole(app, "maint-writer", RoleUser)
+
 	form := url.Values{}
 	form.Set("name", "Blocked")
 	req := httptest.NewRequest(http.MethodPost, "/t/people/new", strings.NewReader(form.Encode()))
@@ -514,6 +520,7 @@ func TestMaintenanceModeBlocksWrites(t *testing.T) {
 	insertBody := `{"sql":"INSERT INTO people (id, name) VALUES (1, 'Blocked')"}`
 	req = httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(insertBody))
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(writerCookie)
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -2239,7 +2246,14 @@ func TestTinySQLPragmaAndAgentContext(t *testing.T) {
 		t.Fatalf("unexpected PRAGMA response: %s", pragmaRec.Body.String())
 	}
 
-	callReq := httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(`{"sql":"CALL datadock_agent_context(4, 2000)"}`))
+	// CALL invokes a stored procedure, which writeSQLBlocked treats as a
+	// potential write (a procedure can mutate), so it now needs a write-capable
+	// session; an anonymous or read-only caller is refused. Authenticate as a
+	// User for this call.
+	callSession := newSessionID()
+	app.markSessionAuthenticated(callSession, "caller", RoleUser)
+	callReq := httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(`{"sql":"CALL datadock_agent_context(4, 2000)"}`)).
+		WithContext(context.WithValue(context.Background(), sessionIDContextKey{}, callSession))
 	callReq.Header.Set("Content-Type", "application/json")
 	callRec := httptest.NewRecorder()
 	app.apiQueryHandler(callRec, callReq)

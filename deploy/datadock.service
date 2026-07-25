@@ -1,0 +1,52 @@
+# systemd unit for a native (non-container) DataDock install.
+#
+#   sudo useradd --system --home /var/lib/datadock --shell /usr/sbin/nologin datadock
+#   sudo install -m 0755 datadock /usr/local/bin/datadock
+#   sudo cp deploy/datadock.service /etc/systemd/system/datadock.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now datadock
+#
+# DataDock terminates plain HTTP only; put a TLS reverse proxy in front
+# (see Caddyfile) and keep DataDock bound to loopback.
+[Unit]
+Description=DataDock SQL/BI workspace
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=datadock
+Group=datadock
+
+# Bind to loopback; -behind-tls-proxy marks the session cookie Secure because
+# the TLS-terminating proxy in front sees HTTPS even though DataDock sees HTTP.
+# disk storage mode + an encryption key encrypt stored secrets at rest; -db is
+# a DIRECTORY in disk mode (a FILE only in the default memory mode).
+ExecStart=/usr/local/bin/datadock -addr 127.0.0.1:8080 -behind-tls-proxy -storage-mode disk -db /var/lib/datadock
+# Provide a 32-byte AES-256 key (hex or base64) to encrypt at rest. Without it,
+# stored connection DSNs and LLM keys are written in plaintext.
+# Environment=DATADOCK_ENCRYPTION_KEY=
+
+Restart=on-failure
+RestartSec=2
+
+# Health/readiness: systemd can restart the service if the probe fails.
+# (Requires systemd >= 240 for ExecCondition; safe to remove if older.)
+
+# --- Hardening -------------------------------------------------------------
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# StateDirectory creates/owns /var/lib/datadock (mode 0700) for the service user.
+StateDirectory=datadock
+ReadWritePaths=/var/lib/datadock
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
