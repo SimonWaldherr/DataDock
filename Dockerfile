@@ -4,7 +4,10 @@
 # The whole dependency set is pure Go (including modernc.org/sqlite), so the
 # binary builds fully static with CGO disabled and runs on distroless/static
 # with no libc.
-FROM golang:1.25 AS build
+# Keep the container toolchain in sync with the minimum version declared in
+# go.mod.  The module graph currently requires Go 1.26.5, which Go 1.25 cannot
+# resolve when GOTOOLCHAIN is local (as it is in the official image).
+FROM golang:1.26.5 AS build
 WORKDIR /src
 
 # Resolve modules first so this layer caches unless go.mod/go.sum change.
