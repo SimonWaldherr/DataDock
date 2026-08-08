@@ -46,6 +46,7 @@ func newFileBackedTestApp(t *testing.T, storageMode string) (*App, string) {
 	if err != nil {
 		t.Fatalf("open native db (%s): %v", storageMode, err)
 	}
+	ensureNativeRBACSafetyNet(nativeDB)
 	t.Cleanup(func() { _ = nativeDB.Close() })
 
 	sqlDB, err := tsqldriver.OpenWithDB(nativeDB)

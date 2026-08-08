@@ -117,6 +117,10 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	// for gating everyone else's data edits, not the admin's own settings.
 	handle("POST /admin/settings", a.requireAdmin(a.adminSettingsHandler))
 	handle("POST /admin/maintenance/toggle", a.requireAdmin(a.adminToggleMaintenanceHandler))
+	// Deliberately NOT requireWritable, same reasoning as adminSettingsHandler:
+	// row policies are admin configuration, not user data.
+	handle("POST /admin/row-policies", a.requireAdmin(a.adminSaveRowPolicyHandler))
+	handle("POST /admin/row-policies/delete", a.requireAdmin(a.adminDeleteRowPolicyHandler))
 	handle("POST /admin/change-password", a.requireAdmin(a.adminChangePasswordHandler))
 	handle("POST /admin/connections/persist", a.requireAdmin(a.requireWritable(a.adminPersistConnectionHandler)))
 	handle("POST /admin/connections/forget", a.requireAdmin(a.requireWritable(a.adminForgetConnectionHandler)))
@@ -180,6 +184,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	readGuarded("GET /api/schema", a.apiSchemaHandler)
 	readGuarded("GET /api/tinysql/agent-context", a.apiTinySQLAgentContextHandler)
 	handle("GET /api/tinysql/vector-cache", a.requireAdmin(a.apiTinySQLVectorCacheHandler))
+	handle("GET /api/admin/audit/verify", a.requireAdmin(a.apiAuditVerifyHandler))
 	handle("GET /api/admin/snapshot", a.requireAdmin(a.apiSnapshotExportHandler))
 	// Deliberately NOT wrapped in requireWritable: restore requires
 	// maintenance mode to already be ON (checked inside the handler), which
@@ -231,6 +236,8 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /api/bi/dashboards/delete", a.requireWritable(a.requireLogin(a.apiDeleteDashboardHandler)))
 	readGuarded("GET /dashboards", a.dashboardsListHandler)
 	readGuarded("GET /dashboards/{id}", a.dashboardViewHandler)
+	readGuarded("GET /queries", a.queriesListHandler)
+	readGuarded("GET /charts", a.chartsListHandler)
 }
 
 func styleCSSHandler(w http.ResponseWriter, r *http.Request) {
@@ -739,7 +746,12 @@ func (a *App) exportTableHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn := a.activeConn(r.Context())
-	cols, rows, err := a.queryRows(r.Context(), selectAllQuery(conn, meta.Name))
+	ownerColumn, ownerValue, err := a.rowPolicyOwnerColumnAndArg(r.Context(), meta.Name)
+	if err != nil {
+		a.serverError(w, err)
+		return
+	}
+	cols, rows, err := a.queryRows(r.Context(), selectAllQuery(conn, meta.Name, ownerColumn, ownerValue))
 	if err != nil {
 		if isMissingDBObjectError(err) {
 			a.renderObjectMissing(w, r, tableName, err)
@@ -915,10 +927,12 @@ func (a *App) aboutHandler(w http.ResponseWriter, r *http.Request) {
 // such as an Error or Success message.
 func (a *App) adminPageData(ctx context.Context, extra map[string]interface{}) map[string]interface{} {
 	status := a.adminStatus(ctx)
+	rowPolicies, _ := a.listRowPolicies(ctx)
 	data := map[string]interface{}{
-		"Status":     status,
-		"StatusJSON": formatStatusJSON(status),
-		"Settings":   a.runtimeSettingsView(),
+		"Status":      status,
+		"StatusJSON":  formatStatusJSON(status),
+		"Settings":    a.runtimeSettingsView(),
+		"RowPolicies": rowPolicies,
 	}
 	for k, v := range extra {
 		data[k] = v
@@ -928,6 +942,69 @@ func (a *App) adminPageData(ctx context.Context, extra map[string]interface{}) m
 
 func (a *App) adminHandler(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "admin", a.adminPageData(r.Context(), nil))
+}
+
+// adminSaveRowPolicyHandler adds (or replaces, by table name) a Row Level
+// Security Lite policy. Deliberately NOT wrapped in requireWritable, same
+// reasoning as adminSettingsHandler: this changes an admin-only
+// configuration, not user data, so it must stay reachable even while
+// maintenance mode is on.
+func (a *App) adminSaveRowPolicyHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	table := strings.TrimSpace(r.Form.Get("table"))
+	column := strings.TrimSpace(r.Form.Get("owner_column"))
+	data := a.adminPageData(r.Context(), nil)
+	fail := func(msg string) {
+		data["Error"] = msg
+		a.render(w, r, "admin", data)
+	}
+	if table == "" || column == "" {
+		fail("A table and an owner column are both required to save a row policy.")
+		return
+	}
+	meta, err := a.tableMeta(r.Context(), table)
+	if err != nil {
+		fail(fmt.Sprintf("Could not load table %q: %v", table, err))
+		return
+	}
+	found := false
+	for _, col := range meta.Columns {
+		if strings.EqualFold(col.Name, column) {
+			column = col.Name // canonical, DB-sourced casing
+			found = true
+			break
+		}
+	}
+	if !found {
+		fail(fmt.Sprintf("Column %q was not found on table %q.", column, meta.Name))
+		return
+	}
+	if err := a.saveRowPolicy(r.Context(), RowPolicy{TableName: meta.Name, OwnerColumn: column}); err != nil {
+		fail(fmt.Sprintf("Could not save row policy: %v", err))
+		return
+	}
+	http.Redirect(w, r, "/admin#adminRowPolicies", http.StatusSeeOther)
+}
+
+// adminDeleteRowPolicyHandler removes a table's row policy.
+func (a *App) adminDeleteRowPolicyHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	table := strings.TrimSpace(r.Form.Get("table"))
+	if table != "" {
+		if err := a.deleteRowPolicy(r.Context(), table); err != nil {
+			data := a.adminPageData(r.Context(), nil)
+			data["Error"] = fmt.Sprintf("Could not delete row policy: %v", err)
+			a.render(w, r, "admin", data)
+			return
+		}
+	}
+	http.Redirect(w, r, "/admin#adminRowPolicies", http.StatusSeeOther)
 }
 
 func (a *App) adminSettingsHandler(w http.ResponseWriter, r *http.Request) {
@@ -978,6 +1055,47 @@ func (a *App) jobsHandler(w http.ResponseWriter, r *http.Request) {
 		"Jobs":    a.nativeDB.Catalog().ListJobs(),
 		"History": a.nativeDB.Catalog().ListJobHistory(),
 	})
+}
+
+// queriesListHandler renders the BI foundation's saved-query list — the
+// management page apiSavedQueriesHandler never had (it was API-only). Gated
+// the same as the rest of the BI surface (readGuarded): a normal end-user page.
+func (a *App) queriesListHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	queries, err := a.listSavedQueries(ctx)
+	if err != nil {
+		a.render(w, r, "queries", map[string]interface{}{"Error": "Load saved queries: " + err.Error()})
+		return
+	}
+	a.render(w, r, "queries", map[string]interface{}{"SavedQueries": queries})
+}
+
+// chartsListHandler renders the BI foundation's chart list — the management
+// page (edit mark type/x/y/aggregate, delete) that "Save as Chart" never had
+// a counterpart for. Gated the same as the rest of the BI surface.
+func (a *App) chartsListHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	charts, err := a.listCharts(ctx)
+	if err != nil {
+		a.render(w, r, "charts", map[string]interface{}{"Error": "Load charts: " + err.Error()})
+		return
+	}
+	dashboards, err := a.listDashboards(ctx)
+	if err != nil {
+		a.render(w, r, "charts", map[string]interface{}{"Error": "Load dashboards: " + err.Error()})
+		return
+	}
+	// usageCount lets the delete button warn "used in N dashboard(s)" instead
+	// of silently leaving a dangling chart_id in some dashboard's layout.
+	usageCount := make(map[string]int, len(charts))
+	for _, d := range dashboards {
+		for _, tile := range d.Layout {
+			usageCount[tile.ChartID]++
+		}
+	}
+	a.render(w, r, "charts", map[string]interface{}{"Charts": charts, "ChartUsageCount": usageCount})
 }
 
 // dashboardsListHandler renders the BI foundation's dashboard list — every
@@ -1869,11 +1987,19 @@ func (a *App) tableRowsSorted(r *http.Request, page int, sortCol, dir string, pa
 		}
 	}
 
-	query := conn.selectPageSQL(meta.Name, orderClause, dir, pageSize, offset)
+	ownerColumn, ownerValue, err := a.rowPolicyOwnerColumnAndArg(r.Context(), meta.Name)
+	if err != nil {
+		return nil, nil, err
+	}
+	query := conn.selectPageSQL(meta.Name, orderClause, dir, pageSize, offset, ownerColumn)
 
 	ctx, cancel := a.withQueryTimeout(r.Context())
 	defer cancel()
-	rows, err := a.queryConn(ctx, conn, "table.sorted_rows", query)
+	var args []any
+	if ownerColumn != "" {
+		args = append(args, ownerValue)
+	}
+	rows, err := a.queryConn(ctx, conn, "table.sorted_rows", query, args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2792,12 +2918,39 @@ func (a *App) roleBlocksWrite(ctx context.Context) bool {
 // the process already owns the machine" model. Otherwise the session must be
 // authenticated with a write-capable role — Admin or User; anonymous and
 // RoleReadOnly sessions cannot.
+//
+// When native_permission_mirror_enabled is on, an allowed write additionally
+// requires tinySQL's own native RBAC mirror (native_rbac.go) to agree — a
+// second, independently-computed opinion consulted directly via
+// HasPermission, never through Execute's automatic enforcement (which stays
+// permanently disabled, see that file's package doc comment). This is a pure
+// AND with the decision above: it can only make write access stricter, never
+// grant something the app-level check wouldn't already allow.
 func (a *App) sessionCanWriteSQL(ctx context.Context) bool {
 	if a.currentAuthMode() == AuthModeNone {
 		return true
 	}
-	_, role, ok := a.currentSessionUser(sessionIDFromContext(ctx))
-	return ok && (role == RoleAdmin || role == RoleUser)
+	username, role, ok := a.currentSessionUser(sessionIDFromContext(ctx))
+	allowed := ok && (role == RoleAdmin || role == RoleUser)
+	if !allowed || !a.currentNativePermissionMirrorEnabled() {
+		return allowed
+	}
+	if a.nativeDB.Catalog().HasPermission(username, tinysql.PermInsert, "*", "*") {
+		return true
+	}
+	// The mirrored state disagrees with the app-level decision it's supposed
+	// to match — that itself is worth an operator's attention, since it
+	// means the mirror has drifted out of sync (e.g. a role changed without
+	// the mirror hook running).
+	if audit := a.auditLogger(); audit.Enabled() {
+		audit.Log(AuditEvent{
+			Session:   sessionIDFromContext(ctx),
+			Username:  username,
+			Operation: "native_rbac_mismatch",
+			Detail:    fmt.Sprintf("app-level check allowed a write for role %q, but the native RBAC mirror denied it", role),
+		})
+	}
+	return false
 }
 
 // writeSQLBlocked fails closed: a statement that isn't provably result-producing
@@ -3047,6 +3200,35 @@ func (a *App) apiTinySQLVectorCacheHandler(w http.ResponseWriter, r *http.Reques
 // hashes) — there is no filtered/redacted export mode, so the filename says
 // so plainly and every export is audit-logged, mirroring how a write would
 // be recorded even though this is a GET.
+// apiAuditVerifyHandler checks tinySQL's own tamper-evident, hash-chained
+// audit log (nativeDB.AuditLog(), attached in main.go from -audit-log — a
+// SEPARATE log from DataDock's own AuditLogger in audit.go) for integrity.
+// Wired to *tinysql.DB.AuditLog().Verify(), which is otherwise exercised
+// nowhere in this codebase outside one unit test — this is the first time
+// it's surfaced to an operator.
+func (a *App) apiAuditVerifyHandler(w http.ResponseWriter, r *http.Request) {
+	log := a.nativeDB.AuditLog()
+	if log == nil {
+		a.writeJSON(w, http.StatusOK, map[string]any{
+			"configured": false,
+			"detail":     "No tinySQL audit log is attached (start DataDock with -audit-log to enable one).",
+		})
+		return
+	}
+	entries := log.Entries()
+	result := map[string]any{
+		"configured":  true,
+		"entry_count": len(entries),
+	}
+	if err := log.Verify(); err != nil {
+		result["verified"] = false
+		result["error"] = err.Error()
+	} else {
+		result["verified"] = true
+	}
+	a.writeJSON(w, http.StatusOK, result)
+}
+
 func (a *App) apiSnapshotExportHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="datadock-snapshot-CONTAINS-SECRETS.gob"`)
@@ -3140,6 +3322,7 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			MatchMaxRows         int    `json:"match_max_rows"`
 			DefaultTheme         string `json:"default_theme"`
 			DefaultDensity       string `json:"default_density"`
+			NativePermissionMirrorEnabled *bool `json:"native_permission_mirror_enabled"`
 		}
 		if !a.decodeJSONBody(w, r, &body, "Request body must be valid JSON.") {
 			return
@@ -3166,6 +3349,7 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			MatchMaxRows:         matchMaxRows,
 			DefaultTheme:         body.DefaultTheme,
 			DefaultDensity:       body.DefaultDensity,
+			NativePermissionMirrorEnabled: boolDefault(body.NativePermissionMirrorEnabled, a.currentNativePermissionMirrorEnabled()),
 		})
 		if err == nil && strings.TrimSpace(body.LLMAPIKey) == "" {
 			// An empty key means "leave it alone", not "clear it" — matches
@@ -3692,6 +3876,24 @@ func (a *App) currentSessionUsername(r *http.Request) string {
 	return username
 }
 
+// biOwnershipAllowed reports whether the current session may modify or
+// delete a BI object (SavedQuery/Chart/Dashboard) recorded under owner: its
+// own owner, or an Admin. A blank owner — an object created before this
+// check existed, or by an anonymous session — is treated as unowned, so it
+// doesn't become uneditable by everyone; that matches this codebase's
+// general model elsewhere (pipelines/match configs have no per-record ACL
+// at all).
+func (a *App) biOwnershipAllowed(r *http.Request, owner string) bool {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return true
+	}
+	if a.isAdminAuthenticated(sessionIDFromContext(r.Context())) {
+		return true
+	}
+	return a.currentSessionUsername(r) == owner
+}
+
 // apiSavedQueriesHandler is the BI foundation's saved-query collection
 // endpoint, following the same GET(list)/POST(create-or-update) shape as
 // apiPipelinesHandler (handlers.go above) rather than a REST /{id} scheme —
@@ -3701,6 +3903,19 @@ func (a *App) apiSavedQueriesHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		ctx, cancel := a.withQueryTimeout(r.Context())
 		defer cancel()
+		if id := strings.TrimSpace(r.URL.Query().Get("id")); id != "" {
+			saved, found, err := a.loadSavedQuery(ctx, id)
+			if err != nil {
+				a.writeProblem(w, r, http.StatusInternalServerError, "Load saved query", err.Error())
+				return
+			}
+			if !found {
+				a.writeProblem(w, r, http.StatusNotFound, "Not found", "no saved query with that id")
+				return
+			}
+			a.writeJSON(w, http.StatusOK, saved)
+			return
+		}
 		list, err := a.listSavedQueries(ctx)
 		if err != nil {
 			a.writeProblem(w, r, http.StatusInternalServerError, "Load saved queries", err.Error())
@@ -3712,11 +3927,25 @@ func (a *App) apiSavedQueriesHandler(w http.ResponseWriter, r *http.Request) {
 		if !a.decodeJSONBody(w, r, &body, "Request body must be a saved query object.") {
 			return
 		}
+		ctx, cancel := a.withQueryTimeout(r.Context())
+		defer cancel()
+		if id := strings.TrimSpace(body.ID); id != "" {
+			existing, found, err := a.loadSavedQuery(ctx, id)
+			if err != nil {
+				a.writeProblem(w, r, http.StatusInternalServerError, "Load saved query", err.Error())
+				return
+			}
+			if found {
+				if !a.biOwnershipAllowed(r, existing.Owner) {
+					a.writeProblem(w, r, http.StatusForbidden, "Forbidden", "only the owner or an admin may modify this saved query")
+					return
+				}
+				body.Owner = existing.Owner // preserve — ignore any submitted reassignment
+			}
+		}
 		if strings.TrimSpace(body.Owner) == "" {
 			body.Owner = a.currentSessionUsername(r)
 		}
-		ctx, cancel := a.withQueryTimeout(r.Context())
-		defer cancel()
 		saved, err := a.saveSavedQuery(ctx, body)
 		if err != nil {
 			a.writeProblem(w, r, http.StatusBadRequest, "Save saved query", err.Error())
@@ -3738,6 +3967,13 @@ func (a *App) apiDeleteSavedQueryHandler(w http.ResponseWriter, r *http.Request)
 	}
 	ctx, cancel := a.withQueryTimeout(r.Context())
 	defer cancel()
+	if existing, found, err := a.loadSavedQuery(ctx, body.ID); err != nil {
+		a.writeProblem(w, r, http.StatusInternalServerError, "Load saved query", err.Error())
+		return
+	} else if found && !a.biOwnershipAllowed(r, existing.Owner) {
+		a.writeProblem(w, r, http.StatusForbidden, "Forbidden", "only the owner or an admin may delete this saved query")
+		return
+	}
 	if err := a.deleteSavedQuery(ctx, body.ID); err != nil {
 		a.writeProblem(w, r, http.StatusBadRequest, "Delete saved query", err.Error())
 		return
@@ -3763,11 +3999,25 @@ func (a *App) apiChartsHandler(w http.ResponseWriter, r *http.Request) {
 		if !a.decodeJSONBody(w, r, &body, "Request body must be a chart object.") {
 			return
 		}
+		ctx, cancel := a.withQueryTimeout(r.Context())
+		defer cancel()
+		if id := strings.TrimSpace(body.ID); id != "" {
+			existing, found, err := a.loadChart(ctx, id)
+			if err != nil {
+				a.writeProblem(w, r, http.StatusInternalServerError, "Load chart", err.Error())
+				return
+			}
+			if found {
+				if !a.biOwnershipAllowed(r, existing.Owner) {
+					a.writeProblem(w, r, http.StatusForbidden, "Forbidden", "only the owner or an admin may modify this chart")
+					return
+				}
+				body.Owner = existing.Owner
+			}
+		}
 		if strings.TrimSpace(body.Owner) == "" {
 			body.Owner = a.currentSessionUsername(r)
 		}
-		ctx, cancel := a.withQueryTimeout(r.Context())
-		defer cancel()
 		saved, err := a.saveChart(ctx, body)
 		if err != nil {
 			a.writeProblem(w, r, http.StatusBadRequest, "Save chart", err.Error())
@@ -3789,6 +4039,13 @@ func (a *App) apiDeleteChartHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := a.withQueryTimeout(r.Context())
 	defer cancel()
+	if existing, found, err := a.loadChart(ctx, body.ID); err != nil {
+		a.writeProblem(w, r, http.StatusInternalServerError, "Load chart", err.Error())
+		return
+	} else if found && !a.biOwnershipAllowed(r, existing.Owner) {
+		a.writeProblem(w, r, http.StatusForbidden, "Forbidden", "only the owner or an admin may delete this chart")
+		return
+	}
 	if err := a.deleteChart(ctx, body.ID); err != nil {
 		a.writeProblem(w, r, http.StatusBadRequest, "Delete chart", err.Error())
 		return
@@ -3831,11 +4088,25 @@ func (a *App) apiDashboardsHandler(w http.ResponseWriter, r *http.Request) {
 		if !a.decodeJSONBody(w, r, &body, "Request body must be a dashboard object.") {
 			return
 		}
+		ctx, cancel := a.withQueryTimeout(r.Context())
+		defer cancel()
+		if id := strings.TrimSpace(body.ID); id != "" {
+			existing, found, err := a.loadDashboard(ctx, id)
+			if err != nil {
+				a.writeProblem(w, r, http.StatusInternalServerError, "Load dashboard", err.Error())
+				return
+			}
+			if found {
+				if !a.biOwnershipAllowed(r, existing.Owner) {
+					a.writeProblem(w, r, http.StatusForbidden, "Forbidden", "only the owner or an admin may modify this dashboard")
+					return
+				}
+				body.Owner = existing.Owner
+			}
+		}
 		if strings.TrimSpace(body.Owner) == "" {
 			body.Owner = a.currentSessionUsername(r)
 		}
-		ctx, cancel := a.withQueryTimeout(r.Context())
-		defer cancel()
 		saved, err := a.saveDashboard(ctx, body)
 		if err != nil {
 			a.writeProblem(w, r, http.StatusBadRequest, "Save dashboard", err.Error())
@@ -3857,6 +4128,13 @@ func (a *App) apiDeleteDashboardHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx, cancel := a.withQueryTimeout(r.Context())
 	defer cancel()
+	if existing, found, err := a.loadDashboard(ctx, body.ID); err != nil {
+		a.writeProblem(w, r, http.StatusInternalServerError, "Load dashboard", err.Error())
+		return
+	} else if found && !a.biOwnershipAllowed(r, existing.Owner) {
+		a.writeProblem(w, r, http.StatusForbidden, "Forbidden", "only the owner or an admin may delete this dashboard")
+		return
+	}
 	if err := a.deleteDashboard(ctx, body.ID); err != nil {
 		a.writeProblem(w, r, http.StatusBadRequest, "Delete dashboard", err.Error())
 		return
@@ -4134,6 +4412,7 @@ type runtimeSettingsInput struct {
 	MatchMaxRows         string
 	DefaultTheme         string
 	DefaultDensity       string
+	NativePermissionMirrorEnabled bool
 }
 
 func runtimeSettingsFromForm(r *http.Request) (RuntimeSettings, error) {
@@ -4156,6 +4435,7 @@ func runtimeSettingsFromForm(r *http.Request) (RuntimeSettings, error) {
 		MatchMaxRows:         r.Form.Get("match_max_rows"),
 		DefaultTheme:         r.Form.Get("default_theme"),
 		DefaultDensity:       r.Form.Get("default_density"),
+		NativePermissionMirrorEnabled: r.Form.Get("native_permission_mirror_enabled") != "",
 	})
 }
 
@@ -4207,6 +4487,7 @@ func runtimeSettingsFromInput(in runtimeSettingsInput) (RuntimeSettings, error) 
 		MatchMaxRows:         matchMaxRows,
 		DefaultTheme:         in.DefaultTheme,
 		DefaultDensity:       in.DefaultDensity,
+		NativePermissionMirrorEnabled: in.NativePermissionMirrorEnabled,
 	}, nil
 }
 

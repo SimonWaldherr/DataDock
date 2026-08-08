@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -199,16 +200,33 @@ func (a *App) createUser(ctx context.Context, username, passwordHash string, rol
 	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.insert", usersInsertSQL,
 		username, passwordHash, string(role), time.Now().UTC().Format(time.RFC3339), strconv.FormatBool(false),
 	)
+	if err == nil {
+		// Best-effort, defense-in-depth mirror (native_rbac.go) — never
+		// blocks the authoritative DataDock user record above on failure.
+		if mirrorErr := a.mirrorNativeRBACUser(ctx, username, role); mirrorErr != nil {
+			log.Printf("native RBAC mirror: create user %q: %v", username, mirrorErr)
+		}
+	}
 	return err
 }
 
 func (a *App) updateUserRole(ctx context.Context, username string, role Role) error {
 	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.update_role", usersUpdateRoleSQL, string(role), username)
+	if err == nil {
+		if mirrorErr := a.mirrorNativeRBACUser(ctx, username, role); mirrorErr != nil {
+			log.Printf("native RBAC mirror: update role for %q: %v", username, mirrorErr)
+		}
+	}
 	return err
 }
 
 func (a *App) setUserDisabled(ctx context.Context, username string, disabled bool) error {
 	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.update_disabled", usersUpdateDisabledSQL, strconv.FormatBool(disabled), username)
+	if err == nil {
+		if mirrorErr := a.mirrorNativeRBACUserDisabled(username, disabled); mirrorErr != nil {
+			log.Printf("native RBAC mirror: set disabled=%v for %q: %v", disabled, username, mirrorErr)
+		}
+	}
 	return err
 }
 
@@ -219,6 +237,11 @@ func (a *App) setUserPasswordHash(ctx context.Context, username, hash string) er
 
 func (a *App) deleteUser(ctx context.Context, username string) error {
 	_, err := a.execConn(ctx, a.localTinySQLConn(), "users.delete", usersDeleteSQL, username)
+	if err == nil {
+		if mirrorErr := a.mirrorNativeRBACUserDeleted(username); mirrorErr != nil {
+			log.Printf("native RBAC mirror: delete user %q: %v", username, mirrorErr)
+		}
+	}
 	return err
 }
 

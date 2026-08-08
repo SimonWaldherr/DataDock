@@ -60,6 +60,13 @@ type RuntimeSettings struct {
 	Port                 int
 	AdminPasswordHash    string
 	AuthMode             string
+	// NativePermissionMirrorEnabled turns on sessionCanWriteSQL's second,
+	// independent write-permission check against tinySQL's own native RBAC
+	// mirror (see native_rbac.go) — defense in depth, off by default. See
+	// that file's package doc comment for why this is safe to enable: it can
+	// only make write access stricter, never grant more than the app-level
+	// check already would.
+	NativePermissionMirrorEnabled bool
 }
 
 type RuntimeSettingsView struct {
@@ -85,9 +92,10 @@ type RuntimeSettingsView struct {
 	MatchMaxRows           int    `json:"match_max_rows"`
 	DefaultTheme           string `json:"default_theme"`
 	DefaultDensity         string `json:"default_density"`
-	Port                   int    `json:"port"`
-	AdminPasswordSet       bool   `json:"admin_password_set"`
-	AuthMode               string `json:"auth_mode"`
+	Port                          int    `json:"port"`
+	AdminPasswordSet              bool   `json:"admin_password_set"`
+	AuthMode                      string `json:"auth_mode"`
+	NativePermissionMirrorEnabled bool   `json:"native_permission_mirror_enabled"`
 }
 
 func isAllowedValue(value string, allowed []string) bool {
@@ -232,6 +240,7 @@ func (a *App) applyRuntimeSettings(s RuntimeSettings) error {
 	a.port = s.Port
 	a.adminPasswordHash = s.AdminPasswordHash
 	a.authMode = authMode
+	a.nativePermissionMirrorEnabled = s.NativePermissionMirrorEnabled
 	return nil
 }
 
@@ -260,8 +269,9 @@ func (a *App) saveRuntimeSettings(ctx context.Context) error {
 		"default_theme":           s.DefaultTheme,
 		"default_density":         s.DefaultDensity,
 		"port":                    strconv.Itoa(s.Port),
-		"admin_password_hash":     s.AdminPasswordHash,
-		"auth_mode":               s.AuthMode,
+		"admin_password_hash":              s.AdminPasswordHash,
+		"auth_mode":                        s.AuthMode,
+		"native_permission_mirror_enabled": strconv.FormatBool(s.NativePermissionMirrorEnabled),
 	}
 	for key, value := range values {
 		if err := a.saveSetting(ctx, key, value); err != nil {
@@ -439,6 +449,7 @@ func (a *App) currentRuntimeSettings() RuntimeSettings {
 		Port:                 a.port,
 		AdminPasswordHash:    a.adminPasswordHash,
 		AuthMode:             string(a.authMode),
+		NativePermissionMirrorEnabled: a.nativePermissionMirrorEnabled,
 	}
 }
 
@@ -468,9 +479,10 @@ func (a *App) runtimeSettingsView() RuntimeSettingsView {
 		MatchMaxRows:           a.matchMaxRows,
 		DefaultTheme:           a.defaultTheme,
 		DefaultDensity:         a.defaultDensity,
-		Port:                   a.port,
-		AdminPasswordSet:       strings.TrimSpace(a.adminPasswordHash) != "",
-		AuthMode:               string(a.authMode),
+		Port:                          a.port,
+		AdminPasswordSet:              strings.TrimSpace(a.adminPasswordHash) != "",
+		AuthMode:                      string(a.authMode),
+		NativePermissionMirrorEnabled: a.nativePermissionMirrorEnabled,
 	}
 }
 
@@ -494,6 +506,12 @@ func (a *App) currentReadOnlyMode() bool {
 	a.settingsMu.RLock()
 	defer a.settingsMu.RUnlock()
 	return a.readOnlyMode
+}
+
+func (a *App) currentNativePermissionMirrorEnabled() bool {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	return a.nativePermissionMirrorEnabled
 }
 
 // currentRequireLoginForReads reports the admin toggle that, when on, requires
@@ -678,9 +696,10 @@ func runtimeSettingsFromStoredValues(values map[string]string) (RuntimeSettings,
 		MatchMaxRows:         matchMaxRows,
 		DefaultTheme:         defaultTheme,
 		DefaultDensity:       defaultDensity,
-		Port:                 port,
-		AdminPasswordHash:    values["admin_password_hash"],
-		AuthMode:             values["auth_mode"],
+		Port:                          port,
+		AdminPasswordHash:             values["admin_password_hash"],
+		AuthMode:                      values["auth_mode"],
+		NativePermissionMirrorEnabled: strings.EqualFold(values["native_permission_mirror_enabled"], "true"),
 	}, nil
 }
 

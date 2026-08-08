@@ -124,6 +124,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("open database: %v", err)
 	}
+	// Permanent safety net for the native-RBAC mirror (native_rbac.go): must
+	// run before anything else ever calls CreateUser on this DB, and must
+	// never be conditional — see that file's package doc comment for why.
+	ensureNativeRBACSafetyNet(nativeDB)
 	trimmedDBPath := strings.TrimSpace(*dbFile)
 	inMemoryOnly := trimmedDBPath == "" || strings.EqualFold(trimmedDBPath, ":memory:")
 	if inMemoryOnly {
@@ -206,6 +210,14 @@ func main() {
 
 	app := newApp(nativeDB, sqlDB, *tenant, tpl)
 	app.setVerboseLogger(verbose)
+	// Best-effort: syncs every existing user into the native-RBAC mirror
+	// (native_rbac.go) so the feature works immediately if/when an operator
+	// turns on native_permission_mirror_enabled, without needing a fresh
+	// per-user resync. A failure here is logged, not fatal — this is a
+	// defense-in-depth addition, never a startup dependency.
+	if err := app.bootstrapNativeRBACMirror(context.Background()); err != nil {
+		log.Printf("native RBAC mirror bootstrap: %v", err)
+	}
 	settings := RuntimeSettings{
 		Dialect:        *sqlDialect,
 		ConnectTimeout: *connectTimeout,

@@ -1,0 +1,57 @@
+{{define "queries"}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection "DefaultTheme" .DefaultTheme "DefaultDensity" .DefaultDensity "MaintenanceMode" .MaintenanceMode)}}
+
+<div class="page-hdr">
+  <div>
+    <h1><i class="bi bi-bookmarks text-primary"></i>Saved Queries</h1>
+    <p class="text-muted mb-0">SQL saved from the editor's "Save Query" button. Load one back into the editor, or use it as the basis for a chart.</p>
+  </div>
+  <div class="d-flex gap-2"><a class="btn btn-sm btn-outline-secondary" href="/query"><i class="bi bi-terminal me-1"></i>SQL Editor</a></div>
+</div>
+
+{{template "alert" .}}
+
+<div class="card">
+  <div class="card-body">
+    {{if .SavedQueries}}
+    <table class="table table-sm mb-0">
+      <thead><tr><th>Name</th><th>SQL</th><th>Owner</th><th>Updated</th><th></th></tr></thead>
+      <tbody>
+        {{range .SavedQueries}}
+        <tr>
+          <td>{{.Name}}</td>
+          <td class="small text-muted text-truncate" style="max-width:360px"><code>{{.SQLText}}</code></td>
+          <td class="small text-muted">{{.Owner}}</td>
+          <td class="small text-muted">{{.UpdatedAt.Format "2006-01-02 15:04"}}</td>
+          <td class="text-end text-nowrap">
+            <a class="btn btn-sm btn-outline-primary" href="/query?load_query={{.ID}}"><i class="bi bi-box-arrow-up-right me-1"></i>Load in Editor</a>
+            <button class="btn btn-sm btn-outline-danger" type="button" onclick="deleteSavedQuery('{{.ID}}', this)"><i class="bi bi-trash"></i></button>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="small text-muted mb-0">No saved queries yet — use "Save Query" on the SQL editor first.</p>
+    {{end}}
+  </div>
+</div>
+
+<script>
+function deleteSavedQuery(id, btn) {
+  if (!window.confirm('Delete this saved query?')) return;
+  fetch('/api/bi/queries/delete', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id: id})})
+    .then(function (resp) { return resp.json().then(function (body) { return {ok: resp.ok, body: body}; }); })
+    .then(function (res) {
+      if (res.ok) {
+        btn.closest('tr').remove();
+      } else {
+        window.alert('Could not delete: ' + ((res.body && (res.body.detail || res.body.title)) || 'unknown error'));
+      }
+    })
+    .catch(function (err) { window.alert('Could not delete: ' + err); });
+}
+</script>
+
+{{template "base_end" .}}
+{{end}}

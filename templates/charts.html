@@ -1,0 +1,94 @@
+{{define "charts"}}
+{{template "base_start" (dict "Tables" .Tables "TableObjects" .TableObjects "ActiveTable" "" "ActiveConnection" .ActiveConnection "DefaultTheme" .DefaultTheme "DefaultDensity" .DefaultDensity "MaintenanceMode" .MaintenanceMode)}}
+
+<div class="page-hdr">
+  <div>
+    <h1><i class="bi bi-bar-chart text-primary"></i>Charts</h1>
+    <p class="text-muted mb-0">Charts saved from the SQL editor's Quick Chart. Edit the mark type/fields, or add one to a dashboard.</p>
+  </div>
+  <div class="d-flex gap-2"><a class="btn btn-sm btn-outline-secondary" href="/dashboards"><i class="bi bi-grid-1x2 me-1"></i>Dashboards</a></div>
+</div>
+
+{{template "alert" .}}
+
+{{if .Charts}}
+<div class="row g-3" id="chartsGrid">
+  {{range .Charts}}
+  <div class="col-md-6 col-lg-4" data-chart-card data-chart-id="{{.ID}}">
+    <div class="card h-100">
+      <div class="card-body d-flex flex-column">
+        <div class="d-flex justify-content-between align-items-start mb-2">
+          <strong class="text-truncate">{{.Name}}</strong>
+          <div class="btn-group btn-group-sm flex-shrink-0">
+            <button type="button" class="btn btn-outline-secondary" onclick="toggleChartEdit('{{.ID}}')" title="Edit"><i class="bi bi-pencil"></i></button>
+            <button type="button" class="btn btn-outline-danger" onclick="deleteChart('{{.ID}}', {{index $.ChartUsageCount .ID}})" title="Delete"><i class="bi bi-trash"></i></button>
+          </div>
+        </div>
+        <div id="chartPreview-{{.ID}}" style="min-height:180px"></div>
+        {{if index $.ChartUsageCount .ID}}
+        <div class="small text-muted mt-2"><i class="bi bi-grid-1x2 me-1"></i>Used in {{index $.ChartUsageCount .ID}} dashboard{{if ne (index $.ChartUsageCount .ID) 1}}s{{end}}</div>
+        {{end}}
+
+        <div id="chartEdit-{{.ID}}" class="d-none mt-3 pt-3 border-top">
+          <div class="row g-2">
+            <div class="col-6">
+              <label class="form-label small mb-1">Name</label>
+              <input class="form-control form-control-sm" id="chartEditName-{{.ID}}" value="{{.Name}}">
+            </div>
+            <div class="col-6">
+              <label class="form-label small mb-1">Mark type</label>
+              <select class="form-select form-select-sm" id="chartEditMark-{{.ID}}">
+                <option value="bar">Bar</option>
+                <option value="line">Line</option>
+                <option value="area">Area</option>
+                <option value="point">Point</option>
+                <option value="arc">Arc (pie)</option>
+              </select>
+            </div>
+            <div class="col-6">
+              <label class="form-label small mb-1">X field</label>
+              <input class="form-control form-control-sm" id="chartEditX-{{.ID}}" placeholder="column name">
+            </div>
+            <div class="col-6">
+              <label class="form-label small mb-1">Y field</label>
+              <input class="form-control form-control-sm" id="chartEditY-{{.ID}}" placeholder="column name (blank = count of rows)">
+            </div>
+            <div class="col-6">
+              <label class="form-label small mb-1">Aggregate</label>
+              <select class="form-select form-select-sm" id="chartEditAgg-{{.ID}}">
+                <option value="">Count of rows</option>
+                <option value="sum">Sum</option>
+                <option value="mean">Average</option>
+                <option value="min">Min</option>
+                <option value="max">Max</option>
+              </select>
+            </div>
+            <div class="col-6 d-flex align-items-end">
+              <button type="button" class="btn btn-sm btn-primary w-100" onclick="saveChartEdit('{{.ID}}')"><i class="bi bi-save me-1"></i>Save</button>
+            </div>
+          </div>
+          <details class="mt-2">
+            <summary class="small text-muted">Advanced: edit Vega-Lite spec JSON directly</summary>
+            <textarea class="form-control form-control-sm mt-1" id="chartEditSpec-{{.ID}}" rows="6" spellcheck="false"></textarea>
+            <button type="button" class="btn btn-sm btn-outline-primary mt-1" onclick="saveChartAdvancedSpec('{{.ID}}')"><i class="bi bi-save me-1"></i>Save Advanced Spec</button>
+          </details>
+          <div id="chartEditStatus-{{.ID}}" class="small mt-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {{end}}
+</div>
+{{else}}
+<div class="card"><div class="card-body">
+  <p class="small text-muted mb-0">No saved charts yet — use "Save as Chart" on the SQL editor's Quick Chart first.</p>
+</div></div>
+{{end}}
+
+<script src="/static/dashboard.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function () { initChartsListPage(); });
+</script>
+
+{{template "base_end" .}}
+{{end}}

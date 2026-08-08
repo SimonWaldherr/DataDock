@@ -36,13 +36,14 @@
     {{if .Dashboards}}
     <div class="list-group">
       {{range .Dashboards}}
-      <a class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" href="/dashboards/{{.ID}}">
-        <span>
+      <div class="list-group-item d-flex justify-content-between align-items-center" data-dashboard-row="{{.ID}}">
+        <a class="text-decoration-none flex-grow-1" href="/dashboards/{{.ID}}">
           <strong>{{.Name}}</strong>
           {{if .Description}}<span class="text-muted small ms-2">{{.Description}}</span>{{end}}
-        </span>
-        <span class="small text-muted">{{len .Layout}} chart{{if ne (len .Layout) 1}}s{{end}}</span>
-      </a>
+        </a>
+        <span class="small text-muted me-3">{{len .Layout}} chart{{if ne (len .Layout) 1}}s{{end}}</span>
+        <button type="button" class="btn btn-sm btn-outline-danger" onclick="deleteDashboardRow('{{.ID}}')" title="Delete dashboard"><i class="bi bi-trash"></i></button>
+      </div>
       {{end}}
     </div>
     {{else}}

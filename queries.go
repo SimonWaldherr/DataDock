@@ -140,6 +140,32 @@ const (
 		" SET last_run_at = ?, last_status = ?, last_rows = ? WHERE config_name = ?"
 )
 
+// ─── Row-Level Security Lite policies (__datadock_row_policies) ────────────
+//
+// At most one row policy per table (see RowPolicy in row_policy.go): the
+// column whose value must equal the acting username for a non-Admin session
+// to see/create/edit/delete a row. Enforced only on DataDock's own generated
+// queries (table browse, record CRUD, export) — see row_policy.go's doc
+// comment for the "Lite" scope boundary.
+
+const (
+	// rowPoliciesEnsureTableSQL creates the row-policies table on first use.
+	rowPoliciesEnsureTableSQL = "CREATE TABLE " + rowPoliciesTable + " (table_name TEXT, owner_column TEXT, updated_at TEXT)"
+	// rowPoliciesDeleteSQL removes a policy by table name — the first half of
+	// saveRowPolicy's delete-then-insert upsert, and also all of deleteRowPolicy.
+	rowPoliciesDeleteSQL = "DELETE FROM " + rowPoliciesTable + " WHERE table_name = ?"
+	// rowPoliciesInsertSQL writes a policy row, the second half of
+	// saveRowPolicy's upsert.
+	rowPoliciesInsertSQL = "INSERT INTO " + rowPoliciesTable + " (table_name, owner_column, updated_at) VALUES (?, ?, ?)"
+	// rowPoliciesSelectOneSQL fetches the policy for one table, if any
+	// (loadRowPolicy) — the enforcement lookup every policy-aware query
+	// builder call site makes.
+	rowPoliciesSelectOneSQL = "SELECT table_name, owner_column, updated_at FROM " + rowPoliciesTable + " WHERE table_name = ?"
+	// rowPoliciesSelectAllSQL lists every active policy, for the Admin
+	// Settings row-policy management section.
+	rowPoliciesSelectAllSQL = "SELECT table_name, owner_column, updated_at FROM " + rowPoliciesTable
+)
+
 // ─── Local user accounts (__datadock_users) ────────────────────────────────
 //
 // One row per local account (see User in users.go). There's no PRIMARY
@@ -677,9 +703,16 @@ func nativeRowCountQuery(name string) string {
 	return "SELECT COUNT(*) FROM " + quoteName(name)
 }
 
-// recordGetQuery builds the SELECT behind getRecord's single-row-by-id fetch.
-func recordGetQuery(conn *DBConnection, table string) string {
-	return fmt.Sprintf("SELECT * FROM %s WHERE %s = %s", conn.QuoteIdent(table), conn.QuoteIdent("id"), conn.Placeholder(1))
+// recordGetQuery builds the SELECT behind getRecord's single-row-by-id
+// fetch. ownerColumn is Row Level Security Lite's enforcement point (see
+// row_policy.go): when non-empty, the caller must bind the acting username
+// as the query's second placeholder argument (after the id).
+func recordGetQuery(conn *DBConnection, table string, ownerColumn string) string {
+	query := fmt.Sprintf("SELECT * FROM %s WHERE %s = %s", conn.QuoteIdent(table), conn.QuoteIdent("id"), conn.Placeholder(1))
+	if ownerColumn != "" {
+		query += fmt.Sprintf(" AND %s = %s", conn.QuoteIdent(ownerColumn), conn.Placeholder(2))
+	}
+	return query
 }
 
 // recordMaxIDQuery finds the current highest id, so insertRecord can assign
@@ -703,20 +736,35 @@ func recordInsertQuery(conn *DBConnection, table string, colNames, placeholders 
 // recordUpdateQuery builds the parameterized UPDATE for updateRecord, given
 // the already-built "col = ?" set clauses and the placeholder for the
 // trailing "WHERE id = ?" (its position depends on how many SET args precede
-// it, hence being passed in rather than always "1").
-func recordUpdateQuery(conn *DBConnection, table string, setClauses []string, idPlaceholder string) string {
-	return fmt.Sprintf(
+// it, hence being passed in rather than always "1"). ownerColumn/
+// ownerPlaceholder are Row Level Security Lite's enforcement point (see
+// row_policy.go): when ownerColumn is non-empty, the caller must bind the
+// acting username at ownerPlaceholder, restricting the update to that
+// session's own row regardless of which id was requested.
+func recordUpdateQuery(conn *DBConnection, table string, setClauses []string, idPlaceholder string, ownerColumn, ownerPlaceholder string) string {
+	query := fmt.Sprintf(
 		"UPDATE %s SET %s WHERE %s = %s",
 		conn.QuoteIdent(table),
 		strings.Join(setClauses, ", "),
 		conn.QuoteIdent("id"),
 		idPlaceholder,
 	)
+	if ownerColumn != "" {
+		query += fmt.Sprintf(" AND %s = %s", conn.QuoteIdent(ownerColumn), ownerPlaceholder)
+	}
+	return query
 }
 
 // recordDeleteQuery builds the parameterized DELETE for deleteRecord.
-func recordDeleteQuery(conn *DBConnection, table string) string {
-	return fmt.Sprintf("DELETE FROM %s WHERE %s = %s", conn.QuoteIdent(table), conn.QuoteIdent("id"), conn.Placeholder(1))
+// ownerColumn is Row Level Security Lite's enforcement point (see
+// row_policy.go): when non-empty, the caller must bind the acting username
+// as the query's second placeholder argument (after the id).
+func recordDeleteQuery(conn *DBConnection, table string, ownerColumn string) string {
+	query := fmt.Sprintf("DELETE FROM %s WHERE %s = %s", conn.QuoteIdent(table), conn.QuoteIdent("id"), conn.Placeholder(1))
+	if ownerColumn != "" {
+		query += fmt.Sprintf(" AND %s = %s", conn.QuoteIdent(ownerColumn), conn.Placeholder(2))
+	}
+	return query
 }
 
 // tableObjectsQuery lists every browsable table/view for conn's *default*
@@ -748,9 +796,21 @@ func tableObjectsQuery(c *DBConnection) string {
 }
 
 // selectAllQuery builds an unpaged "SELECT * FROM table", used where a full
-// unpaged dump is genuinely wanted (the table-view "Export" flow).
-func selectAllQuery(conn *DBConnection, table string) string {
-	return "SELECT * FROM " + conn.QuoteIdent(table)
+// unpaged dump is genuinely wanted (the table-view "Export" flow), which
+// executes through queryRows/queryTinySQLRows — a path that (unlike
+// queryConn/execConn's database/sql bridge) calls tinysql.ExecSQL directly
+// and has no parameter-binding support. So ownerValue, Row Level Security
+// Lite's enforcement point (see row_policy.go), is embedded as an escaped
+// SQL string literal rather than a placeholder. This is still safe: the only
+// caller ever passes the acting session's own username (never raw request
+// input) here, and demoSQLString applies the same standard '' quote-doubling
+// escaping used elsewhere in this file for literal SQL text.
+func selectAllQuery(conn *DBConnection, table string, ownerColumn, ownerValue string) string {
+	query := "SELECT * FROM " + conn.QuoteIdent(table)
+	if ownerColumn != "" {
+		query += " WHERE " + conn.QuoteIdent(ownerColumn) + " = " + demoSQLString(ownerValue)
+	}
+	return query
 }
 
 // createTableQuery builds a "CREATE TABLE" statement from already-quoted,
@@ -767,9 +827,16 @@ func dropTableQuery(conn *DBConnection, table string) string {
 // selectPageSQL builds a paginated "SELECT * FROM table" for one page of the
 // table browser / migration preview, per-dialect: SQL Server has no LIMIT/
 // OFFSET and needs TOP (for limit<=0) or ORDER BY ... OFFSET/FETCH, and
-// requires an ORDER BY before OFFSET/FETCH can be used at all.
-func (c *DBConnection) selectPageSQL(table, sortCol, dir string, limit, offset int) string {
+// requires an ORDER BY before OFFSET/FETCH can be used at all. ownerColumn is
+// Row Level Security Lite's enforcement point (see row_policy.go): when
+// non-empty, the caller must bind the acting username as the query's single
+// placeholder argument.
+func (c *DBConnection) selectPageSQL(table, sortCol, dir string, limit, offset int, ownerColumn string) string {
 	quotedTable := c.QuoteIdent(table)
+	whereClause := ""
+	if ownerColumn != "" {
+		whereClause = " WHERE " + c.QuoteIdent(ownerColumn) + " = " + c.Placeholder(1)
+	}
 	orderClause := ""
 	if sortCol != "" {
 		orderClause = " ORDER BY " + c.QuoteIdent(sortCol)
@@ -782,16 +849,16 @@ func (c *DBConnection) selectPageSQL(table, sortCol, dir string, limit, offset i
 	switch c.Dialect.Name {
 	case "Microsoft SQL Server":
 		if limit <= 0 {
-			return "SELECT TOP 0 * FROM " + quotedTable
+			return "SELECT TOP 0 * FROM " + quotedTable + whereClause
 		}
 		if orderClause == "" {
 			orderClause = " ORDER BY (SELECT NULL)"
 		}
-		return fmt.Sprintf("SELECT * FROM %s%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", quotedTable, orderClause, offset, limit)
+		return fmt.Sprintf("SELECT * FROM %s%s%s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", quotedTable, whereClause, orderClause, offset, limit)
 	default:
 		if limit <= 0 {
-			return "SELECT * FROM " + quotedTable + " LIMIT 0"
+			return "SELECT * FROM " + quotedTable + whereClause + " LIMIT 0"
 		}
-		return fmt.Sprintf("SELECT * FROM %s%s LIMIT %d OFFSET %d", quotedTable, orderClause, limit, offset)
+		return fmt.Sprintf("SELECT * FROM %s%s%s LIMIT %d OFFSET %d", quotedTable, whereClause, orderClause, limit, offset)
 	}
 }

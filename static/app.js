@@ -1059,6 +1059,7 @@ function initQueryPage() {
   var ta = document.getElementById('sqlInput');
   initQueryTabs(ta.value || '');
   restoreQueryFromHash();
+  loadQueryFromURLParam();
   ta.addEventListener('keydown', function (e) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
@@ -2489,6 +2490,55 @@ function restoreQueryFromHash() {
       }
     }
   } catch (e) {}
+}
+
+// loadQueryFromURLParam opens a saved query (from the /queries management
+// page's "Load in Editor" link, /query?load_query=<id>) as a new tab. Falls
+// through silently if the param is absent or the query no longer exists.
+function loadQueryFromURLParam() {
+  var params = new URLSearchParams(window.location.search);
+  var id = params.get('load_query');
+  if (!id) return;
+  fetch('/api/bi/queries?id=' + encodeURIComponent(id))
+    .then(function (resp) { return resp.ok ? resp.json() : null; })
+    .then(function (saved) {
+      if (saved && saved.sql_text) {
+        newQueryTab(saved.sql_text, saved.name || 'Saved Query');
+        syncActiveTabControls();
+        renderQueryTabs();
+      }
+      history.replaceState(null, '', window.location.pathname);
+    })
+    .catch(function () {});
+}
+
+// saveCurrentQuery POSTs the editor's current SQL to the BI foundation's
+// saved-query API (/queries is its management page). Mirrors
+// saveQuickChartAsChart's prompt-for-a-name pattern.
+function saveCurrentQuery() {
+  var sqlText = getEditorValue().trim();
+  if (!sqlText) {
+    window.alert('No SQL query to save.');
+    return;
+  }
+  var name = window.prompt('Name this saved query:', '');
+  if (!name) return;
+  name = name.trim();
+  if (!name) return;
+  fetch('/api/bi/queries', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: name, sql_text: sqlText})
+  })
+    .then(function (resp) { return resp.json().then(function (body) { return {ok: resp.ok, body: body}; }); })
+    .then(function (res) {
+      if (res.ok) {
+        window.alert('Query "' + name + '" saved. Manage it from the Saved Queries page.');
+      } else {
+        window.alert('Could not save query: ' + ((res.body && (res.body.detail || res.body.title)) || 'unknown error'));
+      }
+    })
+    .catch(function (err) { window.alert('Could not save query: ' + err); });
 }
 
 function getEditorValue() {
@@ -4630,6 +4680,30 @@ function initAdminRestorePage() {
         refreshSubmitState();
       });
   });
+}
+
+// verifyAuditLog checks tinySQL's own tamper-evident, hash-chained audit log
+// (separate from DataDock's own audit.go log) via GET /api/admin/audit/verify.
+function verifyAuditLog() {
+  var btn = document.getElementById('auditVerifyBtn');
+  var result = document.getElementById('auditVerifyResult');
+  if (!btn || !result) return;
+  btn.disabled = true;
+  fetch('/api/admin/audit/verify')
+    .then(function (resp) { return resp.json(); })
+    .then(function (body) {
+      if (!body.configured) {
+        result.innerHTML = '<div class="alert alert-secondary py-2 mb-0"><i class="bi bi-info-circle me-1"></i>' + escHtml(body.detail || 'No audit log configured.') + '</div>';
+      } else if (body.verified) {
+        result.innerHTML = '<div class="alert alert-success py-2 mb-0"><i class="bi bi-check-circle me-1"></i>Verified — ' + body.entry_count + ' entr' + (body.entry_count === 1 ? 'y' : 'ies') + ', no tampering detected.</div>';
+      } else {
+        result.innerHTML = '<div class="alert alert-danger py-2 mb-0"><i class="bi bi-exclamation-octagon me-1"></i>Verification FAILED: ' + escHtml(body.error || 'unknown error') + '</div>';
+      }
+    })
+    .catch(function (err) {
+      result.innerHTML = '<div class="alert alert-danger py-2 mb-0"><i class="bi bi-x-circle me-1"></i>' + escHtml(String(err)) + '</div>';
+    })
+    .finally(function () { btn.disabled = false; });
 }
 
 var llmDetectedServers = [];

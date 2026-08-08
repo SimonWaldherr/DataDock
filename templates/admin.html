@@ -16,11 +16,13 @@
     <a href="/pipelines" class="btn btn-sm btn-outline-secondary"><i class="bi bi-diagram-3 me-1"></i>Pipelines</a>
     <a href="/api/admin/snapshot" class="btn btn-sm btn-outline-secondary" title="Contains every stored secret in plaintext (LLM/embedding API keys, saved connection passwords, user password hashes) — handle like a credentials file, not a routine backup."><i class="bi bi-download me-1"></i>Snapshot</a>
     <a href="/api/tinysql/vector-cache" class="btn btn-sm btn-outline-secondary"><i class="bi bi-speedometer me-1"></i>Vector Debug</a>
+    <button type="button" class="btn btn-sm btn-outline-secondary" id="auditVerifyBtn" onclick="verifyAuditLog()"><i class="bi bi-patch-check me-1"></i>Verify Audit Log</button>
     <form method="post" action="/admin/logout" class="d-inline">
       <button class="btn btn-sm btn-outline-secondary"><i class="bi bi-box-arrow-right me-1"></i>Log out</button>
     </form>
   </div>
 </div>
+<div id="auditVerifyResult" class="small mb-2"></div>
 
 {{template "alert" .}}
 
@@ -150,6 +152,59 @@
   </div>
 </div>
 
+<div id="adminRowPolicies" class="card">
+  <div class="card-body">
+    <h2 class="h6 mb-1"><i class="bi bi-eye-slash text-primary me-1"></i>Row Level Security (Lite)</h2>
+    <p class="small text-muted mb-3" style="max-width:70ch">
+      Restricts a non-Admin session to rows where the chosen column equals their own username — enforced on
+      the table browser, record forms, and export. <strong>Does not apply to the SQL editor</strong>
+      (<code>/query</code>, <code>/api/query</code>): safely rewriting arbitrary SQL is out of scope for this
+      "Lite" feature, so restrict SQL-editor write access separately for any protected table if that matters
+      to you. Admin sessions always bypass every policy.
+    </p>
+    <form method="post" action="/admin/row-policies" class="row g-2 align-items-end mb-3">
+      <div class="col-auto">
+        <label class="form-label small mb-1" for="rowPolicyTable">Table</label>
+        <select class="form-select form-select-sm" id="rowPolicyTable" name="table" required>
+          <option value="">Choose a table&hellip;</option>
+          {{range .Tables}}
+          <option value="{{.}}">{{.}}</option>
+          {{end}}
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small mb-1" for="rowPolicyColumn">Owner column</label>
+        <input class="form-control form-control-sm" id="rowPolicyColumn" name="owner_column" placeholder="owner" required>
+      </div>
+      <div class="col-auto">
+        <button class="btn btn-sm btn-outline-primary" type="submit"><i class="bi bi-plus-lg me-1"></i>Save policy</button>
+      </div>
+    </form>
+    {{if .RowPolicies}}
+    <table class="table table-sm mb-0">
+      <thead><tr><th>Table</th><th>Owner column</th><th>Updated</th><th></th></tr></thead>
+      <tbody>
+        {{range .RowPolicies}}
+        <tr>
+          <td>{{.TableName}}</td>
+          <td><code>{{.OwnerColumn}}</code></td>
+          <td class="small text-muted">{{.UpdatedAt.Format "2006-01-02 15:04"}}</td>
+          <td class="text-end">
+            <form method="post" action="/admin/row-policies/delete" class="d-inline">
+              <input type="hidden" name="table" value="{{.TableName}}">
+              <button class="btn btn-sm btn-outline-danger" type="submit"><i class="bi bi-trash"></i></button>
+            </form>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="small text-muted mb-0">No row policies yet.</p>
+    {{end}}
+  </div>
+</div>
+
 <div id="adminSettings" class="card">
   <div class="card-body">
     <div class="d-flex justify-content-between align-items-center mb-3">
@@ -197,6 +252,10 @@
       <div class="col-12">
         <label class="form-check small mb-1"><input class="form-check-input" type="checkbox" name="require_login_for_reads" {{if .Settings.RequireLoginForReads}}checked{{end}}> Require login to read data</label>
         <div class="form-text">When off (default), anyone who can reach DataDock may browse tables, run <code>SELECT</code>, and export; only writes need an account. When on, every data, schema, and catalog view requires a signed-in account of any role. No effect in single-user no-login mode.</div>
+      </div>
+      <div class="col-12">
+        <label class="form-check small mb-1"><input class="form-check-input" type="checkbox" name="native_permission_mirror_enabled" {{if .Settings.NativePermissionMirrorEnabled}}checked{{end}}> Native RBAC mirror (defense in depth)</label>
+        <div class="form-text">Adds a second, independent write-permission check using tinySQL's own built-in RBAC (mirrored from every DataDock user account) alongside the existing role check on the SQL editor. Off by default. Safe to enable: it can only make write access <em>stricter</em>, never grant more than the existing check already would — tinySQL's own automatic enforcement stays permanently disabled either way.</div>
       </div>
 
       <div class="col-12 admin-section-title mt-2">Appearance</div>

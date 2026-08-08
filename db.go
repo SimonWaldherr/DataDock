@@ -47,6 +47,10 @@ type App struct {
 	verbose              *VerboseLogger
 	audit                *AuditLogger
 	authMode             AuthMode
+	// nativePermissionMirrorEnabled gates sessionCanWriteSQL's second,
+	// independent check against tinySQL's native RBAC mirror — see
+	// native_rbac.go's package doc comment.
+	nativePermissionMirrorEnabled bool
 
 	// listenAddr and allowInsecureRemote are set once at startup (see
 	// main.go) and read-only afterward: they record where the HTTP server
@@ -284,7 +288,10 @@ type TableScript struct {
 func (a *App) buildTableScript(ctx context.Context, meta TableMeta) TableScript {
 	conn := a.activeConn(ctx)
 	script := TableScript{Name: meta.Name, Kind: meta.Kind, HasID: meta.HasID, Columns: meta.Columns}
-	script.SelectTop = conn.selectPageSQL(meta.Name, "", "", 1000, 0)
+	// "" (no owner column): this is example SQL text for the user to copy
+	// into the editor, not an executed query — row policies (row_policy.go)
+	// are deliberately not enforced on the free-form SQL editor.
+	script.SelectTop = conn.selectPageSQL(meta.Name, "", "", 1000, 0, "")
 	script.Structure = conn.buildColumnStructure(ctx, meta)
 	if meta.Kind != "view" {
 		script.InsertTmpl = buildInsertTemplateSQL(conn, meta)
@@ -544,7 +551,9 @@ func (a *App) queryBackedMeta(ctx context.Context, name, kind string) (TableMeta
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
 	conn := a.activeConn(ctx)
-	query := conn.selectPageSQL(name, "", "asc", 0, 0)
+	// "" (no owner column): limit=0 fetches zero rows (schema/column
+	// metadata only), so a row policy has nothing to restrict here.
+	query := conn.selectPageSQL(name, "", "asc", 0, 0, "")
 	rows, err := a.queryConn(ctx, conn, "metadata.query_backed_meta", query)
 	if err != nil {
 		return TableMeta{}, err
@@ -578,12 +587,23 @@ func (a *App) queryBackedMeta(ctx context.Context, name, kind string) (TableMeta
 	return meta, nil
 }
 
-// getRecord fetches a single record by id.
+// getRecord fetches a single record by id. Row Level Security Lite
+// (row_policy.go): if table has an active policy and this session isn't
+// exempt, the fetch is additionally restricted to the session's own row —
+// requesting another owner's id returns sql.ErrNoRows, not that row's data.
 func (a *App) getRecord(ctx context.Context, table string, id string) ([]Column, []string, error) {
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
 	conn := a.activeConn(ctx)
-	rows, err := a.queryConn(ctx, conn, "record.get", recordGetQuery(conn, table), parseID(id))
+	ownerColumn, ownerValue, err := a.rowPolicyOwnerColumnAndArg(ctx, table)
+	if err != nil {
+		return nil, nil, err
+	}
+	args := []any{parseID(id)}
+	if ownerColumn != "" {
+		args = append(args, ownerValue)
+	}
+	rows, err := a.queryConn(ctx, conn, "record.get", recordGetQuery(conn, table, ownerColumn), args...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -617,9 +637,21 @@ func (a *App) getRecord(ctx context.Context, table string, id string) ([]Column,
 }
 
 // insertRecord inserts a new record into a table, assigning the next id.
+// Row Level Security Lite (row_policy.go): if table has an active policy and
+// this session isn't exempt, the owner column is force-set to the acting
+// username, overriding whatever the form submitted for it — a new row is
+// always attributed to whoever actually created it, never to a value a
+// client could spoof.
 func (a *App) insertRecord(ctx context.Context, table string, values map[string]string, cols []Column) error {
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
+	ownerColumn, ownerValue, err := a.rowPolicyOwnerColumnAndArg(ctx, table)
+	if err != nil {
+		return err
+	}
+	if ownerColumn != "" {
+		values = cloneStringMapWithOverride(values, ownerColumn, ownerValue)
+	}
 	// Determine next id via MAX(id)+1.
 	conn := a.activeConn(ctx)
 	var maxID sql.NullInt64
@@ -652,17 +684,31 @@ func (a *App) insertRecord(ctx context.Context, table string, values map[string]
 	}
 
 	query := recordInsertQuery(conn, table, colNames, placeholders)
-	_, err := a.execConn(ctx, conn, "record.insert", query, args...)
+	_, err = a.execConn(ctx, conn, "record.insert", query, args...)
 	return err
 }
 
-// updateRecord updates an existing record identified by id.
+// updateRecord updates an existing record identified by id. Row Level
+// Security Lite (row_policy.go): if table has an active policy and this
+// session isn't exempt, (1) the owner column is force-set to the acting
+// username in the SET clause too — a non-admin can't reassign their row to a
+// different owner by editing that field — and (2) the WHERE clause is
+// additionally restricted to the session's own row, so updating another
+// owner's id affects zero rows rather than modifying it.
 func (a *App) updateRecord(ctx context.Context, table string, id string, values map[string]string, cols []Column) error {
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
+	ownerColumn, ownerValue, err := a.rowPolicyOwnerColumnAndArg(ctx, table)
+	if err != nil {
+		return err
+	}
+	if ownerColumn != "" {
+		values = cloneStringMapWithOverride(values, ownerColumn, ownerValue)
+	}
+
 	conn := a.activeConn(ctx)
 	setClauses := make([]string, 0, len(cols))
-	args := make([]interface{}, 0, len(cols)+1)
+	args := make([]interface{}, 0, len(cols)+2)
 
 	for _, col := range cols {
 		if strings.EqualFold(col.Name, "id") {
@@ -675,18 +721,35 @@ func (a *App) updateRecord(ctx context.Context, table string, id string, values 
 		return nil
 	}
 	args = append(args, parseID(id))
+	idPlaceholder := conn.Placeholder(len(args))
+	ownerPlaceholder := ""
+	if ownerColumn != "" {
+		args = append(args, ownerValue)
+		ownerPlaceholder = conn.Placeholder(len(args))
+	}
 
-	query := recordUpdateQuery(conn, table, setClauses, conn.Placeholder(len(args)))
-	_, err := a.execConn(ctx, conn, "record.update", query, args...)
+	query := recordUpdateQuery(conn, table, setClauses, idPlaceholder, ownerColumn, ownerPlaceholder)
+	_, err = a.execConn(ctx, conn, "record.update", query, args...)
 	return err
 }
 
-// deleteRecord deletes a record by id.
+// deleteRecord deletes a record by id. Row Level Security Lite
+// (row_policy.go): if table has an active policy and this session isn't
+// exempt, the delete is additionally restricted to the session's own row —
+// deleting another owner's id affects zero rows rather than deleting it.
 func (a *App) deleteRecord(ctx context.Context, table string, id string) error {
 	ctx, cancel := a.withQueryTimeout(ctx)
 	defer cancel()
 	conn := a.activeConn(ctx)
-	_, err := a.execConn(ctx, conn, "record.delete", recordDeleteQuery(conn, table), parseID(id))
+	ownerColumn, ownerValue, err := a.rowPolicyOwnerColumnAndArg(ctx, table)
+	if err != nil {
+		return err
+	}
+	args := []any{parseID(id)}
+	if ownerColumn != "" {
+		args = append(args, ownerValue)
+	}
+	_, err = a.execConn(ctx, conn, "record.delete", recordDeleteQuery(conn, table, ownerColumn), args...)
 	return err
 }
 
@@ -967,7 +1030,9 @@ func (c *DBConnection) tableMeta(ctx context.Context, name string) (TableMeta, e
 			return TableMeta{}, fmt.Errorf("table %q not found", name)
 		}
 	}
-	query := c.selectPageSQL(canonical, "", "asc", 0, 0)
+	// "" (no owner column): limit=0 fetches zero rows (schema/column
+	// metadata only), so a row policy has nothing to restrict here.
+	query := c.selectPageSQL(canonical, "", "asc", 0, 0, "")
 	rows, err := c.queryContext(ctx, "metadata.table_meta", query)
 	if err != nil {
 		return TableMeta{}, err

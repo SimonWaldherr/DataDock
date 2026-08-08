@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -166,5 +169,73 @@ func TestDashboardSaveLoadListDelete(t *testing.T) {
 	}
 	if _, ok, err := app.loadDashboard(ctx, dash.ID); err != nil || ok {
 		t.Errorf("expected the dashboard to be gone after delete, got ok=%v err=%v", ok, err)
+	}
+}
+
+// postJSON calls handler directly (mirroring existing handler-level tests
+// like TestMatchHandlerLoadsSavedConfig) with ctx attached and body encoded
+// as JSON, returning the recorder for status/body assertions.
+func postJSON(t *testing.T, ctx context.Context, handler http.HandlerFunc, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+	req := httptest.NewRequest(method, path, strings.NewReader(string(encoded))).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	return rec
+}
+
+func TestBIOwnershipBlocksNonOwnerUpdatesAndDeletes(t *testing.T) {
+	app := newTestApp(t)
+	aliceCtx := sessionCtx(app, "sess-alice-0000000000000", "alice", RoleUser)
+	bobCtx := sessionCtx(app, "sess-bob-00000000000000", "bob", RoleUser)
+	adminCtx := sessionCtx(app, "sess-admin-0000000000000", "root", RoleAdmin)
+
+	rec := postJSON(t, aliceCtx, app.apiSavedQueriesHandler, http.MethodPost, "/api/bi/queries",
+		SavedQuery{Name: "Alice's Query", SQLText: "SELECT 1"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create as alice: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var created SavedQuery
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created saved query: %v", err)
+	}
+	if created.Owner != "alice" {
+		t.Fatalf("expected owner=alice, got %q", created.Owner)
+	}
+
+	// Bob cannot update alice's saved query, including trying to steal it by
+	// resubmitting with his own name as the owner.
+	rec = postJSON(t, bobCtx, app.apiSavedQueriesHandler, http.MethodPost, "/api/bi/queries",
+		SavedQuery{ID: created.ID, Name: "Hijacked", SQLText: "SELECT 2", Owner: "bob"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("bob updating alice's saved query: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if reloaded, _, _ := app.loadSavedQuery(context.Background(), created.ID); reloaded.Name != "Alice's Query" || reloaded.Owner != "alice" {
+		t.Fatalf("expected alice's saved query to be unmodified by bob's attempt, got %+v", reloaded)
+	}
+
+	// Bob cannot delete it either.
+	rec = postJSON(t, bobCtx, app.apiDeleteSavedQueryHandler, http.MethodPost, "/api/bi/queries/delete",
+		map[string]string{"id": created.ID})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("bob deleting alice's saved query: expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Alice herself can update it.
+	rec = postJSON(t, aliceCtx, app.apiSavedQueriesHandler, http.MethodPost, "/api/bi/queries",
+		SavedQuery{ID: created.ID, Name: "Alice's Query v2", SQLText: "SELECT 3"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("alice updating her own saved query: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Admin can delete anyone's saved query.
+	rec = postJSON(t, adminCtx, app.apiDeleteSavedQueryHandler, http.MethodPost, "/api/bi/queries/delete",
+		map[string]string{"id": created.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin deleting alice's saved query: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

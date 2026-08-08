@@ -195,6 +195,12 @@ func newTestApp(t *testing.T) *App {
 	t.Helper()
 
 	nativeDB := tinysql.NewDB()
+	// Mirrors main.go's own startup sequence: must run before anything can
+	// call CreateUser on this DB (createUser in users.go now mirrors into
+	// tinySQL's native RBAC, see native_rbac.go) — without this, the first
+	// mirrored user would silently activate tinySQL's own automatic
+	// engine-level RBAC enforcement for the rest of this test.
+	ensureNativeRBACSafetyNet(nativeDB)
 	tenant := "default"
 	_ = testCounter.Add(1)
 

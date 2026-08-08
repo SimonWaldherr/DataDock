@@ -12,6 +12,7 @@ import (
 
 func ExampleApp_apiExportHandler() {
 	nativeDB := tinysql.NewDB()
+	ensureNativeRBACSafetyNet(nativeDB)
 	sqlDB, err := tsqldriver.OpenWithDB(nativeDB)
 	if err != nil {
 		panic(err)

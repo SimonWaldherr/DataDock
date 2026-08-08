@@ -15,6 +15,7 @@ func newBenchmarkApp(b *testing.B, rows int) *App {
 	b.Helper()
 
 	nativeDB := tinysql.NewDB()
+	ensureNativeRBACSafetyNet(nativeDB)
 	tenant := "default"
 
 	sqlDB, err := tsqldriver.OpenWithDB(nativeDB)
