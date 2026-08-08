@@ -181,12 +181,20 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	readGuarded("GET /api/tinysql/agent-context", a.apiTinySQLAgentContextHandler)
 	handle("GET /api/tinysql/vector-cache", a.requireAdmin(a.apiTinySQLVectorCacheHandler))
 	handle("GET /api/admin/snapshot", a.requireAdmin(a.apiSnapshotExportHandler))
+	// Deliberately NOT wrapped in requireWritable: restore requires
+	// maintenance mode to already be ON (checked inside the handler), which
+	// would otherwise make this route unreachable the moment it's needed.
+	handle("POST /api/admin/snapshot/restore", a.requireAdmin(a.apiSnapshotRestoreHandler))
 	readGuarded("GET /api/catalog", a.apiCatalogHandler)
 	readGuarded("GET /api/catalog/expand", a.apiCatalogExpandHandler)
 	readGuarded("POST /api/logic-search", a.apiLogicSearchHandler)
 	handle("GET /api/admin/status", a.requireAdmin(a.apiAdminStatusHandler))
 	handle("GET /api/admin/settings", a.requireAdmin(a.apiAdminSettingsHandler))
 	handle("POST /api/admin/settings", a.requireAdmin(a.apiAdminSettingsHandler))
+	// Deliberately NOT wrapped in requireWritable — same reasoning as
+	// POST /admin/maintenance/toggle: it must stay reachable to turn
+	// maintenance mode back off.
+	handle("POST /api/admin/maintenance", a.requireAdmin(a.apiAdminMaintenanceHandler))
 	handle("GET /api/jobs", a.requireAdmin(a.apiJobsHandler))
 	handle("POST /api/jobs", a.requireAdmin(a.requireWritable(a.apiJobsHandler)))
 	handle("POST /api/jobs/run", a.requireAdmin(a.requireWritable(a.apiRunJobHandler)))
@@ -208,6 +216,21 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	handle("POST /api/llm/autoconfig", a.requireAdmin(a.apiLLMAutoConfigHandler))
 	handle("GET /api/llm/health", a.requireAdmin(a.apiLLMHealthHandler))
 	readGuarded("POST /api/llm/run", a.apiLLMRunHandler)
+
+	// BI foundation: saved queries, charts, dashboards. Gated at the same
+	// tier as record CRUD (/t/{table}/new etc. above) — a normal end-user
+	// feature, not admin-only like Jobs/Pipelines.
+	readGuarded("GET /api/bi/queries", a.apiSavedQueriesHandler)
+	handle("POST /api/bi/queries", a.requireWritable(a.requireLogin(a.apiSavedQueriesHandler)))
+	handle("POST /api/bi/queries/delete", a.requireWritable(a.requireLogin(a.apiDeleteSavedQueryHandler)))
+	readGuarded("GET /api/bi/charts", a.apiChartsHandler)
+	handle("POST /api/bi/charts", a.requireWritable(a.requireLogin(a.apiChartsHandler)))
+	handle("POST /api/bi/charts/delete", a.requireWritable(a.requireLogin(a.apiDeleteChartHandler)))
+	readGuarded("GET /api/bi/dashboards", a.apiDashboardsHandler)
+	handle("POST /api/bi/dashboards", a.requireWritable(a.requireLogin(a.apiDashboardsHandler)))
+	handle("POST /api/bi/dashboards/delete", a.requireWritable(a.requireLogin(a.apiDeleteDashboardHandler)))
+	readGuarded("GET /dashboards", a.dashboardsListHandler)
+	readGuarded("GET /dashboards/{id}", a.dashboardViewHandler)
 }
 
 func styleCSSHandler(w http.ResponseWriter, r *http.Request) {
@@ -954,6 +977,51 @@ func (a *App) jobsHandler(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "jobs", map[string]interface{}{
 		"Jobs":    a.nativeDB.Catalog().ListJobs(),
 		"History": a.nativeDB.Catalog().ListJobHistory(),
+	})
+}
+
+// dashboardsListHandler renders the BI foundation's dashboard list — every
+// saved dashboard plus a "new dashboard" form. Gated the same as the rest of
+// the BI surface (readGuarded, see registerRoutes): a normal end-user page.
+func (a *App) dashboardsListHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	dashboards, err := a.listDashboards(ctx)
+	if err != nil {
+		a.render(w, r, "dashboards", map[string]interface{}{"Error": "Load dashboards: " + err.Error()})
+		return
+	}
+	a.render(w, r, "dashboards", map[string]interface{}{"Dashboards": dashboards})
+}
+
+// dashboardViewHandler renders one dashboard's canvas. The actual chart
+// rendering (fetching each chart's row data via /api/query and drawing it
+// with vega-embed) happens client-side in static/dashboard.js — this handler
+// only needs to confirm the dashboard exists and hand its id/name to the
+// page; dashboard.js re-fetches the full record (with its charts) via
+// GET /api/bi/dashboards?id=... so "Save layout" can refresh without a
+// full page reload.
+func (a *App) dashboardViewHandler(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	dashboard, found, err := a.loadDashboard(ctx, id)
+	if err != nil {
+		a.render(w, r, "dashboard", map[string]interface{}{"Error": "Load dashboard: " + err.Error()})
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	charts, err := a.listCharts(ctx)
+	if err != nil {
+		a.render(w, r, "dashboard", map[string]interface{}{"Error": "Load charts: " + err.Error()})
+		return
+	}
+	a.render(w, r, "dashboard", map[string]interface{}{
+		"Dashboard": dashboard,
+		"Charts":    charts,
 	})
 }
 
@@ -2971,15 +3039,14 @@ func (a *App) apiTinySQLVectorCacheHandler(w http.ResponseWriter, r *http.Reques
 	a.writeJSON(w, http.StatusOK, tinysql.VectorCacheAnalytics())
 }
 
-// apiSnapshotExportHandler emits a portable native snapshot only. Restore is
-// intentionally not exposed over HTTP: it needs size limits, validation, an
-// atomic swap, and explicit operator approval outside a request handler.
-// apiSnapshotExportHandler exports the entire native database verbatim,
-// including __datadock_settings (LLM/embedding API keys, saved connection
-// passwords when storage encryption isn't in use) and __datadock_users
-// (password hashes) — there is no filtered/redacted export mode, so the
-// filename says so plainly and every export is audit-logged, mirroring how
-// a write would be recorded even though this is a GET.
+// apiSnapshotExportHandler emits a portable native snapshot in the same GOB
+// format apiSnapshotRestoreHandler (snapshot_restore.go) validates and
+// restores. It exports the entire native database verbatim, including
+// __datadock_settings (LLM/embedding API keys, saved connection passwords
+// when storage encryption isn't in use) and __datadock_users (password
+// hashes) — there is no filtered/redacted export mode, so the filename says
+// so plainly and every export is audit-logged, mirroring how a write would
+// be recorded even though this is a GET.
 func (a *App) apiSnapshotExportHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="datadock-snapshot-CONTAINS-SECRETS.gob"`)
@@ -3130,6 +3197,45 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 	default:
 		a.writeProblem(w, r, http.StatusMethodNotAllowed, "Method not allowed", "method not allowed")
 	}
+}
+
+// apiAdminMaintenanceHandler is the JSON-API counterpart to the admin-UI
+// maintenance toggle (POST /admin/maintenance/toggle, adminToggleMaintenanceHandler
+// in admin_auth.go) that apiAdminSettingsHandler deliberately excludes — see
+// the comment there. Unlike the UI's toggle-in-place button, this accepts an
+// explicit target state so automation stays idempotent. Deliberately not
+// wrapped in requireWritable, for the same reason as the UI toggle: it must
+// stay reachable to turn maintenance mode back off.
+func (a *App) apiAdminMaintenanceHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if !a.decodeJSONBody(w, r, &body, "Request body must include an \"enabled\" boolean.") {
+		return
+	}
+	settings := a.currentRuntimeSettings()
+	settings.ReadOnlyMode = body.Enabled
+	if err := a.applyRuntimeSettings(settings); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Invalid settings", err.Error())
+		return
+	}
+	if err := a.saveRuntimeSettings(r.Context()); err != nil {
+		a.writeProblem(w, r, http.StatusInternalServerError, "Save failed", err.Error())
+		return
+	}
+	if audit := a.auditLogger(); audit.Enabled() {
+		sessionID := sessionIDFromContext(r.Context())
+		username, _, _ := a.currentSessionUser(sessionID)
+		audit.Log(AuditEvent{
+			Session:   sessionID,
+			Username:  username,
+			Method:    r.Method,
+			Path:      r.URL.Path,
+			Operation: "maintenance_mode_set",
+			Detail:    fmt.Sprintf("read_only_mode set to %v via API", body.Enabled),
+		})
+	}
+	a.writeJSON(w, http.StatusOK, a.runtimeSettingsView())
 }
 
 func (a *App) apiLLMDiscoverHandler(w http.ResponseWriter, r *http.Request) {
@@ -3555,6 +3661,208 @@ func (a *App) auditPipelineEvent(r *http.Request, operation, target, detail stri
 		Detail:    detail,
 		Status:    status,
 	})
+}
+
+// auditBIEvent is auditPipelineEvent's counterpart for the BI foundation
+// (saved queries/charts/dashboards) — same shape, kept separate rather than
+// generalized since the two features' audit semantics may diverge later.
+func (a *App) auditBIEvent(r *http.Request, operation, target, detail string) {
+	audit := a.auditLogger()
+	if !audit.Enabled() {
+		return
+	}
+	sessionID := sessionIDFromContext(r.Context())
+	username, _, _ := a.currentSessionUser(sessionID)
+	audit.Log(AuditEvent{
+		Session:   sessionID,
+		Username:  username,
+		Method:    r.Method,
+		Path:      r.URL.Path,
+		Operation: operation,
+		Target:    target,
+		Detail:    detail,
+	})
+}
+
+// currentSessionUsername is a small convenience over currentSessionUser for
+// the BI handlers below, which only need the name (to default an entity's
+// Owner field), not the role/ok flags.
+func (a *App) currentSessionUsername(r *http.Request) string {
+	username, _, _ := a.currentSessionUser(sessionIDFromContext(r.Context()))
+	return username
+}
+
+// apiSavedQueriesHandler is the BI foundation's saved-query collection
+// endpoint, following the same GET(list)/POST(create-or-update) shape as
+// apiPipelinesHandler (handlers.go above) rather than a REST /{id} scheme —
+// consistent with every other JSON collection endpoint in this codebase.
+func (a *App) apiSavedQueriesHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ctx, cancel := a.withQueryTimeout(r.Context())
+		defer cancel()
+		list, err := a.listSavedQueries(ctx)
+		if err != nil {
+			a.writeProblem(w, r, http.StatusInternalServerError, "Load saved queries", err.Error())
+			return
+		}
+		a.writeJSON(w, http.StatusOK, map[string]any{"saved_queries": list})
+	case http.MethodPost:
+		var body SavedQuery
+		if !a.decodeJSONBody(w, r, &body, "Request body must be a saved query object.") {
+			return
+		}
+		if strings.TrimSpace(body.Owner) == "" {
+			body.Owner = a.currentSessionUsername(r)
+		}
+		ctx, cancel := a.withQueryTimeout(r.Context())
+		defer cancel()
+		saved, err := a.saveSavedQuery(ctx, body)
+		if err != nil {
+			a.writeProblem(w, r, http.StatusBadRequest, "Save saved query", err.Error())
+			return
+		}
+		a.auditBIEvent(r, "saved_query.save", saved.ID, saved.Name)
+		a.writeJSON(w, http.StatusOK, saved)
+	default:
+		a.writeProblem(w, r, http.StatusMethodNotAllowed, "Method not allowed", "method not allowed")
+	}
+}
+
+func (a *App) apiDeleteSavedQueryHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID string `json:"id"`
+	}
+	if !a.decodeJSONBody(w, r, &body, "Request body must include an id.") {
+		return
+	}
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	if err := a.deleteSavedQuery(ctx, body.ID); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Delete saved query", err.Error())
+		return
+	}
+	a.auditBIEvent(r, "saved_query.delete", body.ID, "")
+	a.writeJSON(w, http.StatusOK, map[string]any{"deleted": body.ID})
+}
+
+// apiChartsHandler mirrors apiSavedQueriesHandler for the Chart entity.
+func (a *App) apiChartsHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ctx, cancel := a.withQueryTimeout(r.Context())
+		defer cancel()
+		list, err := a.listCharts(ctx)
+		if err != nil {
+			a.writeProblem(w, r, http.StatusInternalServerError, "Load charts", err.Error())
+			return
+		}
+		a.writeJSON(w, http.StatusOK, map[string]any{"charts": list})
+	case http.MethodPost:
+		var body Chart
+		if !a.decodeJSONBody(w, r, &body, "Request body must be a chart object.") {
+			return
+		}
+		if strings.TrimSpace(body.Owner) == "" {
+			body.Owner = a.currentSessionUsername(r)
+		}
+		ctx, cancel := a.withQueryTimeout(r.Context())
+		defer cancel()
+		saved, err := a.saveChart(ctx, body)
+		if err != nil {
+			a.writeProblem(w, r, http.StatusBadRequest, "Save chart", err.Error())
+			return
+		}
+		a.auditBIEvent(r, "chart.save", saved.ID, saved.Name)
+		a.writeJSON(w, http.StatusOK, saved)
+	default:
+		a.writeProblem(w, r, http.StatusMethodNotAllowed, "Method not allowed", "method not allowed")
+	}
+}
+
+func (a *App) apiDeleteChartHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID string `json:"id"`
+	}
+	if !a.decodeJSONBody(w, r, &body, "Request body must include an id.") {
+		return
+	}
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	if err := a.deleteChart(ctx, body.ID); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Delete chart", err.Error())
+		return
+	}
+	a.auditBIEvent(r, "chart.delete", body.ID, "")
+	a.writeJSON(w, http.StatusOK, map[string]any{"deleted": body.ID})
+}
+
+// apiDashboardsHandler mirrors apiSavedQueriesHandler for the Dashboard
+// entity — list/create/update, plus (like apiPipelinesHandler's own ?name=
+// branch) a single-dashboard fetch via ?id=, used by the canvas page
+// (static/dashboard.js) to load its charts/layout independently of the page
+// render, so "Save layout" can re-fetch without a full reload.
+func (a *App) apiDashboardsHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		ctx, cancel := a.withQueryTimeout(r.Context())
+		defer cancel()
+		if id := strings.TrimSpace(r.URL.Query().Get("id")); id != "" {
+			dashboard, found, err := a.loadDashboard(ctx, id)
+			if err != nil {
+				a.writeProblem(w, r, http.StatusInternalServerError, "Load dashboard", err.Error())
+				return
+			}
+			if !found {
+				a.writeProblem(w, r, http.StatusNotFound, "Not found", "no dashboard with that id")
+				return
+			}
+			a.writeJSON(w, http.StatusOK, dashboard)
+			return
+		}
+		list, err := a.listDashboards(ctx)
+		if err != nil {
+			a.writeProblem(w, r, http.StatusInternalServerError, "Load dashboards", err.Error())
+			return
+		}
+		a.writeJSON(w, http.StatusOK, map[string]any{"dashboards": list})
+	case http.MethodPost:
+		var body Dashboard
+		if !a.decodeJSONBody(w, r, &body, "Request body must be a dashboard object.") {
+			return
+		}
+		if strings.TrimSpace(body.Owner) == "" {
+			body.Owner = a.currentSessionUsername(r)
+		}
+		ctx, cancel := a.withQueryTimeout(r.Context())
+		defer cancel()
+		saved, err := a.saveDashboard(ctx, body)
+		if err != nil {
+			a.writeProblem(w, r, http.StatusBadRequest, "Save dashboard", err.Error())
+			return
+		}
+		a.auditBIEvent(r, "dashboard.save", saved.ID, saved.Name)
+		a.writeJSON(w, http.StatusOK, saved)
+	default:
+		a.writeProblem(w, r, http.StatusMethodNotAllowed, "Method not allowed", "method not allowed")
+	}
+}
+
+func (a *App) apiDeleteDashboardHandler(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID string `json:"id"`
+	}
+	if !a.decodeJSONBody(w, r, &body, "Request body must include an id.") {
+		return
+	}
+	ctx, cancel := a.withQueryTimeout(r.Context())
+	defer cancel()
+	if err := a.deleteDashboard(ctx, body.ID); err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "Delete dashboard", err.Error())
+		return
+	}
+	a.auditBIEvent(r, "dashboard.delete", body.ID, "")
+	a.writeJSON(w, http.StatusOK, map[string]any{"deleted": body.ID})
 }
 
 func (a *App) apiImportHandler(w http.ResponseWriter, r *http.Request) {

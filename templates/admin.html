@@ -119,6 +119,37 @@
   </div>
 </div>
 
+<div id="adminRestore" class="card border-danger">
+  <div class="card-body">
+    <h2 class="h6 mb-1"><i class="bi bi-exclamation-octagon text-danger me-1"></i>Restore from Snapshot</h2>
+    <p class="small text-muted mb-3" style="max-width:70ch">
+      Replaces the live on-disk database file with an uploaded snapshot (from the Snapshot export above).
+      The file is validated before anything is touched, and the existing file is backed up alongside it
+      first. <strong>The process must be restarted afterward</strong> to load the restored data — this does
+      not happen automatically. Requires Maintenance Mode to already be on.
+    </p>
+    {{if not .Settings.ReadOnlyMode}}
+    <p class="small text-warning"><i class="bi bi-lock me-1"></i>Turn on Maintenance Mode above to enable restore.</p>
+    {{end}}
+    <form id="restoreForm" class="row g-2 align-items-end" {{if not .Settings.ReadOnlyMode}}data-maintenance-off{{end}}>
+      <div class="col-auto">
+        <label class="form-label small mb-1" for="restoreFile">Snapshot file</label>
+        <input type="file" class="form-control form-control-sm" id="restoreFile" name="snapshot" accept=".gob" required {{if not .Settings.ReadOnlyMode}}disabled{{end}}>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small mb-1" for="restoreConfirm">Type RESTORE to confirm</label>
+        <input type="text" class="form-control form-control-sm" id="restoreConfirm" name="confirm" placeholder="RESTORE" autocomplete="off" {{if not .Settings.ReadOnlyMode}}disabled{{end}}>
+      </div>
+      <div class="col-auto">
+        <button class="btn btn-sm btn-danger" type="submit" id="restoreSubmit" disabled>
+          <i class="bi bi-upload me-1"></i>Restore
+        </button>
+      </div>
+    </form>
+    <div id="restoreResult" class="small mt-2"></div>
+  </div>
+</div>
+
 <div id="adminSettings" class="card">
   <div class="card-body">
     <div class="d-flex justify-content-between align-items-center mb-3">
@@ -359,6 +390,15 @@
     </div>
   </div>
 </div>
+
+
+<script>
+// See query.html for why this wrapper + inline DOMContentLoaded registration
+// (rather than calling initAdminRestorePage directly from app.js) is needed:
+// app.js loads after this inline script, and the AJAX shell re-runs inline
+// scripts on every navigation into this page.
+document.addEventListener('DOMContentLoaded', function () { initAdminRestorePage(); });
+</script>
 
 {{template "base_end" .}}
 {{end}}

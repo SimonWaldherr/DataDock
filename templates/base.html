@@ -49,6 +49,7 @@
     <a class="btn-nav" data-nav-section="history" href="/history" title="Query History" role="tab" aria-selected="false"><i class="bi bi-clock-history"></i><span>History</span></a>
     <a class="btn-nav" data-nav-section="manage" href="/create-table" title="Manage Tables" role="tab" aria-selected="false"><i class="bi bi-database-add"></i><span>Manage Tables</span></a>
     <a class="btn-nav" data-nav-section="connections" href="/connections" title="Connections" role="tab" aria-selected="false"><i class="bi bi-hdd-network"></i><span>Connections</span></a>
+    <a class="btn-nav" data-nav-section="dashboards" href="/dashboards" title="Dashboards" role="tab" aria-selected="false"><i class="bi bi-grid-1x2"></i><span>Dashboards</span></a>
   </div>
 
   <div class="nav-actions" role="tablist" aria-label="Secondary navigation">
@@ -158,6 +159,32 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js" integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i" crossorigin="anonymous"></script>
+<!-- Vega/Vega-Lite/vega-embed power the BI dashboards (static/dashboard.js)
+     and the query page's "Save as Chart" preview. Same cdn.jsdelivr.net host
+     already allow-listed in the CSP (see securityHeaders in main.go), so no
+     CSP change was needed. Pinned to exact versions like Bootstrap/D3 above,
+     but without an integrity attribute: unlike those two, a verified SRI
+     hash for these three wasn't available while adding this, so it's left
+     for a follow-up rather than risking an incorrect one that would silently
+     block every chart from rendering. -->
+<script src="https://cdn.jsdelivr.net/npm/vega@6.3.1/build/vega.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@6.4.3/build/vega-lite.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@7.1.0/build/vega-embed.min.js"></script>
+<!-- Vega's default expression evaluator compiles chart expressions via
+     `new Function(...)`, which the CSP's script-src correctly refuses
+     ("unsafe-eval" is deliberately not allowed here) — loosening the CSP
+     site-wide just for chart rendering isn't the right trade. vega-interpreter
+     is Vega's own documented CSP-safe alternative: an AST walker that
+     evaluates the same expressions without eval. It ships ESM-only (no UMD
+     build), hence the one `type="module"` script on this otherwise
+     classic-script codebase — jsdelivr's "+esm" build resolves its
+     sub-dependencies (vega-util) automatically. dashboard.js reads
+     window.vegaExpressionInterpreter and passes {ast:true, expr:...} to
+     vegaEmbed to opt every chart into this mode. -->
+<script type="module">
+  import {expressionInterpreter} from 'https://cdn.jsdelivr.net/npm/vega-interpreter@2.3.1/+esm';
+  window.vegaExpressionInterpreter = expressionInterpreter;
+</script>
 <script src="/static/app.js"></script>
 </body>
 </html>

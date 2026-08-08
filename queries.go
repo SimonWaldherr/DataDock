@@ -238,6 +238,46 @@ func objectEmbeddingsVectorSearchQuery(candidates int, indexMode string) string 
 		objectEmbeddingsTable, candidates, indexMode)
 }
 
+// ─── BI foundation: saved queries, charts, dashboards ──────────────────────
+//
+// Three sibling tables backing the BI foundation (see bi.go): a saved SQL
+// query, a chart (its own SQL text plus a Vega-Lite spec, optionally linked
+// back to a saved query for reuse), and a dashboard (a named layout of chart
+// IDs). Each follows the same delete-then-insert-by-id upsert idiom as
+// match_config.go, keyed by a generated id (see newBIObjectID in bi.go)
+// rather than by name, since names aren't required to be unique here.
+
+const (
+	// savedQueriesEnsureTableSQL creates the saved-queries table on first use.
+	savedQueriesEnsureTableSQL = "CREATE TABLE " + savedQueriesTable +
+		" (id TEXT, name TEXT, description TEXT, sql_text TEXT, connection_id TEXT, owner TEXT, created_at TEXT, updated_at TEXT)"
+	savedQueriesDeleteSQL     = "DELETE FROM " + savedQueriesTable + " WHERE id = ?"
+	savedQueriesInsertSQL     = "INSERT INTO " + savedQueriesTable + " (id, name, description, sql_text, connection_id, owner, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+	savedQueriesSelectAllSQL  = "SELECT id, name, description, sql_text, connection_id, owner, created_at, updated_at FROM " + savedQueriesTable
+	savedQueriesSelectByIDSQL = "SELECT id, name, description, sql_text, connection_id, owner, created_at, updated_at FROM " + savedQueriesTable + " WHERE id = ?"
+
+	// chartsEnsureTableSQL creates the charts table on first use.
+	// vega_lite_spec is stored as a JSON-encoded TEXT blob (not parsed by
+	// tinySQL), matching the "definition_json" convention pipelines.go uses
+	// for the same reason: new spec fields never require an ALTER TABLE.
+	chartsEnsureTableSQL = "CREATE TABLE " + chartsTable +
+		" (id TEXT, name TEXT, saved_query_id TEXT, sql_text TEXT, vega_lite_spec TEXT, owner TEXT, created_at TEXT, updated_at TEXT)"
+	chartsDeleteSQL     = "DELETE FROM " + chartsTable + " WHERE id = ?"
+	chartsInsertSQL     = "INSERT INTO " + chartsTable + " (id, name, saved_query_id, sql_text, vega_lite_spec, owner, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+	chartsSelectAllSQL  = "SELECT id, name, saved_query_id, sql_text, vega_lite_spec, owner, created_at, updated_at FROM " + chartsTable
+	chartsSelectByIDSQL = "SELECT id, name, saved_query_id, sql_text, vega_lite_spec, owner, created_at, updated_at FROM " + chartsTable + " WHERE id = ?"
+
+	// dashboardsEnsureTableSQL creates the dashboards table on first use.
+	// layout_json is likewise a JSON-encoded TEXT blob: an array of
+	// {chart_id,x,y,w,h} tiles positioned on the canvas's CSS grid.
+	dashboardsEnsureTableSQL = "CREATE TABLE " + dashboardsTable +
+		" (id TEXT, name TEXT, description TEXT, layout_json TEXT, owner TEXT, created_at TEXT, updated_at TEXT)"
+	dashboardsDeleteSQL     = "DELETE FROM " + dashboardsTable + " WHERE id = ?"
+	dashboardsInsertSQL     = "INSERT INTO " + dashboardsTable + " (id, name, description, layout_json, owner, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+	dashboardsSelectAllSQL  = "SELECT id, name, description, layout_json, owner, created_at, updated_at FROM " + dashboardsTable
+	dashboardsSelectByIDSQL = "SELECT id, name, description, layout_json, owner, created_at, updated_at FROM " + dashboardsTable + " WHERE id = ?"
+)
+
 // ─── Matching engine (reads both sides, writes the crosswalk table) ────────
 
 // matchSelectRowsQuery builds the SELECT loadMatchRows uses to read one side

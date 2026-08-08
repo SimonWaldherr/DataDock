@@ -3734,10 +3734,68 @@ function renderQuickChart(data, choiceOverride) {
     '<div class="d-flex justify-content-between align-items-start mb-2 gap-2 flex-wrap">' +
     '<div><h2 class="h6 mb-0"><i class="bi bi-bar-chart text-primary"></i> Quick Chart</h2>' +
     '<span class="small text-muted">' + escHtml(subtitle) + '</span></div>' +
-    renderQuickChartControls(profiles, choice) +
+    '<div class="d-flex align-items-start gap-2 flex-wrap">' + renderQuickChartControls(profiles, choice) +
+    '<button type="button" class="btn btn-sm btn-outline-primary" onclick="saveQuickChartAsChart()" title="Save this chart (and the current SQL) to the BI dashboard foundation">' +
+    '<i class="bi bi-bookmark-plus me-1"></i>Save as Chart</button></div>' +
     '</div><div id="quickChart"></div></div></div>';
   wireQuickChartControls();
   drawQuickChart(points, choice.isTimeDim);
+}
+
+// saveQuickChartAsChart POSTs the current Quick Chart (the SQL in #sqlInput
+// plus the dimension/measure/aggregation quickChartState already computed by
+// renderQuickChart/aggregateQuickChart above) to the BI foundation's chart
+// API as a minimal Vega-Lite spec. It intentionally does not try to save the
+// AI Chart flow's spec — that flow already gets its shape from the LLM and
+// is a separate follow-up, not part of this foundation.
+function saveQuickChartAsChart() {
+  var state = quickChartState;
+  if (!state || !state.data || !state.choice) {
+    window.alert('No chart to save yet — run a query first.');
+    return;
+  }
+  var sqlInput = document.getElementById('sqlInput');
+  var sqlText = sqlInput ? sqlInput.value.trim() : '';
+  if (!sqlText) {
+    window.alert('No SQL query to save.');
+    return;
+  }
+  var name = window.prompt('Name this chart:', '');
+  if (!name) return;
+  name = name.trim();
+  if (!name) return;
+
+  var columns = state.data.columns || [];
+  var dimIdx = state.choice.dimIdx;
+  var metricIdx = state.choice.metricIdx;
+  var dimField = dimIdx >= 0 ? columns[dimIdx] : 'row';
+  var hasMeasure = metricIdx >= 0;
+  var spec = {
+    '$schema': 'https://vega.github.io/schema/vega-lite/v6.json',
+    description: name,
+    mark: state.choice.isTimeDim ? 'line' : 'bar',
+    encoding: {
+      x: {field: dimField, type: state.choice.isTimeDim ? 'temporal' : 'nominal', sort: state.choice.isTimeDim ? null : '-y'},
+      y: hasMeasure
+        ? {field: columns[metricIdx], type: 'quantitative', aggregate: 'sum'}
+        : {aggregate: 'count', type: 'quantitative'}
+    }
+  };
+
+  fetch('/api/bi/charts', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: name, sql_text: sqlText, vega_lite_spec: spec})
+  })
+    .then(function (resp) { return resp.json().then(function (body) { return {ok: resp.ok, body: body}; }); })
+    .then(function (res) {
+      if (res.ok) {
+        window.alert('Chart "' + name + '" saved. Add it to a dashboard from the Dashboards page.');
+      } else {
+        window.alert('Could not save chart: ' + ((res.body && (res.body.detail || res.body.title)) || 'unknown error'));
+      }
+    })
+    .catch(function (err) { window.alert('Could not save chart: ' + err); });
 }
 
 // profileQuickChartColumns inspects every column once to learn how numeric,
@@ -4518,6 +4576,59 @@ function copyAdminStatus(btn) {
   }, function () {
     btn.innerHTML = '<i class="bi bi-x-lg me-1"></i>Could not copy';
     restore();
+  });
+}
+
+// initAdminRestorePage wires the "Restore from Snapshot" danger-zone form
+// (templates/admin.html). This is a client-side confirmation gate on top of
+// the server's own "confirm=RESTORE" check (snapshot_restore.go) — belt and
+// suspenders, not a substitute for it. No-op when the form isn't on the page
+// (every other template's DOMContentLoaded call is similarly a no-op there).
+function initAdminRestorePage() {
+  var form = document.getElementById('restoreForm');
+  if (!form) return;
+  var fileInput = document.getElementById('restoreFile');
+  var confirmInput = document.getElementById('restoreConfirm');
+  var submitBtn = document.getElementById('restoreSubmit');
+  var result = document.getElementById('restoreResult');
+  var maintenanceOff = form.hasAttribute('data-maintenance-off');
+
+  function refreshSubmitState() {
+    var ready = !maintenanceOff && fileInput.files.length > 0 && confirmInput.value.trim() === 'RESTORE';
+    submitBtn.disabled = !ready;
+  }
+  fileInput.addEventListener('change', refreshSubmitState);
+  confirmInput.addEventListener('input', refreshSubmitState);
+  refreshSubmitState();
+
+  form.addEventListener('submit', function (evt) {
+    evt.preventDefault();
+    if (maintenanceOff || confirmInput.value.trim() !== 'RESTORE' || fileInput.files.length === 0) return;
+    if (!window.confirm('This replaces the live database file. The existing file is backed up first, but DataDock must be restarted afterward to load the restored data. Continue?')) {
+      return;
+    }
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Restoring...';
+    result.innerHTML = '';
+    var formData = new FormData(form);
+    fetch('/api/admin/snapshot/restore', {method: 'POST', body: formData})
+      .then(function (resp) { return resp.json().then(function (body) { return {ok: resp.ok, body: body}; }); })
+      .then(function (res) {
+        if (res.ok) {
+          result.innerHTML = '<div class="alert alert-success py-2 mb-0"><i class="bi bi-check-circle me-1"></i>' +
+            escHtml(res.body.detail || 'Restored.') + (res.body.backup_path ? ' Backup: <code>' + escHtml(res.body.backup_path) + '</code>' : '') + '</div>';
+        } else {
+          var detail = (res.body && (res.body.detail || res.body.title)) || 'Restore failed.';
+          result.innerHTML = '<div class="alert alert-danger py-2 mb-0"><i class="bi bi-x-circle me-1"></i>' + escHtml(detail) + '</div>';
+        }
+      })
+      .catch(function (err) {
+        result.innerHTML = '<div class="alert alert-danger py-2 mb-0"><i class="bi bi-x-circle me-1"></i>' + escHtml(String(err)) + '</div>';
+      })
+      .finally(function () {
+        submitBtn.innerHTML = '<i class="bi bi-upload me-1"></i>Restore';
+        refreshSubmitState();
+      });
   });
 }
 

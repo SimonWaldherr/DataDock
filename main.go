@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -316,6 +317,9 @@ func main() {
 	// of registerRoutes for the same reasons: monitoring needs to detect
 	// version drift across instances and bug reports need the running build.
 	mux.HandleFunc("GET /version", versionHandler)
+	// Readiness probe: same placement/reasoning as /healthz, but actually
+	// checks the database (see readyzHandler).
+	mux.HandleFunc("GET /readyz", app.readyzHandler)
 	app.registerRoutes(mux)
 	mux.Handle("GET /static/", cacheableStaticHandler(http.FileServer(http.FS(webFS))))
 
@@ -395,6 +399,32 @@ func versionHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"version":` + strconv.Quote(resolveVersion()) + `}`))
+}
+
+// readyzHandler is a readiness probe: unlike /healthz (pure liveness), this
+// actually asks tinySQL whether the database backing this process is usable,
+// so a load balancer or orchestrator can tell "process is up" apart from
+// "process is up but its database is closed/closing/unhealthy". Kept outside
+// registerRoutes/session middleware for the same reasons as /healthz and
+// /version: it must stay reachable and cheap even when higher-level state is
+// degraded.
+func (a *App) readyzHandler(w http.ResponseWriter, r *http.Request) {
+	health := tinysql.HealthCheck(a.nativeDB)
+	ready := health.OK && !health.Closed && !health.Closing
+	status := http.StatusOK
+	if !ready {
+		status = http.StatusServiceUnavailable
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":       map[bool]string{true: "ready", false: "not_ready"}[ready],
+		"db_ok":        health.OK,
+		"storage_mode": health.ModeName,
+		"closing":      health.Closing,
+		"closed":       health.Closed,
+		"error":        health.Error,
+	})
 }
 
 // runHealthcheck GETs /healthz on the loopback address derived from the same
