@@ -217,5 +217,6 @@ var defaultResultWindowLimit = {{if .PageSize}}{{.PageSize}}{{else}}50{{end}};
 document.addEventListener('DOMContentLoaded', function () { initQueryPage(); });
 </script>
 
+{{template "d3_scripts" .}}
 {{template "base_end" .}}
 {{end}}
