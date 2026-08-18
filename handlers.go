@@ -91,10 +91,13 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	// since a routine has no rows to browse).
 	readGuarded("GET /r/{routine}", a.routineViewHandler)
 
-	// Record CRUD.
-	handle("GET /t/{table}/new", a.newRecordFormHandler)
+	// Record CRUD. The GET forms render an existing (or blank) row's data,
+	// so they need the same require_login_for_reads gate as every other
+	// route that exposes row content — only the POST mutations additionally
+	// need requireWritable/requireLogin.
+	readGuarded("GET /t/{table}/new", a.newRecordFormHandler)
 	handle("POST /t/{table}/new", a.requireWritable(a.requireLogin(a.createRecordHandler)))
-	handle("GET /t/{table}/{id}/edit", a.editRecordFormHandler)
+	readGuarded("GET /t/{table}/{id}/edit", a.editRecordFormHandler)
 	handle("POST /t/{table}/{id}/edit", a.requireWritable(a.requireLogin(a.updateRecordHandler)))
 	handle("POST /t/{table}/{id}/delete", a.requireWritable(a.requireLogin(a.deleteRecordHandler)))
 
@@ -145,18 +148,24 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 
 	handle("GET /jobs", a.requireAdmin(a.jobsHandler))
 	handle("GET /pipelines", a.requireAdmin(a.pipelinesHandler))
-	handle("GET /migrate", a.migrationHandler)
+	// Migrate/Match pages and their read-only POST branches list table and
+	// column names (and, for match preview/export, real row values) for
+	// whatever connection is selected — readGuarded so require_login_for_reads
+	// actually closes this off to anonymous visitors like every other
+	// data-exposing route. requireWritable is separately applied inline
+	// inside the handlers for the branches that actually mutate data.
+	readGuarded("GET /migrate", a.migrationHandler)
 	handle("POST /migrate", a.requireWritable(a.requireLogin(a.runMigrationHandler)))
-	handle("GET /match", a.matchHandler)
+	readGuarded("GET /match", a.matchHandler)
 	// Not wrapped in requireWritable: previewing candidates and exporting
 	// them as CSV are read-only and must stay available in maintenance
 	// mode, like read-only SQL. Only mode=save (which creates/inserts into
 	// a real table) is gated, inline, inside runMatchHandler.
-	handle("POST /match", a.runMatchHandler)
+	readGuarded("POST /match", a.runMatchHandler)
 	// Not wrapped in requireWritable at the route level: a plain table
 	// dropdown resubmit is read-only. Only the upload branch (creates a
 	// table) is gated, inline, inside matchTablesHandler.
-	handle("POST /match/tables", a.matchTablesHandler)
+	readGuarded("POST /match/tables", a.matchTablesHandler)
 	handle("POST /match/configs/delete", a.requireWritable(a.requireLogin(a.deleteMatchConfigHandler)))
 	handle("POST /match/schedules", a.requireWritable(a.requireLogin(a.saveMatchScheduleHandler)))
 	handle("GET /create-table", a.createTableFormHandler)
@@ -1623,16 +1632,7 @@ func (a *App) runMatchHandler(w http.ResponseWriter, r *http.Request) {
 	// the "make this simple to build again" action the wizard's field
 	// mapping/thresholds/etc. steps exist to support.
 	if mode == "save_config" {
-		if a.currentReadOnlyMode() {
-			a.writeMaintenanceBlocked(w, r)
-			return
-		}
-		if a.loginRequiredForWrite(r.Context()) {
-			http.Redirect(w, r, "/admin/login?next="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
-			return
-		}
-		if a.roleBlocksWrite(r.Context()) {
-			a.writeReadOnlyRoleBlocked(w, r)
+		if a.writeGateBlocked(w, r) {
 			return
 		}
 		cfg := MatchConfig{
@@ -1694,16 +1694,7 @@ func (a *App) runMatchHandler(w http.ResponseWriter, r *http.Request) {
 		data["Error"] = "export failed"
 		a.render(w, r, "match", data)
 	case "save":
-		if a.currentReadOnlyMode() {
-			a.writeMaintenanceBlocked(w, r)
-			return
-		}
-		if a.loginRequiredForWrite(r.Context()) {
-			http.Redirect(w, r, "/admin/login?next="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
-			return
-		}
-		if a.roleBlocksWrite(r.Context()) {
-			a.writeReadOnlyRoleBlocked(w, r)
+		if a.writeGateBlocked(w, r) {
 			return
 		}
 		saveConn := a.conns.GetFor(sessionID, saveConnID)
@@ -1851,16 +1842,7 @@ func (a *App) matchTablesHandler(w http.ResponseWriter, r *http.Request) {
 	// dropdown resubmit, which only re-reads existing metadata — that
 	// specific case must respect maintenance mode.
 	if sourceID == matchUploadSentinel || targetID == matchUploadSentinel {
-		if a.currentReadOnlyMode() {
-			a.writeMaintenanceBlocked(w, r)
-			return
-		}
-		if a.loginRequiredForWrite(r.Context()) {
-			http.Redirect(w, r, "/admin/login?next="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
-			return
-		}
-		if a.roleBlocksWrite(r.Context()) {
-			a.writeReadOnlyRoleBlocked(w, r)
+		if a.writeGateBlocked(w, r) {
 			return
 		}
 	}
@@ -2898,7 +2880,6 @@ func (a *App) queryEditorHandler(w http.ResponseWriter, r *http.Request) {
 	a.render(w, r, "query", map[string]interface{}{})
 }
 
-// queryExecHandler handles form-POST execution of SQL (fallback without JS).
 // roleBlocksWrite reports whether the current session's role should block a
 // write a handler is about to perform inline — i.e. one of the routes that,
 // unlike most mutating routes, isn't wrapped in requireWritable at the route
@@ -2910,6 +2891,32 @@ func (a *App) queryEditorHandler(w http.ResponseWriter, r *http.Request) {
 func (a *App) roleBlocksWrite(ctx context.Context) bool {
 	_, role, ok := a.currentSessionUser(sessionIDFromContext(ctx))
 	return a.currentAuthMode() != AuthModeNone && ok && role == RoleReadOnly
+}
+
+// writeGateBlocked runs the same three checks requireWritable+requireLogin
+// apply at the route-registration level (maintenance mode, login-required,
+// read-only role), for the handful of handlers that can't use that wrapper
+// because only one of their branches actually writes (POST /match's
+// save/save_config modes, and the upload branch of POST /match/tables). It
+// writes the appropriate response itself and reports whether the caller
+// must return immediately without proceeding. Kept as a single helper
+// specifically so a future fix to this gate can't be applied to one call
+// site and missed at another, as happened when only the maintenance-mode
+// check was originally replicated here (see roleBlocksWrite's comment).
+func (a *App) writeGateBlocked(w http.ResponseWriter, r *http.Request) bool {
+	if a.currentReadOnlyMode() {
+		a.writeMaintenanceBlocked(w, r)
+		return true
+	}
+	if a.loginRequiredForWrite(r.Context()) {
+		http.Redirect(w, r, "/admin/login?next="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
+		return true
+	}
+	if a.roleBlocksWrite(r.Context()) {
+		a.writeReadOnlyRoleBlocked(w, r)
+		return true
+	}
+	return false
 }
 
 // sessionCanWriteSQL reports whether the current session may run
@@ -2975,6 +2982,7 @@ func (a *App) writeSQLBlocked(ctx context.Context, sqlText string) bool {
 
 const readOnlyRoleQueryBlockedMessage = "running writes (INSERT/UPDATE/DELETE/DDL) requires being signed in with an account that has write access; only SELECT/WITH/SHOW/EXPLAIN/DESCRIBE/PRAGMA statements are allowed otherwise"
 
+// queryExecHandler handles form-POST execution of SQL (fallback without JS).
 func (a *App) queryExecHandler(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -3309,20 +3317,20 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusOK, a.runtimeSettingsView())
 	case http.MethodPost:
 		var body struct {
-			Dialect              string `json:"dialect"`
-			ConnectTimeout       string `json:"connect_timeout"`
-			QueryTimeout         string `json:"query_timeout"`
-			LLMBaseURL           string `json:"llm_base_url"`
-			LLMAPIKey            string `json:"llm_api_key"`
-			LLMModel             string `json:"llm_model"`
-			LLMTimeout           string `json:"llm_timeout"`
-			ReadOnlyMode         bool   `json:"read_only_mode"`
-			RequireLoginForReads *bool  `json:"require_login_for_reads"`
-			PageSize             int    `json:"page_size"`
-			MatchMaxRows         int    `json:"match_max_rows"`
-			DefaultTheme         string `json:"default_theme"`
-			DefaultDensity       string `json:"default_density"`
-			NativePermissionMirrorEnabled *bool `json:"native_permission_mirror_enabled"`
+			Dialect                       string `json:"dialect"`
+			ConnectTimeout                string `json:"connect_timeout"`
+			QueryTimeout                  string `json:"query_timeout"`
+			LLMBaseURL                    string `json:"llm_base_url"`
+			LLMAPIKey                     string `json:"llm_api_key"`
+			LLMModel                      string `json:"llm_model"`
+			LLMTimeout                    string `json:"llm_timeout"`
+			ReadOnlyMode                  bool   `json:"read_only_mode"`
+			RequireLoginForReads          *bool  `json:"require_login_for_reads"`
+			PageSize                      int    `json:"page_size"`
+			MatchMaxRows                  int    `json:"match_max_rows"`
+			DefaultTheme                  string `json:"default_theme"`
+			DefaultDensity                string `json:"default_density"`
+			NativePermissionMirrorEnabled *bool  `json:"native_permission_mirror_enabled"`
 		}
 		if !a.decodeJSONBody(w, r, &body, "Request body must be valid JSON.") {
 			return
@@ -3336,19 +3344,19 @@ func (a *App) apiAdminSettingsHandler(w http.ResponseWriter, r *http.Request) {
 			matchMaxRows = strconv.Itoa(body.MatchMaxRows)
 		}
 		settings, err := runtimeSettingsFromInput(runtimeSettingsInput{
-			Dialect:              body.Dialect,
-			ConnectTimeout:       body.ConnectTimeout,
-			QueryTimeout:         body.QueryTimeout,
-			LLMBaseURL:           body.LLMBaseURL,
-			LLMAPIKey:            body.LLMAPIKey,
-			LLMModel:             body.LLMModel,
-			LLMTimeout:           body.LLMTimeout,
-			ReadOnlyMode:         body.ReadOnlyMode,
-			RequireLoginForReads: boolDefault(body.RequireLoginForReads, a.currentRequireLoginForReads()),
-			PageSize:             pageSize,
-			MatchMaxRows:         matchMaxRows,
-			DefaultTheme:         body.DefaultTheme,
-			DefaultDensity:       body.DefaultDensity,
+			Dialect:                       body.Dialect,
+			ConnectTimeout:                body.ConnectTimeout,
+			QueryTimeout:                  body.QueryTimeout,
+			LLMBaseURL:                    body.LLMBaseURL,
+			LLMAPIKey:                     body.LLMAPIKey,
+			LLMModel:                      body.LLMModel,
+			LLMTimeout:                    body.LLMTimeout,
+			ReadOnlyMode:                  body.ReadOnlyMode,
+			RequireLoginForReads:          boolDefault(body.RequireLoginForReads, a.currentRequireLoginForReads()),
+			PageSize:                      pageSize,
+			MatchMaxRows:                  matchMaxRows,
+			DefaultTheme:                  body.DefaultTheme,
+			DefaultDensity:                body.DefaultDensity,
 			NativePermissionMirrorEnabled: boolDefault(body.NativePermissionMirrorEnabled, a.currentNativePermissionMirrorEnabled()),
 		})
 		if err == nil && strings.TrimSpace(body.LLMAPIKey) == "" {
@@ -4394,47 +4402,47 @@ func boolDefault(v *bool, fallback bool) bool {
 // either the Admin HTML form or the JSON admin settings API, so both paths
 // share one parsing/validation implementation.
 type runtimeSettingsInput struct {
-	Dialect              string
-	ConnectTimeout       string
-	QueryTimeout         string
-	LLMBaseURL           string
-	LLMAPIKey            string
-	LLMModel             string
-	LLMTimeout           string
-	EmbeddingBaseURL     string
-	EmbeddingAPIKey      string
-	EmbeddingModel       string
-	VectorIndex          string
-	VectorWarm           bool
-	ReadOnlyMode         bool
-	RequireLoginForReads bool
-	PageSize             string
-	MatchMaxRows         string
-	DefaultTheme         string
-	DefaultDensity       string
+	Dialect                       string
+	ConnectTimeout                string
+	QueryTimeout                  string
+	LLMBaseURL                    string
+	LLMAPIKey                     string
+	LLMModel                      string
+	LLMTimeout                    string
+	EmbeddingBaseURL              string
+	EmbeddingAPIKey               string
+	EmbeddingModel                string
+	VectorIndex                   string
+	VectorWarm                    bool
+	ReadOnlyMode                  bool
+	RequireLoginForReads          bool
+	PageSize                      string
+	MatchMaxRows                  string
+	DefaultTheme                  string
+	DefaultDensity                string
 	NativePermissionMirrorEnabled bool
 }
 
 func runtimeSettingsFromForm(r *http.Request) (RuntimeSettings, error) {
 	return runtimeSettingsFromInput(runtimeSettingsInput{
-		Dialect:              r.Form.Get("dialect"),
-		ConnectTimeout:       r.Form.Get("connect_timeout"),
-		QueryTimeout:         r.Form.Get("query_timeout"),
-		LLMBaseURL:           r.Form.Get("llm_base_url"),
-		LLMAPIKey:            r.Form.Get("llm_api_key"),
-		LLMModel:             r.Form.Get("llm_model"),
-		LLMTimeout:           r.Form.Get("llm_timeout"),
-		EmbeddingBaseURL:     r.Form.Get("embedding_base_url"),
-		EmbeddingAPIKey:      r.Form.Get("embedding_api_key"),
-		EmbeddingModel:       r.Form.Get("embedding_model"),
-		VectorIndex:          r.Form.Get("vector_index"),
-		VectorWarm:           r.Form.Get("vector_warm") != "",
-		ReadOnlyMode:         r.Form.Get("read_only_mode") != "",
-		RequireLoginForReads: r.Form.Get("require_login_for_reads") != "",
-		PageSize:             r.Form.Get("page_size"),
-		MatchMaxRows:         r.Form.Get("match_max_rows"),
-		DefaultTheme:         r.Form.Get("default_theme"),
-		DefaultDensity:       r.Form.Get("default_density"),
+		Dialect:                       r.Form.Get("dialect"),
+		ConnectTimeout:                r.Form.Get("connect_timeout"),
+		QueryTimeout:                  r.Form.Get("query_timeout"),
+		LLMBaseURL:                    r.Form.Get("llm_base_url"),
+		LLMAPIKey:                     r.Form.Get("llm_api_key"),
+		LLMModel:                      r.Form.Get("llm_model"),
+		LLMTimeout:                    r.Form.Get("llm_timeout"),
+		EmbeddingBaseURL:              r.Form.Get("embedding_base_url"),
+		EmbeddingAPIKey:               r.Form.Get("embedding_api_key"),
+		EmbeddingModel:                r.Form.Get("embedding_model"),
+		VectorIndex:                   r.Form.Get("vector_index"),
+		VectorWarm:                    r.Form.Get("vector_warm") != "",
+		ReadOnlyMode:                  r.Form.Get("read_only_mode") != "",
+		RequireLoginForReads:          r.Form.Get("require_login_for_reads") != "",
+		PageSize:                      r.Form.Get("page_size"),
+		MatchMaxRows:                  r.Form.Get("match_max_rows"),
+		DefaultTheme:                  r.Form.Get("default_theme"),
+		DefaultDensity:                r.Form.Get("default_density"),
 		NativePermissionMirrorEnabled: r.Form.Get("native_permission_mirror_enabled") != "",
 	})
 }
@@ -4469,24 +4477,24 @@ func runtimeSettingsFromInput(in runtimeSettingsInput) (RuntimeSettings, error) 
 		matchMaxRows = n
 	}
 	return RuntimeSettings{
-		Dialect:              in.Dialect,
-		ConnectTimeout:       connect,
-		QueryTimeout:         query,
-		LLMBaseURL:           in.LLMBaseURL,
-		LLMAPIKey:            in.LLMAPIKey,
-		LLMModel:             in.LLMModel,
-		LLMTimeout:           llm,
-		EmbeddingBaseURL:     in.EmbeddingBaseURL,
-		EmbeddingAPIKey:      in.EmbeddingAPIKey,
-		EmbeddingModel:       in.EmbeddingModel,
-		VectorIndex:          in.VectorIndex,
-		VectorWarm:           in.VectorWarm,
-		ReadOnlyMode:         in.ReadOnlyMode,
-		RequireLoginForReads: in.RequireLoginForReads,
-		PageSize:             pageSize,
-		MatchMaxRows:         matchMaxRows,
-		DefaultTheme:         in.DefaultTheme,
-		DefaultDensity:       in.DefaultDensity,
+		Dialect:                       in.Dialect,
+		ConnectTimeout:                connect,
+		QueryTimeout:                  query,
+		LLMBaseURL:                    in.LLMBaseURL,
+		LLMAPIKey:                     in.LLMAPIKey,
+		LLMModel:                      in.LLMModel,
+		LLMTimeout:                    llm,
+		EmbeddingBaseURL:              in.EmbeddingBaseURL,
+		EmbeddingAPIKey:               in.EmbeddingAPIKey,
+		EmbeddingModel:                in.EmbeddingModel,
+		VectorIndex:                   in.VectorIndex,
+		VectorWarm:                    in.VectorWarm,
+		ReadOnlyMode:                  in.ReadOnlyMode,
+		RequireLoginForReads:          in.RequireLoginForReads,
+		PageSize:                      pageSize,
+		MatchMaxRows:                  matchMaxRows,
+		DefaultTheme:                  in.DefaultTheme,
+		DefaultDensity:                in.DefaultDensity,
 		NativePermissionMirrorEnabled: in.NativePermissionMirrorEnabled,
 	}, nil
 }

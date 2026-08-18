@@ -90,6 +90,10 @@ func (a *App) adminUsersRoleHandler(w http.ResponseWriter, r *http.Request) {
 		a.serverError(w, err)
 		return
 	}
+	// A role change must take effect immediately, not just on next login —
+	// otherwise a demoted account keeps its old, higher-privileged role for
+	// the rest of its already-authenticated session's TTL.
+	a.revokeSessionsForUsername(username)
 	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
 }
 

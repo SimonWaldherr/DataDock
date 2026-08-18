@@ -159,7 +159,11 @@ func (c *OpenAICompatibleClient) Complete(ctx context.Context, req LLMRequest) (
 		return "", err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("LLM request failed: %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+		// redactPreview (verbose.go) strips Authorization/API-key-shaped
+		// values before this reaches a non-admin-gated error response —
+		// some self-hosted OpenAI-compatible gateways echo the submitted
+		// credential back in their error body on a 401/403.
+		return "", fmt.Errorf("LLM request failed: %s: %s", resp.Status, redactPreview(string(respBody)))
 	}
 	if c.cfg.Verbose.Enabled() {
 		c.cfg.Verbose.Log(VerboseEvent{

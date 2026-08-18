@@ -69,6 +69,12 @@ func (a *App) recordSpatialImportReport(ctx context.Context, table, sourceName, 
 	if err != nil {
 		return nil, err
 	}
+	// No unique constraint on table backs this table, so the delete+insert
+	// must be serialized against a concurrent report for the same table
+	// name or both could succeed and leave duplicate rows (see
+	// namedConfigMu).
+	a.namedConfigMu.Lock()
+	defer a.namedConfigMu.Unlock()
 	if _, err := a.execConn(ctx, a.localTinySQLConn(), "spatial_report.replace", spatialReportsDeleteSQL, report.Table); err != nil {
 		return nil, err
 	}

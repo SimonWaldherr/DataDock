@@ -54,6 +54,11 @@ func (a *App) saveMatchConfig(ctx context.Context, cfg MatchConfig) error {
 		return fmt.Errorf("encode configuration: %w", err)
 	}
 	conn := a.localTinySQLConn()
+	// No unique constraint on name backs this table, so the delete+insert
+	// must be serialized against a concurrent save of the same name or
+	// both could succeed and leave duplicate rows (see namedConfigMu).
+	a.namedConfigMu.Lock()
+	defer a.namedConfigMu.Unlock()
 	if _, err := a.execConn(ctx, conn, "match_config.delete", matchConfigsDeleteSQL, name); err != nil {
 		return err
 	}

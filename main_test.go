@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -694,6 +695,63 @@ func TestRecordCRUD(t *testing.T) {
 	meta2, _ := app.tableMeta(ctx, "notes")
 	if meta2.RowCount != 0 {
 		t.Errorf("expected 0 rows after delete, got %d", meta2.RowCount)
+	}
+}
+
+// TestInsertRecordConcurrentAssignsUniqueIDs guards a real race: ids are
+// application-assigned via a separate MAX(id) read followed by an INSERT
+// (see recordIDMu's comment in db.go), so without serializing that sequence
+// two concurrent inserts into the same table could read the same MAX(id)
+// and both insert with the identical next id — corrupting every subsequent
+// operation that assumes id uniquely identifies a row.
+func TestInsertRecordConcurrentAssignsUniqueIDs(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE concurrent_notes (id INT, body TEXT)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	ctx := context.Background()
+	meta, err := app.tableMeta(ctx, "concurrent_notes")
+	if err != nil {
+		t.Fatalf("tableMeta: %v", err)
+	}
+
+	const n = 20
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = app.insertRecord(ctx, "concurrent_notes", map[string]string{"body": fmt.Sprintf("row-%d", i)}, meta.Columns)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("insertRecord[%d]: %v", i, err)
+		}
+	}
+
+	rows, err := app.sqlDB.QueryContext(ctx, "SELECT id FROM concurrent_notes")
+	if err != nil {
+		t.Fatalf("query ids: %v", err)
+	}
+	defer rows.Close()
+	seen := make(map[int]bool, n)
+	count := 0
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan id: %v", err)
+		}
+		if seen[id] {
+			t.Fatalf("duplicate id %d assigned by concurrent inserts", id)
+		}
+		seen[id] = true
+		count++
+	}
+	if count != n {
+		t.Fatalf("expected %d rows, got %d", n, count)
 	}
 }
 
@@ -1465,7 +1523,7 @@ func TestAdminChangePasswordUpdatesCurrentUser(t *testing.T) {
 // the HTTP login flow) for a given username/role, mirroring how
 // TestAdminLoginLogoutAndExpiry pokes app.adminAuthedSessions directly.
 func sessionCookieForRole(app *App, username string, role Role) *http.Cookie {
-	sessionID := newSessionID()
+	sessionID, _ := newSessionID()
 	app.markSessionAuthenticated(sessionID, username, role)
 	return &http.Cookie{Name: sessionCookieName, Value: sessionID}
 }
@@ -1866,6 +1924,67 @@ func TestAdminUsersPageCRUDAndGuards(t *testing.T) {
 	}
 }
 
+// TestAdminUsersRoleChangeRevokesExistingSessions guards a real
+// privilege-escalation gap: adminUsersRoleHandler used to update a user's
+// role in storage but never revoke that user's already-authenticated
+// session, so a demoted (or just-compromised) admin kept full admin access
+// for the rest of that session's TTL. Every sibling handler that mutates
+// account privilege (disable/reset-password/delete) already revokes
+// sessions immediately; role-change must too.
+func TestAdminUsersRoleChangeRevokesExistingSessions(t *testing.T) {
+	app := newTestApp(t)
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+	adminCookie := setupAdminSession(t, mux)
+
+	// Create a second admin via the normal HTTP path.
+	createReq := httptest.NewRequest(http.MethodPost, "/admin/users", strings.NewReader(
+		url.Values{"username": {"second-admin"}, "password": {"password123"}, "role": {"admin"}}.Encode()))
+	createReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	createReq.AddCookie(adminCookie)
+	createRec := httptest.NewRecorder()
+	mux.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected user creation redirect, got %d; body: %s", createRec.Code, createRec.Body.String())
+	}
+
+	// Give it its own already-authenticated session, simulating a user who
+	// logged in before being demoted.
+	secondAdminCookie := sessionCookieForRole(app, "second-admin", RoleAdmin)
+	preReq := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+	preReq.AddCookie(secondAdminCookie)
+	preRec := httptest.NewRecorder()
+	mux.ServeHTTP(preRec, preReq)
+	if preRec.Code != http.StatusOK {
+		t.Fatalf("expected second admin's pre-existing session to have admin access, got %d", preRec.Code)
+	}
+
+	// The primary admin demotes the second admin to a read-only role.
+	roleReq := httptest.NewRequest(http.MethodPost, "/admin/users/role", strings.NewReader(
+		url.Values{"username": {"second-admin"}, "role": {"readonly"}}.Encode()))
+	roleReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	roleReq.AddCookie(adminCookie)
+	roleRec := httptest.NewRecorder()
+	mux.ServeHTTP(roleRec, roleReq)
+	if roleRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected role-change redirect, got %d; body: %s", roleRec.Code, roleRec.Body.String())
+	}
+
+	// The demoted account's pre-existing session must lose admin access
+	// immediately, not just on its next login: revokeSessionsForUsername
+	// clears the session's authenticated entry entirely, so it now reads as
+	// anonymous and bounces to login, the same as any other unauthenticated
+	// request to an admin-gated route.
+	postReq := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+	postReq.AddCookie(secondAdminCookie)
+	postRec := httptest.NewRecorder()
+	mux.ServeHTTP(postRec, postReq)
+	if postRec.Code != http.StatusSeeOther || !strings.Contains(postRec.Header().Get("Location"), "/admin/login") {
+		t.Fatalf("expected demoted session to lose admin access immediately (redirect to /admin/login), got %d location=%q",
+			postRec.Code, postRec.Header().Get("Location"))
+	}
+}
+
 // adminCookieRequest wraps a cookie in a bare *http.Request so
 // sessionIDFromRequest (which reads from an *http.Request) can extract the
 // session ID back out of it in a test.
@@ -2256,7 +2375,10 @@ func TestTinySQLPragmaAndAgentContext(t *testing.T) {
 	// potential write (a procedure can mutate), so it now needs a write-capable
 	// session; an anonymous or read-only caller is refused. Authenticate as a
 	// User for this call.
-	callSession := newSessionID()
+	callSession, err := newSessionID()
+	if err != nil {
+		t.Fatal(err)
+	}
 	app.markSessionAuthenticated(callSession, "caller", RoleUser)
 	callReq := httptest.NewRequest(http.MethodPost, "/api/query", strings.NewReader(`{"sql":"CALL datadock_agent_context(4, 2000)"}`)).
 		WithContext(context.WithValue(context.Background(), sessionIDContextKey{}, callSession))
@@ -2862,6 +2984,68 @@ func TestXLSXToCSVMergesMultipleSheets(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("converted CSV %q does not contain %q", got, want)
 		}
+	}
+}
+
+// TestXLSXColumnIndexRejectsOutOfRangeColumn guards against a real
+// resource-exhaustion bug: a crafted cell reference like "AAAAAAAA1" used to
+// compute a column index in the billions, which readXLSXSheetRows then used
+// to grow a row slice one element at a time — an unrecoverable
+// out-of-memory abort from a tiny, well-formed .xlsx file. xlsxColumnIndex
+// must reject anything beyond Excel's own column ceiling (XFD, 16384)
+// instead of handing the caller an arbitrarily large index.
+func TestXLSXColumnIndexRejectsOutOfRangeColumn(t *testing.T) {
+	tests := []struct {
+		ref  string
+		want int
+	}{
+		{"", 0},
+		{"A1", 0},
+		{"B12", 1},
+		{"XFD1", maxXLSXColumns - 1}, // Excel's real maximum column
+		{"XFE1", -1},                 // one past Excel's maximum
+		{"AAAAAAAA1", -1},            // the concrete crafted-file proof of concept
+	}
+	for _, tt := range tests {
+		if got := xlsxColumnIndex(tt.ref); got != tt.want {
+			t.Errorf("xlsxColumnIndex(%q) = %d, want %d", tt.ref, got, tt.want)
+		}
+	}
+}
+
+// TestXLSXToCSVSkipsAbsurdColumnReferenceInsteadOfOOMing exercises the same
+// bug end to end through xlsxToCSV, using a tiny worksheet that names an
+// out-of-range column. Before the fix this would attempt to grow a
+// []string to billions of elements; now the offending cell is skipped and
+// the rest of the row still converts.
+func TestXLSXToCSVSkipsAbsurdColumnReferenceInsteadOfOOMing(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("xl/worksheets/sheet1.xml")
+	if err != nil {
+		t.Fatalf("create sheet: %v", err)
+	}
+	body := `<worksheet><sheetData>` +
+		`<row><c r="A1" t="inlineStr"><is><t>name</t></is></c></row>` +
+		`<row><c r="A2" t="inlineStr"><is><t>Ada</t></is></c><c r="AAAAAAAA2" t="inlineStr"><is><t>evil</t></is></c></row>` +
+		`</sheetData></worksheet>`
+	if _, err := w.Write([]byte(body)); err != nil {
+		t.Fatalf("write sheet: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close xlsx zip: %v", err)
+	}
+
+	csvData, err := xlsxToCSV(buf.Bytes())
+	if err != nil {
+		t.Fatalf("xlsxToCSV: %v", err)
+	}
+	got := strings.TrimSpace(string(csvData))
+	if !strings.Contains(got, "Ada") {
+		t.Fatalf("converted CSV %q lost the well-formed cell", got)
+	}
+	if strings.Contains(got, "evil") {
+		t.Fatalf("converted CSV %q must not include the out-of-range cell's value", got)
 	}
 }
 

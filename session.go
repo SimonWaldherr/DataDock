@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -39,7 +41,13 @@ func (a *App) withSession(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID := sessionIDFromRequest(r)
 		if sessionID == "" {
-			sessionID = newSessionID()
+			newID, err := newSessionID()
+			if err != nil {
+				log.Printf("session: %v", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			sessionID = newID
 			a.setSessionCookie(w, r, sessionID)
 		}
 
@@ -77,9 +85,12 @@ func (a *App) setSessionCookie(w http.ResponseWriter, r *http.Request, sessionID
 // session ID itself never changed. Migrates the pre-login session's active-
 // connection selection and any connections it privately owned to the new
 // ID, so logging in doesn't silently drop either.
-func (a *App) rotateSessionOnAuth(w http.ResponseWriter, r *http.Request, username string, role Role) string {
+func (a *App) rotateSessionOnAuth(w http.ResponseWriter, r *http.Request, username string, role Role) (string, error) {
 	oldSessionID := sessionIDFromContext(r.Context())
-	newID := newSessionID()
+	newID, err := newSessionID()
+	if err != nil {
+		return "", err
+	}
 	a.markSessionAuthenticated(newID, username, role)
 	if oldSessionID != "" {
 		a.clearSessionAuthenticated(oldSessionID)
@@ -88,7 +99,7 @@ func (a *App) rotateSessionOnAuth(w http.ResponseWriter, r *http.Request, userna
 		}
 	}
 	a.setSessionCookie(w, r, newID)
-	return newID
+	return newID, nil
 }
 
 // requireWritable blocks a mutating handler while the admin has enabled
@@ -202,10 +213,16 @@ func sanitizeSessionID(s string) string {
 	return s
 }
 
-func newSessionID() string {
+// newSessionID returns a fresh cryptographically random session ID, or an
+// error if the platform's CSPRNG itself is broken. Callers must fail the
+// request rather than fall back to any weaker, predictable value: a broken
+// CSPRNG is a fatal environment problem, and a session ID derived from
+// anything guessable (e.g. wall-clock time) would let an attacker who can
+// bound that value hijack the session it names.
+func newSessionID() (string, error) {
 	var b [24]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return hex.EncodeToString([]byte(time.Now().UTC().Format(time.RFC3339Nano)))
+		return "", fmt.Errorf("generate session id: %w", err)
 	}
-	return hex.EncodeToString(b[:])
+	return hex.EncodeToString(b[:]), nil
 }

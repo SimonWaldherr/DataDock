@@ -220,12 +220,6 @@ func (m *ConnectionManager) UnmarkPersisted(id string) {
 	delete(m.persisted, id)
 }
 
-func (m *ConnectionManager) IsPersisted(id string) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.persisted[id]
-}
-
 // Remove closes and fully drops a managed connection from the running
 // process (used by "Forget", which is a real delete, not just "stop
 // persisting"). The built-in tinySQL connection can't be removed.

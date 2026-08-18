@@ -266,6 +266,9 @@ function initChartsListPage() {
         renderChartIntoTile('chartPreview-' + chart.id, chart);
         populateChartEditForm(chart);
       });
+    })
+    .catch(function (err) {
+      grid.innerHTML = '<div class="small text-danger p-2">Could not load charts: ' + escHtml(String(err)) + '</div>';
     });
 }
 

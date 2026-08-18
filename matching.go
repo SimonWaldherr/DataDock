@@ -214,7 +214,8 @@ func (a *App) loadMatchRows(ctx context.Context, conn *DBConnection, table, keyC
 			cols = append(cols, f.TargetColumn)
 		}
 	}
-	query := matchSelectRowsQuery(conn, table, cols)
+	maxRows := a.currentMatchMaxRows()
+	query := matchSelectRowsQuery(conn, table, cols, maxRows+1)
 	rows, err := a.queryConn(ctx, conn, "match.read_rows", query)
 	if err != nil {
 		return nil, nil, err
@@ -224,10 +225,10 @@ func (a *App) loadMatchRows(ctx context.Context, conn *DBConnection, table, keyC
 	if err != nil {
 		return nil, nil, err
 	}
-	if maxRows := a.currentMatchMaxRows(); len(scanned) > maxRows {
+	if len(scanned) > maxRows {
 		return nil, nil, fmt.Errorf(
-			"table %q has %d rows, over the %d-row limit for the interactive matcher; raise \"Matching Max Rows\" in Admin Settings if your server has the memory for it",
-			table, len(scanned), maxRows)
+			"table %q has more than the %d-row limit for the interactive matcher; raise \"Matching Max Rows\" in Admin Settings if your server has the memory for it",
+			table, maxRows)
 	}
 
 	out := make([]match.Row, len(scanned))

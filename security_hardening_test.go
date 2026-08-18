@@ -176,11 +176,71 @@ func TestRequireLoginForReadsToggle(t *testing.T) {
 	}
 }
 
+// TestRequireLoginForReadsCoversRecordFormsAndMigrateAndMatch guards a real
+// gap: the require_login_for_reads toggle was applied to GET /t/{table} and
+// friends via readGuarded, but GET /t/{table}/new, GET /t/{table}/{id}/edit,
+// GET /migrate, GET /match, POST /match, and POST /match/tables were
+// registered with plain `handle`, so an anonymous visitor could still read
+// full row/table/column data through them even with the toggle on.
+func TestRequireLoginForReadsCoversRecordFormsAndMigrateAndMatch(t *testing.T) {
+	app := newTestApp(t)
+	if _, err := app.sqlDB.Exec("CREATE TABLE read_toggle_forms (id INT, name TEXT)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	mux := http.NewServeMux()
+	app.registerRoutes(mux)
+	adminCookie := setupAdminSession(t, mux)
+	app.requireLoginForReads = true
+
+	assertBlocked := func(method, path string) {
+		t.Helper()
+		req := httptest.NewRequest(method, path, nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		switch rec.Code {
+		case http.StatusUnauthorized:
+			return
+		case http.StatusSeeOther:
+			if strings.Contains(rec.Header().Get("Location"), "/admin/login") {
+				return
+			}
+		}
+		t.Fatalf("%s %s: anonymous request with require_login_for_reads on expected 401 or redirect to /admin/login, got %d location=%q",
+			method, path, rec.Code, rec.Header().Get("Location"))
+	}
+	assertNotBlocked := func(method, path string) {
+		t.Helper()
+		req := httptest.NewRequest(method, path, nil)
+		req.AddCookie(adminCookie)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code == http.StatusSeeOther && strings.Contains(rec.Header().Get("Location"), "/admin/login") {
+			t.Fatalf("%s %s: authenticated request must not be redirected to login, got %d location=%q",
+				method, path, rec.Code, rec.Header().Get("Location"))
+		}
+	}
+
+	for _, path := range []string{
+		"/t/read_toggle_forms/new",
+		"/t/read_toggle_forms/1/edit",
+		"/migrate",
+		"/match",
+	} {
+		assertBlocked(http.MethodGet, path)
+		assertNotBlocked(http.MethodGet, path)
+	}
+	assertBlocked(http.MethodPost, "/match")
+	assertBlocked(http.MethodPost, "/match/tables")
+}
+
 // TestAuditSessionRefIsNotTheRawToken guards that the audit log records a
 // non-reversible reference to a session rather than the live cookie value,
 // which would otherwise let anyone who could read the log replay a session.
 func TestAuditSessionRefIsNotTheRawToken(t *testing.T) {
-	raw := newSessionID()
+	raw, err := newSessionID()
+	if err != nil {
+		t.Fatal(err)
+	}
 	ref := auditSessionRef(raw)
 	if ref == "" {
 		t.Fatal("expected a non-empty reference for a non-empty session")

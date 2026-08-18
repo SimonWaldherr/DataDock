@@ -46,7 +46,7 @@ func newMatchTablesRequest(t *testing.T, fields map[string]string, files map[str
 // sessionIDFromContext/currentSessionUser to see a logged-in session, e.g.
 // for routes gated by requireLogin/loginRequiredForWrite.
 func withAuthenticatedTestSession(app *App, req *http.Request, username string, role Role) *http.Request {
-	sessionID := newSessionID()
+	sessionID, _ := newSessionID()
 	app.markSessionAuthenticated(sessionID, username, role)
 	return req.WithContext(context.WithValue(req.Context(), sessionIDContextKey{}, sessionID))
 }

@@ -308,13 +308,20 @@ const (
 
 // matchSelectRowsQuery builds the SELECT loadMatchRows uses to read one side
 // of a match: the key column followed by every configured field column, in
-// order, quoted per conn's dialect.
-func matchSelectRowsQuery(conn *DBConnection, table string, cols []string) string {
+// order, quoted per conn's dialect. limit bounds how many rows the database
+// itself returns (SQL Server needs TOP instead of LIMIT, like
+// sampleColumnValuesQuery) so an oversized table is capped before it is
+// pulled into process memory, rather than only rejected afterward.
+func matchSelectRowsQuery(conn *DBConnection, table string, cols []string, limit int) string {
 	quoted := make([]string, len(cols))
 	for i, c := range cols {
 		quoted[i] = conn.QuoteIdent(c)
 	}
-	return fmt.Sprintf("SELECT %s FROM %s", strings.Join(quoted, ", "), conn.QuoteIdent(table))
+	colList := strings.Join(quoted, ", ")
+	if conn.Dialect.Name == "Microsoft SQL Server" {
+		return fmt.Sprintf("SELECT TOP %d %s FROM %s", limit, colList, conn.QuoteIdent(table))
+	}
+	return fmt.Sprintf("SELECT %s FROM %s LIMIT %d", colList, conn.QuoteIdent(table), limit)
 }
 
 // matchResultTableDDL builds the CREATE TABLE statement for a Matching
@@ -803,8 +810,8 @@ func tableObjectsQuery(c *DBConnection) string {
 // Lite's enforcement point (see row_policy.go), is embedded as an escaped
 // SQL string literal rather than a placeholder. This is still safe: the only
 // caller ever passes the acting session's own username (never raw request
-// input) here, and demoSQLString applies the same standard '' quote-doubling
-// escaping used elsewhere in this file for literal SQL text.
+// input) here, and demoSQLString applies the same standard doubled-single-
+// quote escaping used elsewhere in this file for literal SQL text.
 func selectAllQuery(conn *DBConnection, table string, ownerColumn, ownerValue string) string {
 	query := "SELECT * FROM " + conn.QuoteIdent(table)
 	if ownerColumn != "" {

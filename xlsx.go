@@ -255,8 +255,14 @@ func xlsxToCSV(data []byte) ([]byte, error) {
 	var allRows [][]string
 	var header []string
 	maxCols := 0
+	var totalDecompressed uint64
 	for _, name := range sheetNames {
-		rows, err := readXLSXSheetRows(files[name], shared)
+		f := files[name]
+		totalDecompressed += f.UncompressedSize64
+		if totalDecompressed > maxXLSXTotalDecompressedBytes {
+			return nil, fmt.Errorf("worksheets exceed the combined %d byte decompressed-size limit", int64(maxXLSXTotalDecompressedBytes))
+		}
+		rows, err := readXLSXSheetRows(f, shared)
 		if err != nil {
 			return nil, err
 		}
@@ -292,6 +298,13 @@ func xlsxToCSV(data []byte) ([]byte, error) {
 // read.
 const maxXLSXEntryBytes = 128 << 20 // 128 MiB
 
+// maxXLSXTotalDecompressedBytes bounds the sum of every worksheet's
+// decompressed size within one multi-sheet import. Each sheet individually
+// passes the maxXLSXEntryBytes cap, but with no aggregate limit an upload
+// built from many small, highly-compressible sheets can still expand to
+// gigabytes of in-memory rows from a tiny .xlsx file.
+const maxXLSXTotalDecompressedBytes = 256 << 20 // 256 MiB
+
 func readXLSXSheetRows(sheet *zip.File, shared []string) ([][]string, error) {
 	if sheet == nil {
 		return nil, fmt.Errorf("worksheet not found")
@@ -314,6 +327,12 @@ func readXLSXSheetRows(sheet *zip.File, shared []string) ([][]string, error) {
 		out := make([]string, 0, len(row.Cells))
 		for _, cell := range row.Cells {
 			colIdx := xlsxColumnIndex(cell.Ref)
+			if colIdx < 0 {
+				// Cell reference names a column beyond Excel's own ceiling
+				// (real files never do) — skip it rather than padding out
+				// to an attacker-chosen size.
+				continue
+			}
 			for len(out) < colIdx {
 				out = append(out, "")
 			}
@@ -398,6 +417,17 @@ func xlsxCellValue(cell xlsxCell, shared []string) string {
 	}
 }
 
+// maxXLSXColumns matches Excel's real column ceiling (column XFD, the
+// 16384th column). A cell reference computing beyond this is either
+// corrupt or hostile, and xlsxColumnIndex must not hand its caller a value
+// large enough to be used as an allocation/loop bound.
+const maxXLSXColumns = 16384
+
+// xlsxColumnIndex returns the 0-based column index encoded in a cell
+// reference like "AB12". It returns 0 for an empty/absent reference
+// (callers treat that as "no positional info, append sequentially") and -1
+// for a reference naming a column beyond maxXLSXColumns, which callers must
+// skip rather than use to grow a row slice.
 func xlsxColumnIndex(ref string) int {
 	if ref == "" {
 		return 0
@@ -410,6 +440,9 @@ func xlsxColumnIndex(ref string) int {
 			idx = idx*26 + int(r-'a'+1)
 		} else {
 			break
+		}
+		if idx > maxXLSXColumns {
+			return -1
 		}
 	}
 	if idx <= 0 {

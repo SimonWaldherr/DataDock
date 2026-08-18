@@ -268,7 +268,16 @@ func isAPIRequest(r *http.Request) bool {
 // (never an absolute/external URL), falling back to /admin.
 func sanitizeAdminNextPath(raw string) string {
 	raw = strings.TrimSpace(raw)
-	if raw == "" || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
+	if raw == "" || !strings.HasPrefix(raw, "/") {
+		return "/admin"
+	}
+	// Browsers following the WHATWG URL spec normalize backslashes to
+	// forward slashes when resolving an http(s) reference, so a value like
+	// "/\evil.com" resolves the same way "//evil.com" would: as a
+	// scheme-relative reference to a different host. Check for a leading
+	// "//" only after that normalization so this can't be bypassed by
+	// substituting a backslash for either slash.
+	if strings.HasPrefix(strings.ReplaceAll(raw, "\\", "/"), "//") {
 		return "/admin"
 	}
 	return raw
@@ -441,7 +450,10 @@ func (a *App) adminSetupSubmitHandler(w http.ResponseWriter, r *http.Request) {
 		a.serverError(w, err)
 		return
 	}
-	a.rotateSessionOnAuth(w, r, username, RoleAdmin)
+	if _, err := a.rotateSessionOnAuth(w, r, username, RoleAdmin); err != nil {
+		a.serverError(w, err)
+		return
+	}
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
@@ -580,7 +592,10 @@ func (a *App) adminLoginSubmitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.clearLoginFailures(username)
-	a.rotateSessionOnAuth(w, r, user.Username, user.Role)
+	if _, err := a.rotateSessionOnAuth(w, r, user.Username, user.Role); err != nil {
+		a.serverError(w, err)
+		return
+	}
 	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 

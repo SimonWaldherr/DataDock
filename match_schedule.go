@@ -183,8 +183,10 @@ func (a *App) recordMatchScheduleRun(ctx context.Context, configName string, row
 	if err := a.ensureMatchSchedulesTable(ctx); err != nil {
 		return
 	}
-	_, _ = a.execConn(ctx, a.localTinySQLConn(), "match_schedule.record_run", matchSchedulesRecordRunSQL,
-		time.Now().UTC().Format(time.RFC3339), status, rows, configName)
+	if _, err := a.execConn(ctx, a.localTinySQLConn(), "match_schedule.record_run", matchSchedulesRecordRunSQL,
+		time.Now().UTC().Format(time.RFC3339), status, rows, configName); err != nil {
+		log.Printf("scheduled match %q: failed to persist run status: %v", configName, err)
+	}
 }
 
 // saveMatchSchedule validates sched's cron expression, persists it, and
@@ -206,6 +208,13 @@ func (a *App) saveMatchSchedule(ctx context.Context, sched MatchSchedule) error 
 	if err := a.ensureMatchSchedulesTable(ctx); err != nil {
 		return err
 	}
+
+	// No unique constraint on config_name backs this table, so the
+	// read-existing/delete/insert sequence must be serialized against a
+	// concurrent save of the same name or two saves could interleave and
+	// leave duplicate rows (see namedConfigMu).
+	a.namedConfigMu.Lock()
+	defer a.namedConfigMu.Unlock()
 
 	existing, hadExisting, err := a.loadMatchSchedule(ctx, name)
 	if err != nil {

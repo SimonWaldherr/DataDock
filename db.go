@@ -105,6 +105,21 @@ type App struct {
 	logicIndexMu     sync.Mutex
 	logicIndexing    map[string]bool
 	logicIndexStatus map[string]LogicIndexReport
+
+	// recordIDMu serializes insertRecord's MAX(id)-then-INSERT sequence.
+	// Ids are application-assigned rather than DB auto-increment (see
+	// recordMaxIDQuery's doc comment), so without this two concurrent
+	// inserts into the same table could read the same MAX(id) and both
+	// insert with the identical next id.
+	recordIDMu sync.Mutex
+
+	// namedConfigMu serializes the delete-then-insert "upsert by name"
+	// sequence used for admin-configured, name-keyed local tables (match
+	// configs, match schedules, spatial reports): none of those tables has
+	// a real uniqueness constraint on the name column, so two concurrent
+	// saves under the same name could otherwise both succeed and leave
+	// duplicate rows.
+	namedConfigMu sync.Mutex
 }
 
 // sessionAuth is the value stored per authenticated session: which user it
@@ -652,7 +667,13 @@ func (a *App) insertRecord(ctx context.Context, table string, values map[string]
 	if ownerColumn != "" {
 		values = cloneStringMapWithOverride(values, ownerColumn, ownerValue)
 	}
-	// Determine next id via MAX(id)+1.
+	// Determine next id via MAX(id)+1. Ids are application-assigned (not a
+	// DB auto-increment column), so the read-then-write must be serialized
+	// against every other concurrent insertRecord call or two requests can
+	// compute and insert the same id.
+	a.recordIDMu.Lock()
+	defer a.recordIDMu.Unlock()
+
 	conn := a.activeConn(ctx)
 	var maxID sql.NullInt64
 	if rows, err := a.queryConn(ctx, conn, "record.next_id", recordMaxIDQuery(conn, table)); err == nil {
