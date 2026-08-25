@@ -14,8 +14,8 @@ github.com/AzureAD/microsoft-authentication-library-for-go v1.6.0 h1:XRzhVemXdgv
 github.com/AzureAD/microsoft-authentication-library-for-go v1.6.0/go.mod h1:HKpQxkWaGLJ+D/5H8QRpyQXA1eKjxkFlOMwck5+33Jk=
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
-github.com/SimonWaldherr/tinySQL v0.32.2 h1:a1YCzjF21koeSa7s6pWt2nSkDRkSVvvZXyeabTYktZs=
-github.com/SimonWaldherr/tinySQL v0.32.2/go.mod h1:bsH4bz7giYKBWJBFemtqHQcu1TagAUdokC/RafBC3sM=
+github.com/SimonWaldherr/tinySQL v0.36.0 h1:v6nNv6LjsvGufyUr3Vljf8ukdUkRDyyOLjBwT+UkX8Q=
+github.com/SimonWaldherr/tinySQL v0.36.0/go.mod h1:u0G4nIU74UD4lUXH12GLYWUWr4E7eDRxsU+45bcWn74=
 github.com/andybalholm/brotli v1.2.2 h1:HzTuoo2ErYQqf5qvcJInB8uvqSVxRttzkFexPWtnceM=
 github.com/andybalholm/brotli v1.2.2/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=

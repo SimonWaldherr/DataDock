@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/SimonWaldherr/tinySQL v0.32.2
+	github.com/SimonWaldherr/tinySQL v0.36.0
 	github.com/andybalholm/brotli v1.2.2
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jonas-p/go-shp v0.1.1
