@@ -83,6 +83,7 @@ function openSQLInEditor(sql, title, autoRun) {
 
   function applyTheme(theme) {
     root.dataset.theme = theme;
+    syncMonacoTheme();
     try { localStorage.setItem('datadock.theme', theme); } catch (e) {}
   }
 
@@ -485,10 +486,11 @@ function setActiveTopNavFromURL(url) {
   updateTableNavTab(url);
   document.querySelectorAll('.app-nav .btn-nav').forEach(function (a) {
     a.classList.remove('active');
-    if (a.hasAttribute('aria-selected')) a.setAttribute('aria-selected', 'false');
+    a.removeAttribute('aria-current');
   });
   document.querySelectorAll('.app-nav .dropdown-item').forEach(function (a) {
     a.classList.remove('active');
+    a.removeAttribute('aria-current');
   });
 
   document.querySelectorAll('.app-nav .btn-nav').forEach(function (a) {
@@ -496,19 +498,19 @@ function setActiveTopNavFromURL(url) {
     var section = a.dataset.navSection || '';
     if ((section && section === activeSection) || (!section && href && href !== '/' && (path === href || path.indexOf(href + '/') === 0))) {
       a.classList.add('active');
-      if (a.hasAttribute('aria-selected')) a.setAttribute('aria-selected', 'true');
+      if (a.tagName === 'A') a.setAttribute('aria-current', 'page');
     }
   });
   document.querySelectorAll('.app-nav .dropdown-item').forEach(function (a) {
     var href = a.getAttribute('href');
     if (href && href !== '/' && (path === href || path.indexOf(href + '/') === 0)) {
       a.classList.add('active');
+      a.setAttribute('aria-current', 'page');
       var menu = a.closest('.dropdown');
       if (menu) {
         var button = menu.querySelector('.btn-nav');
         if (button) {
           button.classList.add('active');
-          if (button.hasAttribute('aria-selected')) button.setAttribute('aria-selected', 'true');
         }
       }
     }
@@ -972,7 +974,7 @@ var queryTabsKey = 'datadock.queryTabs.v1';
 var queryTabsActiveKey = 'datadock.queryTabs.active.v1';
 var maxLocalQueryHistory = 20;
 var sqlEditor = null;
-var monacoBaseURL = 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.40.0/min';
+var monacoBaseURL = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.56.0/min';
 var queryTabs = [];
 var activeQueryTabID = '';
 var suppressTabSave = false;
@@ -1053,11 +1055,19 @@ var samplePrompts = [
 // navigation re-runs it every time this page loads into the shell, not
 // just on a full browser navigation — see executeScripts() in this file.
 function initQueryPage() {
+  var assistant = document.getElementById('queryAssistant');
+  if (assistant) {
+    try { assistant.open = localStorage.getItem('datadock.queryAssistant.open') === 'true'; } catch (e) {}
+    assistant.addEventListener('toggle', function () {
+      try { localStorage.setItem('datadock.queryAssistant.open', String(assistant.open)); } catch (e) {}
+    });
+  }
   var el = document.querySelector('noscript');
   // noscript is not rendered in DOM so nothing to hide.
 
   var ta = document.getElementById('sqlInput');
   initQueryTabs(ta.value || '');
+  renderActiveTabOutput();
   restoreQueryFromHash();
   loadQueryFromURLParam();
   ta.addEventListener('keydown', function (e) {
@@ -1204,6 +1214,7 @@ function syncActiveTabControls() {
   var viewSelect = document.getElementById('viewModeSelect');
   var filterInput = document.getElementById('logFilterInput');
   if (liveBtn) {
+    liveBtn.setAttribute('aria-pressed', String(!!tab.liveEnabled));
     liveBtn.classList.toggle('btn-success', !!tab.liveEnabled);
     liveBtn.classList.toggle('btn-outline-secondary', !tab.liveEnabled);
     liveBtn.innerHTML = tab.liveEnabled ?
@@ -2289,6 +2300,10 @@ function saveQueryResultHistory(sql, data) {
   }
 }
 
+function queryEmptyState() {
+  return '<div class="query-empty-state"><i class="bi bi-table" aria-hidden="true"></i><div><h2>Ready for your query</h2><p>Run SQL to see results here. Start with an example, or choose a table in the sidebar.</p></div></div>';
+}
+
 function renderActiveTabOutput() {
   var runtime = getQueryTabRuntime(activeQueryTabID);
   var tab = getActiveQueryTab() || {};
@@ -2325,7 +2340,7 @@ function renderActiveTabOutput() {
   lastResultData = null;
   lastErrorMessage = '';
   document.getElementById('statusMsg').textContent = runtime.statusText || '';
-  document.getElementById('resultArea').innerHTML = '';
+  document.getElementById('resultArea').innerHTML = queryEmptyState();
   document.getElementById('chartArea').innerHTML = '';
 }
 
@@ -2349,7 +2364,7 @@ function clearQueryOutput(tabID) {
   lastErrorMessage = '';
   disposeActiveResultMap();
   syncRunButton();
-  document.getElementById('resultArea').innerHTML = '';
+  document.getElementById('resultArea').innerHTML = queryEmptyState();
   document.getElementById('chartArea').innerHTML = '';
   document.getElementById('statusMsg').textContent = '';
   renderQueryTabs();
@@ -2569,22 +2584,27 @@ function loadMonacoEditor() {
     return;
   }
   var script = document.createElement('script');
-  script.src = monacoBaseURL + '/vs/loader.min.js';
+  script.src = monacoBaseURL + '/vs/loader.js';
   script.async = true;
   script.onload = initMonacoEditor;
   script.onerror = function() { sqlEditor = null; };
   document.head.appendChild(script);
 }
 
+function monacoThemeName() {
+  var theme = document.documentElement.dataset.theme;
+  if (theme === 'contrast') return 'hc-light';
+  return theme === 'midnight' || theme === 'solaris' ? 'vs-dark' : 'vs';
+}
+
+function syncMonacoTheme() {
+  if (window.monaco && window.monaco.editor) window.monaco.editor.setTheme(monacoThemeName());
+}
+
 function initMonacoEditor() {
   if (!window.require || !document.getElementById('monacoEditor')) return;
   try {
-    window.MonacoEnvironment = {
-      getWorkerUrl: function() {
-        var code = "self.MonacoEnvironment={baseUrl:'" + monacoBaseURL + "/'};importScripts('" + monacoBaseURL + "/vs/base/worker/workerMain.js');";
-        return 'data:text/javascript;charset=utf-8,' + encodeURIComponent(code);
-      }
-    };
+    // Monaco 0.56 configures its versioned worker URLs and Blob bootstrap.
     require.config({paths: {'vs': monacoBaseURL + '/vs'}});
     require(['vs/editor/editor.main'], function() {
       var textarea = document.getElementById('sqlInput');
@@ -2592,7 +2612,7 @@ function initMonacoEditor() {
       sqlEditor = monaco.editor.create(container, {
         value: textarea.value,
         language: 'sql',
-        theme: 'vs-dark',
+        theme: monacoThemeName(),
         automaticLayout: true,
         minimap: {enabled: false},
         scrollBeyondLastLine: false,
@@ -2604,7 +2624,7 @@ function initMonacoEditor() {
       sqlEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runQuery);
       sqlEditor.addCommand(monaco.KeyCode.F5, runQuery);
       sqlEditor.onDidChangeModelContent(saveActiveQueryTabFromEditor);
-    });
+    }, function() { sqlEditor = null; });
   } catch (e) {
     sqlEditor = null;
   }
@@ -3792,7 +3812,7 @@ function renderQuickChart(data, choiceOverride) {
   drawQuickChart(points, choice.isTimeDim);
 }
 
-// saveQuickChartAsChart POSTs the current Quick Chart (the SQL in #sqlInput
+// saveQuickChartAsChart POSTs the current Quick Chart (the SQL in the editor
 // plus the dimension/measure/aggregation quickChartState already computed by
 // renderQuickChart/aggregateQuickChart above) to the BI foundation's chart
 // API as a minimal Vega-Lite spec. It intentionally does not try to save the
@@ -3804,8 +3824,7 @@ function saveQuickChartAsChart() {
     window.alert('No chart to save yet — run a query first.');
     return;
   }
-  var sqlInput = document.getElementById('sqlInput');
-  var sqlText = sqlInput ? sqlInput.value.trim() : '';
+  var sqlText = getEditorValue().trim();
   if (!sqlText) {
     window.alert('No SQL query to save.');
     return;

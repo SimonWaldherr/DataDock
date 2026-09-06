@@ -97,25 +97,28 @@ func Classify(raw string) Value {
 	return Value{Raw: raw, Kind: KindText}
 }
 
+// mergeKind combines non-blank types. Text is terminal: subsequent values
+// cannot turn a mixed or textual column back into a typed column.
+func mergeKind(kind, next Kind) Kind {
+	if next == KindBlank {
+		return kind
+	}
+	if kind == KindBlank || kind == next {
+		return next
+	}
+	if (kind == KindInt && next == KindFloat) || (kind == KindFloat && next == KindInt) {
+		return KindFloat
+	}
+	return KindText
+}
+
 func InferColumn(values []string) Kind {
 	kind := KindBlank
 	for _, raw := range values {
-		v := Classify(raw)
-		if v.Kind == KindBlank {
-			continue
+		kind = mergeKind(kind, Classify(raw).Kind)
+		if kind == KindText {
+			return kind
 		}
-		if kind == KindBlank {
-			kind = v.Kind
-			continue
-		}
-		if kind == v.Kind {
-			continue
-		}
-		if (kind == KindInt && v.Kind == KindFloat) || (kind == KindFloat && v.Kind == KindInt) {
-			kind = KindFloat
-			continue
-		}
-		return KindText
 	}
 	if kind == KindBlank {
 		return KindText
@@ -125,28 +128,33 @@ func InferColumn(values []string) Kind {
 
 func InferColumns(rows [][]string, columnCount int) []Kind {
 	kinds := make([]Kind, columnCount)
-	for col := 0; col < columnCount; col++ {
-		values := make([]string, 0, len(rows))
+	for col := range kinds {
+		kind := KindBlank
 		for _, row := range rows {
-			if col < len(row) {
-				values = append(values, row[col])
-			} else {
-				values = append(values, "")
+			if col >= len(row) {
+				continue
+			}
+			kind = mergeKind(kind, Classify(row[col]).Kind)
+			if kind == KindText {
+				break
 			}
 		}
-		kinds[col] = InferColumn(values)
+		if kind == KindBlank {
+			kind = KindText
+		}
+		kinds[col] = kind
 	}
 	return kinds
 }
 
 func JSONValue(raw string, kind Kind) any {
-	v := Classify(raw)
-	if v.Kind == KindBlank {
+	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
 	if kind != KindFloat && kind != KindInt && kind != KindBool {
 		return raw
 	}
+	v := Classify(raw)
 	if kind == KindInt && v.Kind == KindInt {
 		return v.Int
 	}

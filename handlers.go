@@ -397,12 +397,17 @@ func (a *App) decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any, in
 }
 
 func (a *App) writeExport(w http.ResponseWriter, columns []string, rows [][]string, format, filenameBase string, opts ...exportOptions) bool {
-	kinds := typed.InferColumns(rows, len(columns))
+	format = strings.ToLower(strings.TrimSpace(format))
+	var kinds []typed.Kind
+	switch format {
+	case "csv-excel", "excel-csv", "json", "ndjson", "xml", "geojson", "geojson-summary", "geojson-stats", "kml", "gpx", "shp", "shapefile", "shpzip", "shp.zip":
+		kinds = typed.InferColumns(rows, len(columns))
+	}
 	exportOpts := exportOptions{}
 	if len(opts) > 0 {
 		exportOpts = opts[0]
 	}
-	switch strings.ToLower(strings.TrimSpace(format)) {
+	switch format {
 	case "", "csv":
 		w.Header().Set("Content-Type", standards.MediaTypeCSV)
 		w.Header().Set("Content-Disposition", exportContentDisposition(filenameBase, "csv"))

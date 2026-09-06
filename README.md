@@ -177,6 +177,10 @@ receive the importer error instead of a partial decode.
 
 ## Quick Start
 
+Build with Go 1.27.1 or newer. The container and CI use the version in `go.mod`.
+See [dependency update notes](docs/dependency-updates.md) for the current upgrade,
+browser compatibility changes, and query-preview benchmark.
+
 ```bash
 # File-backed by default (datadock.db)
 go run .

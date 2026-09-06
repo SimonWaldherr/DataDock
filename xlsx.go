@@ -7,6 +7,7 @@ package main
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"encoding/csv"
 	"encoding/xml"
@@ -46,7 +47,6 @@ func writeXLSX(w http.ResponseWriter, columns []string, rows [][]string) error {
 			`<sheets><sheet name="Result" sheetId="1" r:id="rId1"/></sheets></workbook>`,
 		"xl/styles.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
 			`<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="3"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/><numFmt numFmtId="165" formatCode="yyyy-mm-dd hh:mm:ss"/><numFmt numFmtId="166" formatCode="hh:mm:ss"/></numFmts><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>`,
-		"xl/worksheets/sheet1.xml": xlsxSheetXML(columns, rows, kinds),
 	}
 	order := []string{
 		"[Content_Types].xml",
@@ -62,7 +62,12 @@ func writeXLSX(w http.ResponseWriter, columns []string, rows [][]string) error {
 			_ = zw.Close()
 			return err
 		}
-		if _, err := fw.Write([]byte(files[name])); err != nil {
+		if name == "xl/worksheets/sheet1.xml" {
+			err = writeXLSXSheetXML(fw, columns, rows, kinds)
+		} else {
+			_, err = io.WriteString(fw, files[name])
+		}
+		if err != nil {
 			_ = zw.Close()
 			return err
 		}
@@ -70,19 +75,25 @@ func writeXLSX(w http.ResponseWriter, columns []string, rows [][]string) error {
 	return zw.Close()
 }
 
-func xlsxSheetXML(columns []string, rows [][]string, kinds []typed.Kind) string {
-	var b strings.Builder
+// writeXLSXSheetXML streams worksheet XML with bounded buffering. bufio retains
+// write errors; row endings and the final Flush propagate them to the caller.
+func writeXLSXSheetXML(w io.Writer, columns []string, rows [][]string, kinds []typed.Kind) error {
+	b := bufio.NewWriter(w)
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`)
 	b.WriteString(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>`)
-	writeXLSXRow(&b, 1, columns)
+	if err := writeXLSXRow(b, 1, columns); err != nil {
+		return err
+	}
 	for i, row := range rows {
-		writeXLSXTypedRow(&b, i+2, row, kinds, len(columns))
+		if err := writeXLSXTypedRow(b, i+2, row, kinds, len(columns)); err != nil {
+			return err
+		}
 	}
 	b.WriteString(`</sheetData></worksheet>`)
-	return b.String()
+	return b.Flush()
 }
 
-func writeXLSXRow(b *strings.Builder, rowNum int, values []string) {
+func writeXLSXRow(b *bufio.Writer, rowNum int, values []string) error {
 	b.WriteString(`<row r="`)
 	b.WriteString(strconv.Itoa(rowNum))
 	b.WriteString(`">`)
@@ -90,13 +101,14 @@ func writeXLSXRow(b *strings.Builder, rowNum int, values []string) {
 		b.WriteString(`<c r="`)
 		b.WriteString(xlsxCellRef(i+1, rowNum))
 		b.WriteString(`" t="inlineStr"><is><t>`)
-		b.WriteString(xmlText(value))
+		_ = xml.EscapeText(b, []byte(value))
 		b.WriteString(`</t></is></c>`)
 	}
-	b.WriteString(`</row>`)
+	_, err := b.WriteString(`</row>`)
+	return err
 }
 
-func writeXLSXTypedRow(b *strings.Builder, rowNum int, values []string, kinds []typed.Kind, columnCount int) {
+func writeXLSXTypedRow(b *bufio.Writer, rowNum int, values []string, kinds []typed.Kind, columnCount int) error {
 	b.WriteString(`<row r="`)
 	b.WriteString(strconv.Itoa(rowNum))
 	b.WriteString(`">`)
@@ -111,18 +123,24 @@ func writeXLSXTypedRow(b *strings.Builder, rowNum int, values []string, kinds []
 		}
 		writeXLSXTypedCell(b, i+1, rowNum, value, kind)
 	}
-	b.WriteString(`</row>`)
+	_, err := b.WriteString(`</row>`)
+	return err
 }
 
-func writeXLSXTypedCell(b *strings.Builder, col, rowNum int, value string, kind typed.Kind) {
+func writeXLSXTypedCell(b *bufio.Writer, col, rowNum int, value string, kind typed.Kind) {
 	ref := xlsxCellRef(col, rowNum)
-	classified := typed.Classify(value)
-	if classified.Kind == typed.KindBlank {
+	if strings.TrimSpace(value) == "" {
 		b.WriteString(`<c r="`)
 		b.WriteString(ref)
 		b.WriteString(`"/>`)
 		return
 	}
+	if kind == typed.KindText {
+		writeXLSXTextCell(b, ref, value)
+		return
+	}
+	classified := typed.Classify(value)
+
 	switch kind {
 	case typed.KindInt:
 		if classified.Kind == typed.KindInt {
@@ -164,7 +182,7 @@ func writeXLSXTypedCell(b *strings.Builder, col, rowNum int, value string, kind 
 	writeXLSXTextCell(b, ref, value)
 }
 
-func writeXLSXNumericCell(b *strings.Builder, ref, value, style string) {
+func writeXLSXNumericCell(b *bufio.Writer, ref, value, style string) {
 	b.WriteString(`<c r="`)
 	b.WriteString(ref)
 	if style != "" {
@@ -176,11 +194,11 @@ func writeXLSXNumericCell(b *strings.Builder, ref, value, style string) {
 	b.WriteString(`</v></c>`)
 }
 
-func writeXLSXTextCell(b *strings.Builder, ref, value string) {
+func writeXLSXTextCell(b *bufio.Writer, ref, value string) {
 	b.WriteString(`<c r="`)
 	b.WriteString(ref)
 	b.WriteString(`" t="inlineStr"><is><t>`)
-	b.WriteString(xmlText(value))
+	_ = xml.EscapeText(b, []byte(value))
 	b.WriteString(`</t></is></c>`)
 }
 
@@ -192,12 +210,6 @@ func xlsxCellRef(col, row int) string {
 		col /= 26
 	}
 	return string(letters) + strconv.Itoa(row)
-}
-
-func xmlText(s string) string {
-	var b bytes.Buffer
-	_ = xml.EscapeText(&b, []byte(s))
-	return b.String()
 }
 
 type xlsxSharedStrings struct {

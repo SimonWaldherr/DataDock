@@ -5,9 +5,8 @@
 # binary builds fully static with CGO disabled and runs on distroless/static
 # with no libc.
 # Keep the container toolchain in sync with the minimum version declared in
-# go.mod.  The module graph currently requires Go 1.26.5, which Go 1.25 cannot
-# resolve when GOTOOLCHAIN is local (as it is in the official image).
-FROM golang:1.26.5 AS build
+# go.mod so local, CI, and container builds use the same Go release.
+FROM golang:1.27.1 AS build
 WORKDIR /src
 
 # Resolve modules first so this layer caches unless go.mod/go.sum change.
@@ -25,7 +24,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
 RUN mkdir -p /data
 
 # ---- runtime stage ---------------------------------------------------------
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=build --chown=65532:65532 /data /data
 COPY --from=build /out/datadock /usr/local/bin/datadock
 

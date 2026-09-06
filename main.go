@@ -808,7 +808,7 @@ func securityHeaders(next http.Handler) http.Handler {
 			"default-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "+
 				"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "+
 				"font-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "+
-				"img-src 'self' data:; worker-src 'self' blob: data:; form-action 'self'; frame-ancestors 'none'; base-uri 'self'")
+				"img-src 'self' data: blob:; worker-src 'self' blob: data:; form-action 'self'; frame-ancestors 'none'; base-uri 'self'")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		// Belt-and-suspenders alongside the CSP's frame-ancestors 'none' for

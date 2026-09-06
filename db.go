@@ -889,12 +889,7 @@ func (a *App) queryRowsWindow(ctx context.Context, query string, offset, limit i
 	defer cancel()
 	conn := a.activeConn(ctx)
 	if conn != nil && conn.IsTinySQL() {
-		cols, rows, err := a.queryTinySQLRows(ctx, query)
-		if err != nil {
-			return nil, nil, false, err
-		}
-		outCols, outRows, hasMore := sliceRowsWindow(cols, rows, offset, limit)
-		return outCols, outRows, hasMore, nil
+		return a.queryTinySQLRowsWindow(ctx, query, offset, limit)
 	}
 	rows, err := a.queryConn(ctx, conn, "query.rows", query)
 	if err != nil {
@@ -902,6 +897,49 @@ func (a *App) queryRowsWindow(ctx context.Context, query string, offset, limit i
 	}
 	defer rows.Close()
 	return scanRowsWindow(rows, offset, limit)
+}
+
+// queryTinySQLRowsWindow consumes only the requested page plus one lookahead
+// row. tinySQL streams simple scans directly; sorts and aggregates retain the
+// engine's materialized execution. Always close early to release the producer.
+func (a *App) queryTinySQLRowsWindow(ctx context.Context, query string, offset, limit int) ([]string, [][]string, bool, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	stream, err := tinysql.ExecSQLStreamWithOptions(tinysql.WithAuditText(ctx, query), a.nativeDB, a.tenant, query,
+		tinysql.StreamOptions{Buffer: min(limit, tinysql.DefaultStreamBuffer)})
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer stream.Close()
+	cols := stream.Columns()
+	var rows [][]string
+	for stream.Next() {
+		if offset > 0 {
+			offset--
+			continue
+		}
+		if len(rows) == limit {
+			// Close waits for production to stop and preserves real query errors.
+			if err := stream.Close(); err != nil {
+				return nil, nil, false, err
+			}
+			return cols, rows, true, nil
+		}
+		row := stream.Row()
+		values := make([]string, len(cols))
+		for i, col := range cols {
+			values[i] = fmt.Sprint(row[col])
+		}
+		rows = append(rows, values)
+	}
+	if err := stream.Err(); err != nil {
+		return nil, nil, false, err
+	}
+	return cols, rows, false, nil
 }
 
 func (a *App) queryTinySQLRows(ctx context.Context, query string) ([]string, [][]string, error) {

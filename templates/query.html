@@ -7,7 +7,8 @@
 
 {{template "alert" .}}
 
-<div class="card">
+<details class="card query-assistant" id="queryAssistant">
+  <summary><span><i class="bi bi-stars" aria-hidden="true"></i> SQL assistant</span><span class="assistant-summary-hint">Write, review, or explain a query</span><i class="bi bi-chevron-down assistant-chevron" aria-hidden="true"></i></summary>
   <div class="card-body py-2">
     <div class="d-flex flex-column gap-2">
       <label class="visually-hidden" for="llmPrompt">Ask the SQL assistant</label>
@@ -59,9 +60,9 @@
       </div>
     </div>
   </div>
-</div>
+</details>
 
-<div class="card">
+<div class="card query-workspace">
   <div class="card-body pb-2">
     <div class="query-tabbar d-flex align-items-center gap-1 mb-2">
       <div id="queryTabs" class="nav nav-tabs flex-nowrap overflow-auto" role="tablist" aria-label="Query tabs"></div>
@@ -73,14 +74,11 @@
     <textarea id="sqlInput" class="sql-editor" rows="6"
               placeholder="SELECT * FROM your_table LIMIT 100"
               spellcheck="false">{{.SQL}}</textarea>
-    <div id="monacoEditor" class="d-none" style="height:220px;border-radius:.4rem;overflow:hidden;border:1px solid #444" role="region" aria-label="SQL editor"></div>
-    <div class="toolbar mt-2 mb-1">
+    <div id="monacoEditor" class="d-none query-monaco" role="region" aria-label="SQL editor"></div>
+    <div class="toolbar query-actions mt-2 mb-1" aria-label="Query actions">
       <button id="runBtn" class="btn btn-primary btn-sm" onclick="handleRunButtonClick()">
         <i id="runBtnIcon" class="bi bi-play-fill me-1"></i><span id="runBtnLabel">Run</span>
         <kbd id="runBtnKbd" class="ms-1 opacity-75" style="font-size:.65rem">Ctrl+Enter</kbd>
-      </button>
-      <button class="btn btn-outline-secondary btn-sm" onclick="clearEditor()">
-        <i class="bi bi-x-lg me-1"></i>Clear
       </button>
       <div class="dropdown">
         <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
@@ -88,33 +86,23 @@
         </button>
         <ul id="sampleQueryMenu" class="dropdown-menu"></ul>
       </div>
-      <button class="btn btn-outline-secondary btn-sm" onclick="shareQuery()">
-        <i class="bi bi-link-45deg me-1"></i>Share
-      </button>
-      <button class="btn btn-outline-secondary btn-sm" onclick="saveCurrentQuery()" title="Save this SQL to the BI dashboard foundation's Saved Queries list">
+      <button class="btn btn-outline-secondary btn-sm" onclick="saveCurrentQuery()" title="Save this SQL query">
         <i class="bi bi-bookmark-plus me-1"></i>Save Query
       </button>
-      <a class="btn btn-outline-secondary btn-sm" href="/queries">
-        <i class="bi bi-bookmarks me-1"></i>Saved Queries
-      </a>
-      <a class="btn btn-outline-secondary btn-sm" href="/history">
-        <i class="bi bi-clock-history me-1"></i>History
-      </a>
-      <button class="btn btn-outline-secondary btn-sm" onclick="toggleSchemaPreview()">
-        <i class="bi bi-diagram-3 me-1"></i>Schema
-      </button>
-      <button id="liveToggleBtn" class="btn btn-outline-secondary btn-sm" onclick="toggleLiveQuery()">
-        <i class="bi bi-broadcast me-1"></i>Live
-      </button>
-      <label class="visually-hidden" for="liveIntervalSelect">Live refresh interval</label>
-      <select id="liveIntervalSelect" class="form-select form-select-sm query-live-select" onchange="setLiveInterval(this.value)" title="Live refresh interval">
-        <option value="1000">1s</option>
-        <option value="2000">2s</option>
-        <option value="5000" selected>5s</option>
-        <option value="15000">15s</option>
-        <option value="30000">30s</option>
-        <option value="60000">1m</option>
-      </select>
+      <div class="dropdown ms-auto">
+        <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false"><i class="bi bi-three-dots me-1"></i>Query tools</button>
+        <ul class="dropdown-menu dropdown-menu-end">
+          <li><button class="dropdown-item" type="button" onclick="shareQuery()"><i class="bi bi-link-45deg me-2"></i>Share query</button></li>
+          <li><button class="dropdown-item" type="button" onclick="toggleSchemaPreview()"><i class="bi bi-diagram-3 me-2"></i>Schema context</button></li>
+          <li><a class="dropdown-item" href="/queries"><i class="bi bi-bookmarks me-2"></i>Saved queries</a></li>
+          <li><a class="dropdown-item" href="/history"><i class="bi bi-clock-history me-2"></i>Query history</a></li>
+          <li><hr class="dropdown-divider"></li>
+          <li><button class="dropdown-item" type="button" onclick="clearEditor()"><i class="bi bi-x-lg me-2"></i>Clear editor</button></li>
+        </ul>
+      </div>
+    </div>
+    <div class="toolbar query-result-controls" aria-label="Result options">
+      <span class="query-control-label">Results</span>
       <label class="visually-hidden" for="viewModeSelect">Result view mode</label>
       <select id="viewModeSelect" class="form-select form-select-sm query-view-select" onchange="setQueryViewMode(this.value)" title="Result view mode">
         <option value="table">Table</option>
@@ -127,6 +115,19 @@
         <option value="profile">Profile</option>
         <option value="schema">Schema</option>
         <option value="notebook">Notebook</option>
+      </select>
+      <span class="query-control-divider" aria-hidden="true"></span>
+      <button id="liveToggleBtn" class="btn btn-outline-secondary btn-sm" onclick="toggleLiveQuery()">
+        <i class="bi bi-broadcast me-1"></i>Live
+      </button>
+      <label class="visually-hidden" for="liveIntervalSelect">Live refresh interval</label>
+      <select id="liveIntervalSelect" class="form-select form-select-sm query-live-select" onchange="setLiveInterval(this.value)" title="Live refresh interval">
+        <option value="1000">1s</option>
+        <option value="2000">2s</option>
+        <option value="5000" selected>5s</option>
+        <option value="15000">15s</option>
+        <option value="30000">30s</option>
+        <option value="60000">1m</option>
       </select>
       <input id="logFilterInput" class="form-control form-control-sm query-log-filter d-none"
              placeholder="Filter logs" oninput="setLogFilter(this.value)" spellcheck="false">
@@ -151,7 +152,8 @@
           <li><button class="dropdown-item" type="button" onclick="exportQuery('xlsx')"><i class="bi bi-file-earmark-spreadsheet me-2"></i>XLSX</button></li>
         </ul>
       </div>
-      <span id="statusMsg" class="small text-muted ms-2" role="status" aria-live="polite"></span>
+    </div>
+    <div class="query-status-line"><span id="statusMsg" class="small text-muted" role="status" aria-live="polite"></span><span class="query-selection-hint">Select part of your SQL to run only that selection.</span>
     </div>
   </div>
 </div>
